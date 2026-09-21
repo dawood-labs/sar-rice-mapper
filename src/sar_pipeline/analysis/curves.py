@@ -141,3 +141,111 @@ def plot_panels(panels, out_path, title=None, subtitle=None, ylabel="VH (dB)",
     fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+#: Sequential blue ramp (light -> dark) for heatmaps: one hue, never a rainbow.
+SEQUENTIAL = ["#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
+              "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
+
+
+def _title_band(fig, title, subtitle):
+    height_in = fig.get_size_inches()[1]
+    band_in = 0.0
+    if title:
+        fig.text(0.012, 1 - 0.28 / height_in, title, fontsize=13, color=INK, ha="left", va="top")
+        band_in = 0.46
+    if subtitle:
+        fig.text(0.012, 1 - (band_in + 0.20) / height_in, subtitle, fontsize=9.5,
+                 color=INK_SECONDARY, ha="left", va="top")
+        band_in += 0.36
+    return 1 - (band_in + 0.14) / height_in if band_in else 1.0
+
+
+def plot_heatmap(table, out_path, title=None, subtitle=None, unit="", vmin=None, vmax=None,
+                 fmt="{:.0f}", rotate=0):
+    """A labelled heatmap of a (rows x columns) table, every cell annotated with its value.
+
+    Used for "which group floods in which month" style evidence, where the reader needs the exact
+    number, not just a colour. Missing cells are left blank rather than coloured as zero.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap
+
+    values = np.asarray(table.to_numpy(), dtype=float)
+    cmap = LinearSegmentedColormap.from_list("seq", SEQUENTIAL)
+    cmap.set_bad(SURFACE)
+    fig, ax = plt.subplots(figsize=(max(6.5, 1.0 + 0.62 * values.shape[1]),
+                                    max(3.2, 1.4 + 0.42 * values.shape[0])), facecolor=SURFACE)
+    im = ax.imshow(np.ma.masked_invalid(values), cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+    lo = np.nanmin(values) if vmin is None else vmin
+    hi = np.nanmax(values) if vmax is None else vmax
+    for (i, j), v in np.ndenumerate(values):
+        if np.isfinite(v):
+            dark = (v - lo) / (hi - lo + 1e-9) > 0.55
+            ax.text(j, i, fmt.format(v), ha="center", va="center", fontsize=8,
+                    color="#ffffff" if dark else INK)
+    ax.set_xticks(range(values.shape[1]), [str(c) for c in table.columns], fontsize=8,
+                  color=INK_SECONDARY, rotation=rotate, ha="right" if rotate else "center")
+    ax.set_yticks(range(values.shape[0]), [str(r) for r in table.index], fontsize=8.5,
+                  color=INK_SECONDARY)
+    ax.tick_params(length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    bar = fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    bar.set_label(unit, fontsize=9, color=INK_SECONDARY)
+    bar.outline.set_visible(False)
+    bar.ax.tick_params(colors=INK_SECONDARY, labelsize=8)
+    fig.tight_layout(rect=(0, 0, 1, _title_band(fig, title, subtitle)))
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def plot_grouped_bars(table, out_path, title=None, subtitle=None, ylabel="", ymax=None,
+                      fmt="{:.0f}", rotate=0):
+    """Grouped bars: one group per row of ``table``, one bar per column (at most three columns).
+
+    Every bar is labelled with its value, and a legend names the columns, so identity never rests
+    on colour alone.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if table.shape[1] > MAX_SERIES:
+        raise ValueError(f"at most {MAX_SERIES} bar series keep the palette colour-vision safe")
+    n_rows, n_cols = table.shape
+    width = 0.8 / n_cols
+    top = float(np.nanmax(table.to_numpy(dtype=float))) if ymax is None else float(ymax)
+    offset = 0.01 * top           # label gap scales with the data, not a fixed unit
+    fig, ax = plt.subplots(figsize=(1.2 + 0.9 * n_rows, 4.2), facecolor=SURFACE)
+    ax.set_facecolor(SURFACE)
+    x = np.arange(n_rows)
+    for k, col in enumerate(table.columns):
+        vals = table[col].to_numpy(dtype=float)
+        bars = ax.bar(x + (k - (n_cols - 1) / 2) * width, vals, width * 0.92,
+                      color=SERIES_COLORS[k], label=str(col))
+        for b, v in zip(bars, vals):
+            ax.text(b.get_x() + b.get_width() / 2, v + offset, fmt.format(v), ha="center",
+                    va="bottom", fontsize=7, color=INK_SECONDARY)
+    ax.set_xticks(x, [str(i) for i in table.index], fontsize=8.5, color=INK_SECONDARY,
+                  rotation=rotate, ha="right" if rotate else "center")
+    ax.set_ylabel(ylabel, fontsize=9, color=INK_SECONDARY)
+    if ymax is not None:
+        ax.set_ylim(0, ymax)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    for spine in ("left", "bottom"):
+        ax.spines[spine].set_color(INK_MUTED)
+    ax.grid(True, axis="y", color=INK_MUTED, alpha=0.18)
+    ax.set_axisbelow(True)
+    ax.tick_params(colors=INK_SECONDARY, labelsize=8, length=3)
+    if n_cols > 1:   # a single series is named by the title; a legend box would only add clutter
+        ax.legend(frameon=False, fontsize=8.5, labelcolor=INK_SECONDARY, ncol=n_cols,
+                  loc="upper left", bbox_to_anchor=(0, 1.02))
+    fig.tight_layout(rect=(0, 0, 1, _title_band(fig, title, subtitle)))
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return out_path

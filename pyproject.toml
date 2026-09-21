@@ -25,6 +25,7 @@ dependencies = [
     "pyarrow>=14",
     "tqdm>=4.66",
     "psutil>=5.9",
+    "markdown>=3.4",
 ]
 
 [project.optional-dependencies]
