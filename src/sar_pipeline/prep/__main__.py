@@ -5,9 +5,12 @@ Steps:
                    of a deduplicated per-AOI folder against the original file
   s1-availability  Sentinel-1 tracks, platforms and acquisition dates per month over the AOI
                    bounding box, read from Earth Engine metadata only
+  batch-configs    one config (and AOI file) per AOI from a template, tracks left empty
+  batch-tracks     after each AOI's audit, choose its tracks by rule and write the reasons
 
-Both steps are read-only: nothing is written to a run folder, no Earth Engine task is created and
-nothing is uploaded. Run them before `grid`, while you are still choosing the season window.
+None of these steps creates an Earth Engine task or uploads anything. `aoi-qc` and
+`s1-availability` only read; the two batch steps write config files (gitignored) and, for
+`batch-tracks`, a CSV of the reasons behind every track choice under processed/_batch/.
 """
 from __future__ import annotations
 
@@ -48,7 +51,91 @@ def _parser() -> argparse.ArgumentParser:
     av.add_argument("--min-dates", type=int, default=4,
                     help="flag months with fewer distinct dates than this (default: 4)")
     av.add_argument("--json", dest="as_json", action="store_true", help="print JSON instead of text")
+
+    bc = sub.add_parser("batch-configs", help="write one config per AOI from a template")
+    bc.add_argument("--template", required=True, help="a working config to copy settings from")
+    bc.add_argument("--split-dir", required=True, help="folder with one sub-folder per AOI")
+    bc.add_argument("--season-key", required=True)
+    bc.add_argument("--start", required=True, help="season start YYYY-MM-DD (inclusive)")
+    bc.add_argument("--end", required=True, help="season end YYYY-MM-DD (exclusive)")
+    bc.add_argument("--ids", nargs="*", type=int, default=None, help="only these AOI ids")
+    bc.add_argument("--force", action="store_true", help="overwrite configs that already have tracks")
+
+    bt = sub.add_parser("batch-tracks", help="fill s1.tracks from each AOI's latest audit")
+    bt.add_argument("--season-key", required=True)
+    bt.add_argument("--flood-start", required=True, help="flooding window start YYYY-MM-DD")
+    bt.add_argument("--flood-end", required=True, help="flooding window end YYYY-MM-DD")
+    bt.add_argument("--max-gap-days", type=int, default=20)
+    bt.add_argument("--fallback-secondary", action="store_true",
+                    help="if no second track is eligible, allow one excluded only for a flooding gap "
+                         "as secondary (confirmation only, never primary)")
     return parser
+
+
+def _run_batch_configs(args) -> int:
+    import shutil
+    import yaml
+    from . import batch
+
+    template = yaml.safe_load(Path(args.template).read_text())
+    ids = args.ids or batch.aoi_ids_in(args.split_dir)
+    written = skipped = 0
+    for aoi_id in ids:
+        folder = next(Path(args.split_dir).glob(f"*_{aoi_id:03d}"), None)
+        source = next(folder.glob(f"*_{aoi_id:03d}.gpkg"), None) if folder else None
+        if source is None:
+            print(f"AOI {aoi_id}: no split file found, skipped")
+            skipped += 1
+            continue
+        aoi_path = Path("data/aoi") / f"aoi_{aoi_id:03d}.gpkg"   # padded: see README "Running many AOIs"
+        if not aoi_path.exists():
+            aoi_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, aoi_path)
+        out = Path("config") / f"aoi{aoi_id}_{args.season_key}.yaml"
+        if out.exists() and not args.force:
+            existing = yaml.safe_load(out.read_text()) or {}
+            if (existing.get("s1") or {}).get("tracks"):
+                skipped += 1
+                continue
+        out.write_text(batch.render_config(template, aoi_id, str(aoi_path), args.season_key,
+                                           args.start, args.end))
+        written += 1
+    print(f"configs written: {written}, skipped: {skipped}, AOIs: {len(ids)}")
+    return 0
+
+
+def _run_batch_tracks(args) -> int:
+    import pandas as pd
+    import yaml
+    from . import batch
+
+    rows = []
+    configs = sorted(Path("config").glob(f"aoi*_{args.season_key}.yaml"))
+    for path in configs:
+        cfg = config_mod.load_config(path)
+        try:
+            audit = config_mod.latest_audit_dir(cfg)
+        except Exception as exc:  # no audit yet for this AOI
+            rows.append({"config": path.name, "primary": None, "secondary": None,
+                         "reasons": f"no audit: {exc}"})
+            continue
+        choice = batch.choose_tracks_from_audit(audit, (args.flood_start, args.flood_end),
+                                                max_gap_days=args.max_gap_days,
+                                                fallback_secondary=args.fallback_secondary)
+        raw = yaml.safe_load(path.read_text())
+        raw["s1"]["tracks"] = choice.tracks
+        header = "".join(line + "\n" for line in path.read_text().splitlines() if line.startswith("#"))
+        path.write_text(header + yaml.safe_dump(raw, sort_keys=False, default_flow_style=None))
+        rows.append({"config": path.name, "primary": choice.primary, "secondary": choice.secondary,
+                     "reasons": " | ".join(f"{k}: {v}" for k, v in choice.reasons.items())})
+    table = pd.DataFrame(rows)
+    out = Path("processed") / "_batch" / f"{args.season_key}_track_choice.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(out, index=False)
+    print(table[["config", "primary", "secondary"]].to_string(index=False))
+    print(f"\nno primary track: {int(table['primary'].isna().sum())} of {len(table)}")
+    print(f"reasons for every choice: {out}")
+    return 0
 
 
 def _run_aoi_qc(cfg: dict, args) -> int:
@@ -161,6 +248,10 @@ def _run_s1_availability(cfg: dict, args) -> int:
 def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = _parser().parse_args(argv)
+    if args.step == "batch-configs":
+        return _run_batch_configs(args)
+    if args.step == "batch-tracks":
+        return _run_batch_tracks(args)
     cfg = config_mod.load_config(args.config)
     if args.step == "aoi-qc":
         return _run_aoi_qc(cfg, args)

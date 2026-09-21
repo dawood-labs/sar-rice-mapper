@@ -173,6 +173,42 @@ The full procedure, including every checkpoint where a human must look before co
 
 ---
 
+## Running many AOIs
+
+When the AOIs are many separate polygons, run **one config per AOI** rather than one merged AOI.
+A merged AOI gets one grid over the whole bounding box; for scattered fields that is mostly empty
+pixels (in one real case about a billion, against nine million for per-AOI grids). Per-AOI configs
+also let every AOI use the tracks that cover it best.
+
+```bash
+# 1. One config per AOI, all copied from one working config (tracks left empty)
+python -m sar_pipeline.prep batch-configs --template config/<working>.yaml \
+    --split-dir data/aoi/<split_folder> --season-key year2025 --start 2025-05-01 --end 2026-05-01
+
+# 2. Grid + audit for every AOI (here four at a time)
+ls config/*_year2025.yaml | xargs -P 4 -I{} sh -c \
+    'python -m sar_pipeline --config {} grid && python -m sar_pipeline --config {} audit'
+
+# 3. Choose each AOI's tracks by rule, and record why
+python -m sar_pipeline.prep batch-tracks --season-key year2025 \
+    --flood-start 2025-05-01 --flood-end 2025-08-31
+#   -> reasons for every choice: processed/_batch/year2025_track_choice.csv
+
+# 4. Then new-run, export (dry run first!), monitor, download, stack per config, as for one AOI
+```
+
+**The track rule** (`prep/batch.py`, `choose_tracks`), so choices are the same everywhere and can be
+checked afterwards: a track must cover >= 90% of the AOI and have at least half the best track's
+acquisitions; it is **excluded** if any gap longer than 20 days overlaps the flooding window (the
+flooded period lasts about three weeks, so a longer blind spot can miss it entirely); the best
+remaining track is primary and the next is secondary, at most two.
+
+**Name AOI files distinctively** (`batch-configs` zero-pads the id to three digits). The hygiene
+test treats every AOI file name in a local config as private, and a short unpadded name made of the
+prefix plus a single digit also matches ordinary code, such as the EPSG:4326 helpers.
+
+---
+
 ## Working without ground truth
 
 The `analysis` package ([docs/08_analysis.md](docs/08_analysis.md)) assumes you have **labelled

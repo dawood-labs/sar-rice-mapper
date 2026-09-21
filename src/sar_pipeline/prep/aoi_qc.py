@@ -43,7 +43,7 @@ import pandas as pd
 #: Exact conversion: 1 international acre = 4046.8564224 m².
 SQM_PER_ACRE = 4046.8564224
 
-#: Trailing digits in a per-AOI filename, e.g. ``AOI_017.gpkg`` -> 17.
+#: Trailing digits in a per-AOI filename, e.g. ``SET_017.gpkg`` -> 17.
 _NUMBER_IN_NAME = re.compile(r"_(\d+)\.[A-Za-z]+$")
 
 

@@ -24,7 +24,7 @@ def frame(rows: list[tuple[int, Polygon]]) -> gpd.GeoDataFrame:
                             geometry=[r[1] for r in rows], crs="EPSG:4326")
 
 
-def write_split(tmp_path, rows: list[tuple[int, Polygon]], stem: str = "AOI"):
+def write_split(tmp_path, rows: list[tuple[int, Polygon]], stem: str = "SET"):
     """Write one-feature-per-file AOIs the way a split/dedup job would."""
     paths = []
     for aoi_id, geom in rows:
@@ -94,9 +94,9 @@ def test_crosscheck_detects_a_shape_that_is_not_in_the_original(tmp_path):
 def test_crosscheck_flags_renumbered_files(tmp_path):
     """A split that renumbers its outputs loses traceability back to the original ids."""
     a = square(0, 0)
-    folder = tmp_path / "AOI_001"
+    folder = tmp_path / "SET_001"
     folder.mkdir()
-    frame([(77, a)]).to_file(folder / "AOI_001.gpkg", driver="GPKG")   # filename says 1, field says 77
+    frame([(77, a)]).to_file(folder / "SET_001.gpkg", driver="GPKG")   # filename says 1, field says 77
 
     report = aoi_qc.crosscheck(frame([(1, a)]), aoi_qc.read_split_aois(tmp_path.glob("*/*.gpkg")))
 
@@ -105,9 +105,9 @@ def test_crosscheck_flags_renumbered_files(tmp_path):
 
 
 def test_read_split_aois_refuses_a_multi_feature_file(tmp_path):
-    folder = tmp_path / "AOI_001"
+    folder = tmp_path / "SET_001"
     folder.mkdir()
-    frame([(1, square(0, 0)), (2, square(1, 1))]).to_file(folder / "AOI_001.gpkg", driver="GPKG")
+    frame([(1, square(0, 0)), (2, square(1, 1))]).to_file(folder / "SET_001.gpkg", driver="GPKG")
     with pytest.raises(ValueError, match="expected exactly 1 feature"):
         aoi_qc.read_split_aois(tmp_path.glob("*/*.gpkg"))
 
