@@ -230,10 +230,22 @@ def bounded_geometry(geom, max_vertices: int | None = None):
 
 
 def _ee_geometry(geom):
-    """shapely (EPSG:4326) -> ee.Geometry, capped at MAX_GEOM_VERTICES."""
+    """shapely (EPSG:4326) -> ee.Geometry, capped at MAX_GEOM_VERTICES.
+
+    Z is dropped on the way. Sentinel-1 footprints come back from Earth Engine carrying a third,
+    always-zero coordinate, and `ee.Geometry` rejects 3D GeoJSON with the unhelpful message
+    "Invalid GeoJSON geometry" - which points at the geometry rather than at its dimensionality.
+    Earth Engine has no use for Z here, so it is stripped rather than passed through.
+
+    An empty or missing geometry is reported as such, for the same reason: the Earth Engine error
+    for an empty ring is also "Invalid GeoJSON geometry", and that is impossible to debug.
+    """
     import ee
 
-    return ee.Geometry(mapping(bounded_geometry(geom)), proj="EPSG:4326", geodesic=False)
+    geom = bounded_geometry(geom)
+    if geom is None or geom.is_empty:
+        raise ValueError("cannot build an Earth Engine geometry from an empty geometry")
+    return ee.Geometry(mapping(shapely.force_2d(geom)), proj="EPSG:4326", geodesic=False)
 
 
 def plan_batches(records: list[dict], weight=None, max_weight: int | None = None,
