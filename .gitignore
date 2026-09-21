@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# SECURITY: this repository is PUBLIC.
+# Never commit credentials, client data, client-specific configs or outputs.
+# ---------------------------------------------------------------------------
+
+# Credentials / secrets
+secrets/
+*.pem
+*.key
+.env
+*service_account*.json
+*credentials*.json
+gcs_*.json
+
+# Client data (AOIs, ground-control polygons) and reference material
+data/
+reference/
+
+# Pipeline outputs
+processed/
+
+# Client-specific configs (only *.example.yaml files are tracked)
+config/*.yaml
+!config/*.example.yaml
+
+# Raster outputs anywhere
+*.tif
+*.tiff
+*.vrt
+*.aux.xml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Logs, figures and vector files (they can reveal project locations)
+*.log
+logs/
+*.png
+*.jpg
+*.jpeg
+!docs/**/*.png
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.qmd
+*.geojson
+*.kml
+*.kmz
+*.parquet
+
+# Private assistant context (project-specific)
+CLAUDE.local.md

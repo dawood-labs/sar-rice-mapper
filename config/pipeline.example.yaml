@@ -1,0 +1,115 @@
+# Example pipeline configuration.
+#
+# HOW TO USE
+#   1. Copy this file:   cp config/pipeline.example.yaml config/<aoi>_<season>.yaml
+#   2. Replace every <placeholder>.
+#   3. Your copy is gitignored (config/*.yaml) - it may contain bucket / project names.
+#
+# All paths are relative to the project root (the parent folder of config/).
+# Full field reference: docs/developer/interfaces.md  (section "Config schema")
+
+aoi:
+  key: my_aoi                          # short folder-safe name, used in processed/<aoi.key>/
+  path: "data/aoi/<folder>/<aoi>.shp"  # any vector format geopandas can read (SHP, GPKG)
+
+season:
+  key: season2026                      # short folder-safe name, used in processed/<aoi>/<season.key>/
+  timezone: UTC                        # IANA time zone of the AOI; only adds a local-date column next to UTC dates
+  start: "2026-04-01"                  # inclusive
+  end: "2026-12-01"                    # exclusive (Earth Engine filterDate semantics)
+
+auth:
+  key_file: secrets/<service-account-key>.json   # never commit this file
+  project: <earth-engine-cloud-project>
+
+gcs:
+  bucket: <gcs-bucket-name>
+  base_folder: <project-folder-inside-bucket>
+
+gcps:                                  # optional: labelled polygons for analysis (keep under data/, never commit)
+  path: "data/gcps/<folder>/<polygons>.shp"
+  class_field: <class-name-field>
+  id_field: <class-code-field>
+
+grid:
+  crs: "EPSG:<projected-crs-code>"   # ONE projected CRS (e.g. the UTM zone covering most of the AOI), used for the whole grid
+  res: 10              # output pixel size in metres
+  buffer_m: 100        # margin added around the AOI
+  chunk_px: 512        # chunk size in pixels (512 px * 10 m = 5.12 km). Use larger (e.g. 2048) for very large AOIs
+
+resources:             # "auto" = decided at runtime from the machine (container/cgroup aware). Never hard-code.
+  cpus: auto             # usable CPUs; or an integer to cap
+  memory_fraction: 0.6   # share of AVAILABLE RAM the pipeline may plan to use
+  io_threads: auto       # download threads (network bound)
+  cpu_workers: auto      # processes for raster QA / local computation
+
+s1:
+  collection: COPERNICUS/S1_GRD_FLOAT  # linear power; filtering must happen in linear scale
+  instrument_mode: IW
+  pols: [VV, VH]
+  tracks: []           # filled after reviewing the audit, e.g. [{track_id: RO123_ASC, role: primary}]
+
+audit:
+  min_aoi_coverage_pct: 90
+  max_gap_days: 12
+  compute_incidence_angle: true
+  constellation_events: []   # e.g. [{date: "2026-06-29", note: "Sentinel-1A end of operations"}]
+
+rain:
+  enabled: true
+  primary: NASA/GPM_L3/IMERG_V07
+  fallback: JAXA/GPM_L3/GSMaP/v8/operational
+  level: aoi           # aoi | chunk
+
+ard:
+  border_noise_correction: false      # extra far-range mask (Hird et al. 2017); current GRD data already has border noise removed, and the mask drops ~5% valid data
+  terrain_flattening: true
+  terrain_flattening_model: VOLUME     # VOLUME (vegetated land) | DIRECT
+  dem: COPERNICUS/DEM/GLO30_2024_1
+  layover_shadow_buffer_m: 0
+  speckle_filter: REFINED LEE          # BOXCAR | LEE | GAMMA MAP | REFINED LEE | LEE SIGMA
+  speckle_kernel: 5
+  multitemporal: true
+  temporal_half_window: 3              # +/- N neighbouring acquisitions of the same track
+  output_format: DB
+
+export:
+  dtype: float32       # float32 | int16 (int16 stores dB * int16_scale; halves storage)
+  int16_scale: 100
+  nodata_float32: -9999
+  nodata_int16: -32768
+  max_workers: auto     # task-submission threads; bound by the Earth Engine API, not by local CPUs
+  max_queued_tasks: 3000       # Earth Engine project-wide limit on queued (READY+RUNNING) tasks
+  queue_safety_margin: 0.9     # use at most 90% of that limit (other jobs may share the project)
+  max_active_tasks: auto       # auto = only the project queue headroom limits submission; or an int to cap this run
+  submit_max_attempts: 5
+  task_max_attempts: 3
+  split_on_resource_error: true
+  poll_seconds: 30
+
+qa:
+  min_valid_pct: 80
+  acknowledged_issues: []
+
+analysis:                       # ground-truth analysis: python -m sar_pipeline.analysis <step> (docs/08_analysis.md)
+  target_class: "<class-name>"  # class of interest, spelled exactly as in gcps.class_field
+  window_px: 5                  # odd window (pixels) averaged in linear power around each pixel; damps residual speckle
+  bins:
+    kind: half_month            # half_month (1-15, 16-end of month) | days (fixed N-day bins)
+    days: 15                    # bin length when kind is days
+    start: null                 # first date used, "YYYY-MM-DD"; null = season.start. Pick it from the crop calendar:
+                                # data long before planting adds features but no information (half_month needs day 1 or 16)
+  rain_mm_24h: 5                # an acquisition with more rain in the previous 24 h is dropped when its bin has a dry one
+  max_pixels_per_field: 200     # cap so large fields do not dominate training (fixed seed)
+  border_m: 10                  # pixels closer than this to a field edge are "border" pixels
+  group_cell_m: 5000            # spatial CV groups: fields in the same cell are always in the same fold
+  seed: 0
+  cv_folds: 5
+  rf:                           # fixed diagnostic Random Forest (compares features; not a tuned model)
+    n_estimators: 200
+    min_samples_leaf: 2
+    class_weight: balanced
+    max_features: sqrt
+  eda:
+    flat_classes: []            # classes whose typical curve is flat: skip the shape-correlation flag
+    mixed_classes: []           # catch-all classes with no typical curve: skip far/shape flags

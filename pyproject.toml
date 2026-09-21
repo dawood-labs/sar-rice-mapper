@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sar-rice-mapper"
+version = "0.1.0"
+description = "Sentinel-1 SAR preprocessing and time-series feature pipeline for crop (rice) mapping with Google Earth Engine"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "earthengine-api>=1.0",
+    "google-cloud-storage>=2.10",
+    "google-crc32c>=1.5",
+    "geopandas>=0.14",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "rasterio>=1.3",
+    "numpy>=1.26",
+    "pandas>=2.0",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8",
+    "scikit-learn>=1.3",
+    "xgboost>=2.0",
+    "pyarrow>=14",
+    "tqdm>=4.66",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "nbformat>=5.9"]
+
+[project.scripts]
+sar-pipeline = "sar_pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-m 'not gee'"
+markers = [
+    "gee: live Google Earth Engine tests (read-only; need credentials + a local config). Run with: pytest -m gee",
+]
