@@ -238,6 +238,29 @@ clearest date can still be partly cloudy: check band 6, where low values mean cl
 
 ---
 
+## Looking at any pixel's time series
+
+**In QGIS (click and see).** `sar_pipeline.analysis.qgis_package.build` writes, per AOI,
+`<aoi>_VH_halfmonth.tif`, `<aoi>_VV_halfmonth.tif` and `<aoi>_VHmVV_halfmonth.tif`: one band per
+calendar half-month (band 1 = 1 May, band 24 = 16 April), 5x5 linear-power means in dB, exactly
+what the classifier sees. It also writes the class map, the probabilities, the pixel index and a
+`BANDS.txt` listing band number to date. Install the QGIS plugin **Temporal/Spectral Profile Tool**,
+select a `_halfmonth.tif` layer and click a pixel: the plugin plots its 24 values. The plugin's x-axis
+shows band numbers, which `BANDS.txt` translates to dates.
+
+**From the pipeline (every acquisition, with rain).** Read the pixel id (`pid`) from
+`pixel_index.tif` with QGIS *Identify*, then:
+
+```bash
+python -m sar_pipeline --config config/<aoi>.yaml pixel --track <primary track> --pid <pid> --plot px.png
+# or --lon <lon> --lat <lat> instead of --pid
+```
+
+This prints every acquisition date (not binned), VV, VH, VH-VV, rain in the previous 6 and 24 hours
+and the platform, and saves a plot.
+
+---
+
 ## Working without ground truth
 
 The `analysis` package ([docs/08_analysis.md](docs/08_analysis.md)) assumes you have **labelled
