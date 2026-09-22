@@ -26,6 +26,7 @@ the README gives the QGIS band mapping for each colour combination.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 
 S2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
@@ -177,4 +178,72 @@ def plan_and_export(configs, start_month: str, end_month: str, bucket: str, pref
             rows.append(row)
             log(f"{aoi} {month}: {date} clear {clear}% of AOI ({n_dates} dates)"
                 + (" -> submitted" if row["task_id"] else ""))
+    return rows
+
+
+def dates_to_export(available, month_of, existing_names, prefix, aoi_key):
+    """Dates whose file does not exist yet. ``available`` are ``YYYY-MM-DD`` strings.
+
+    A date counts as done when its object name (built exactly as :func:`object_name` builds it)
+    is already in ``existing_names``, so rerunning never exports the same image twice.
+    """
+    todo = []
+    for date in sorted(set(available)):
+        name = object_name(prefix, aoi_key, month_of(date), date) + ".tif"
+        if name not in existing_names:
+            todo.append(date)
+    return todo
+
+
+def scene_dates(region_4326, start: str, end: str):
+    """Distinct acquisition dates over a region, with the lowest scene cloud % seen that day.
+
+    One metadata request; no pixels are read. The scene cloud % describes whole tiles, so it is
+    recorded for reference only and not used to choose anything.
+    """
+    import ee
+
+    region = ee.Geometry(region_4326)
+    col = ee.ImageCollection(S2_COLLECTION).filterBounds(region).filterDate(start, end)
+    pairs = col.reduceColumns(ee.Reducer.toList(2),
+                              ["system:time_start", "CLOUDY_PIXEL_PERCENTAGE"]).getInfo()["list"]
+    best = {}
+    for epoch_ms, cloud in pairs:
+        day = dt.datetime.fromtimestamp(epoch_ms / 1000, tz=dt.timezone.utc).strftime("%Y-%m-%d")
+        best[day] = min(best.get(day, 101.0), float(cloud))
+    return best
+
+
+def export_all_dates(configs, start: str, end: str, bucket: str, prefix: str, log=print):
+    """Export every available date per AOI in [start, end), skipping files already on GCS.
+
+    Returns manifest rows. Exports start immediately; clouds are not masked.
+    """
+    import geopandas as gpd
+    from google.cloud import storage
+
+    from . import auth
+    from . import config as config_mod
+
+    rows = []
+    for path in configs:
+        cfg = config_mod.load_config(path)
+        aoi = cfg["aoi"]["key"]
+        grid_def = json.loads((config_mod.grid_dir(cfg) / "grid_def.json").read_text())
+        polygon = aoi_geojson_2d(gpd.read_file(config_mod.aoi_path(cfg)))
+        w, s, e, n = grid_bounds_4326(grid_def)
+        rect = {"type": "Polygon", "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]}
+        client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
+        existing = {b.name for b in client.list_blobs(bucket, prefix=f"{prefix.strip('/')}/{aoi}/")}
+        clouds = scene_dates(polygon, start, end)
+        todo = dates_to_export(clouds, lambda d: d[:7], existing, prefix, aoi)
+        log(f"{aoi}: {len(clouds)} dates available, {len(clouds) - len(todo)} already on GCS, "
+            f"{len(todo)} to export")
+        for date in todo:
+            name = object_name(prefix, aoi, date[:7], date)
+            task = export_image(date, grid_def, bucket, name, rect)
+            rows.append({"aoi": aoi, "month": date[:7], "date": date,
+                         "scene_cloud_pct_min": round(clouds[date], 1),
+                         "gcs_uri": f"gs://{bucket}/{name}.tif", "task_id": task.id,
+                         "selection": "all_dates"})
     return rows

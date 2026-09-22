@@ -50,3 +50,10 @@ def test_aoi_geojson_drops_z():
     frame = gpd.GeoDataFrame(geometry=[Polygon([(10, 50, 0), (10.1, 50, 0), (10.1, 50.1, 0)])], crs=4326)
     geo = ox.aoi_geojson_2d(frame)
     assert all(len(pt) == 2 for pt in geo["coordinates"][0])
+
+
+def test_dates_already_on_gcs_are_skipped():
+    existing = {"p/aoiX/aoiX_2025-06_S2_2025-06-07.tif"}
+    todo = ox.dates_to_export(["2025-06-07", "2025-06-12", "2025-06-12"], lambda d: d[:7],
+                              existing, "p", "aoiX")
+    assert todo == ["2025-06-12"]
