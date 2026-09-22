@@ -209,6 +209,35 @@ prefix plus a single digit also matches ordinary code, such as the EPSG:4326 hel
 
 ---
 
+## Sentinel-2 reference images for checking a map by eye
+
+`sar_pipeline.optical_export` exports, for each AOI and month, the **one date whose Sentinel-2
+mosaic is clearest over the AOI itself** (scored with Cloud Score+ on the AOI's own pixels, not the
+whole tile's cloud percentage). It uses exactly the AOI's SAR grid (same CRS, origin and 10 m
+pixels), so the image lies pixel-for-pixel on the class map in QGIS.
+
+```python
+from sar_pipeline import auth, config, optical_export as ox
+auth.init_ee(config.load_config("config/<any>.yaml"))
+rows = ox.plan_and_export(["config/<aoi>.yaml"], "2025-01", "2026-05",
+                          bucket="<bucket>", prefix="<base_folder>/s2_reference",
+                          submit=False)        # plan only; submit=True starts the exports
+```
+
+Each file has six bands, **in this order**: 1 = B2 blue, 2 = B3 green, 3 = B4 red, 4 = B5 red edge,
+5 = B8 NIR, 6 = clear score (0-100, Cloud Score+). In QGIS use *Multiband color* with:
+
+| View | Red | Green | Blue |
+|---|---|---|---|
+| True colour (4-3-2) | band 3 | band 2 | band 1 |
+| False colour (8-3-2): vegetation bright red | band 5 | band 2 | band 1 |
+| Red edge (5-3-2): separates crop types and stages | band 4 | band 2 | band 1 |
+
+Reflectance is stored x 10000; a stretch of about 0-3000 suits most scenes. In monsoon months the
+clearest date can still be partly cloudy: check band 6, where low values mean cloud.
+
+---
+
 ## Working without ground truth
 
 The `analysis` package ([docs/08_analysis.md](docs/08_analysis.md)) assumes you have **labelled
