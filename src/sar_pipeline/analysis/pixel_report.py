@@ -188,22 +188,32 @@ def _phases():
     return [(pd.Timestamp(a), pd.Timestamp(b), label) for a, b, label in PHASES]
 
 
-def plot(result: dict, backend: str = "matplotlib", out_path=None):
-    """Three stacked panels on one date axis: VH and VV, VH - VV, NDVI (clean dates only)."""
+#: Default figure size. matplotlib uses inches, plotly uses pixels.
+DEFAULT_SIZE = {"matplotlib": (18, 16), "plotly": (1600, 1300)}
+
+
+def plot(result: dict, backend: str = "matplotlib", out_path=None, width=None, height=None):
+    """Four stacked panels on one date axis: VH and VV, VH - VV, NDVI, NDWI (clean dates only).
+
+    ``width`` / ``height`` set the figure size: **inches** for matplotlib (default 18 x 16),
+    **pixels** for plotly (default 1600 x 1300). Leave them as None for the defaults.
+    """
     sar, s2 = result["sar"], result["s2"][result["s2"]["kept"]]
     title = (f"{result['loc']['aoi']}  pid {result['loc']['pid']}  |  model: "
              f"{result['model'].get('class_name', 'n/a')}  (rice {result['model'].get('rice_prob', 'n/a')}%)")
+    w, h = DEFAULT_SIZE["plotly" if backend == "plotly" else "matplotlib"]
+    w, h = width or w, height or h
     if backend == "plotly":
-        return _plot_plotly(sar, s2, title, out_path)
-    return _plot_matplotlib(sar, s2, title, out_path)
+        return _plot_plotly(sar, s2, title, out_path, w, h)
+    return _plot_matplotlib(sar, s2, title, out_path, w, h)
 
 
-def _plot_matplotlib(sar, s2, title, out_path):
+def _plot_matplotlib(sar, s2, title, out_path, width, height):
     import matplotlib.pyplot as plt
 
     from .curves import INK_SECONDARY, SERIES_COLORS, SURFACE
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True, facecolor=SURFACE)
+    fig, axes = plt.subplots(4, 1, figsize=(width, height), sharex=True, facecolor=SURFACE)
     blue, orange, green = SERIES_COLORS
     ax = axes[0]
     ax.plot(sar["date"], sar["VH_5x5"], color=blue, lw=2, label="VH (5x5 mean)")
@@ -211,70 +221,76 @@ def _plot_matplotlib(sar, s2, title, out_path):
     ax.plot(sar["date"], sar["VV_5x5"], color=orange, lw=2, label="VV (5x5 mean)")
     ax.plot(sar["date"], sar["VV_px"], color=orange, lw=0.8, alpha=0.45, label="VV (single pixel)")
     rainy = sar[sar["rainy"]]
-    ax.scatter(rainy["date"], rainy["VH_5x5"], marker="v", s=40, color=INK_SECONDARY, zorder=5,
+    ax.scatter(rainy["date"], rainy["VH_5x5"], marker="v", s=45, color=INK_SECONDARY, zorder=5,
                label="rain > 5 mm in previous 24 h")
     ax.set_ylabel("backscatter (dB)")
     axes[1].plot(sar["date"], sar["VHmVV_5x5"], color=blue, lw=2, label="VH - VV (5x5 mean)")
     axes[1].plot(sar["date"], sar["VHmVV_px"], color=blue, lw=0.8, alpha=0.45, label="VH - VV (single pixel)")
     axes[1].set_ylabel("VH - VV (dB)")
     axes[2].plot(s2["date"], s2["ndvi"], color=green, lw=2, marker="o", ms=5, label="NDVI (clear dates only)")
-    axes[2].plot(s2["date"], s2["ndwi"], color=blue, lw=1.2, ls="--", marker=".", label="NDWI (water > 0)")
+    axes[2].set_ylabel("NDVI")
+    axes[2].set_ylim(-0.2, 1.0)
+    axes[3].plot(s2["date"], s2["ndwi"], color=blue, lw=2, marker="o", ms=5, label="NDWI (clear dates only)")
     wet = s2[s2["flooded"]]
-    axes[2].scatter(wet["date"], wet["ndvi"], s=80, facecolors="none", edgecolors=blue, lw=1.5,
+    axes[3].scatter(wet["date"], wet["ndwi"], s=110, facecolors="none", edgecolors=orange, lw=2,
                     zorder=5, label="open water at pixel (NDWI > 0)")
-    axes[2].axhline(0, color="#8a8985", lw=0.8)
-    axes[2].set_ylabel("index")
-    axes[2].set_ylim(-0.8, 1.0)
+    axes[3].axhline(0, color="#8a8985", lw=1, ls="--")
+    axes[3].set_ylabel("NDWI")
+    axes[3].set_ylim(-0.8, 0.6)
     for a in axes:
         for start, end, label in _phases():
             a.axvspan(start, end, color="#8a8985", alpha=0.10, lw=0)
         a.grid(True, alpha=0.2)
         for side in ("top", "right"):
             a.spines[side].set_visible(False)
-        a.legend(loc="upper left", fontsize=8, frameon=False, ncol=3)
+        a.legend(loc="upper left", fontsize=9, frameon=False, ncol=3)
     for start, _, label in _phases():
-        axes[0].text(start, 1.0, f" {label}", transform=axes[0].get_xaxis_transform(), fontsize=8,
+        axes[0].text(start, 1.0, f" {label}", transform=axes[0].get_xaxis_transform(), fontsize=9,
                      va="bottom", color=INK_SECONDARY)
-    fig.suptitle(title, x=0.01, ha="left", fontsize=12)
+    fig.suptitle(title, x=0.01, ha="left", fontsize=13)
     fig.tight_layout()
     if out_path:
         fig.savefig(out_path, dpi=150, facecolor=SURFACE)
     return fig
 
 
-def _plot_plotly(sar, s2, title, out_path):
-    import plotly.graph_objects as go
+def _plot_plotly(sar, s2, title, out_path, width, height):
+    import plotly.graph_objects as go  # noqa: F401  (make_subplots returns a go.Figure)
     from plotly.subplots import make_subplots
 
     from .curves import SERIES_COLORS
 
     blue, orange, green = SERIES_COLORS
-    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
-                        subplot_titles=("VH and VV (dB)", "VH - VV (dB)", "NDVI and NDWI, clear dates only"))
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.04,
+                        subplot_titles=("VH and VV (dB)", "VH - VV (dB)",
+                                        "NDVI, clear dates only", "NDWI, clear dates only (> 0 = open water)"))
     fig.add_scatter(x=sar["date"], y=sar["VH_5x5"], name="VH (5x5 mean)", line=dict(color=blue, width=2.5), row=1, col=1)
     fig.add_scatter(x=sar["date"], y=sar["VH_px"], name="VH (single pixel)", line=dict(color=blue, width=1), opacity=0.45, row=1, col=1)
     fig.add_scatter(x=sar["date"], y=sar["VV_5x5"], name="VV (5x5 mean)", line=dict(color=orange, width=2.5), row=1, col=1)
     fig.add_scatter(x=sar["date"], y=sar["VV_px"], name="VV (single pixel)", line=dict(color=orange, width=1), opacity=0.45, row=1, col=1)
     rainy = sar[sar["rainy"]]
     fig.add_scatter(x=rainy["date"], y=rainy["VH_5x5"], mode="markers", name="rain > 5 mm / 24 h",
-                    marker=dict(symbol="triangle-down", size=9, color="#52514e"),
+                    marker=dict(symbol="triangle-down", size=10, color="#52514e"),
                     customdata=rainy["rain_24h_mm"], hovertemplate="%{x|%d %b %Y}<br>rain %{customdata:.1f} mm", row=1, col=1)
     fig.add_scatter(x=sar["date"], y=sar["VHmVV_5x5"], name="VH - VV (5x5 mean)", line=dict(color=blue, width=2.5), row=2, col=1)
     fig.add_scatter(x=sar["date"], y=sar["VHmVV_px"], name="VH - VV (single pixel)", line=dict(color=blue, width=1), opacity=0.45, row=2, col=1)
     fig.add_scatter(x=s2["date"], y=s2["ndvi"], name="NDVI", mode="lines+markers",
                     line=dict(color=green, width=2.5), customdata=s2["clear"],
                     hovertemplate="%{x|%d %b %Y}<br>NDVI %{y:.2f}<br>clear %{customdata:.0f}", row=3, col=1)
-    fig.add_scatter(x=s2["date"], y=s2["ndwi"], name="NDWI (water > 0)", mode="lines+markers",
-                    line=dict(color=blue, width=1.2, dash="dash"), row=3, col=1)
+    fig.add_scatter(x=s2["date"], y=s2["ndwi"], name="NDWI", mode="lines+markers",
+                    line=dict(color=blue, width=2.5), customdata=s2["clear"],
+                    hovertemplate="%{x|%d %b %Y}<br>NDWI %{y:.2f}<br>clear %{customdata:.0f}", row=4, col=1)
     wet = s2[s2["flooded"]]
-    fig.add_scatter(x=wet["date"], y=wet["ndvi"], mode="markers", name="open water at pixel",
-                    marker=dict(size=13, color="rgba(0,0,0,0)", line=dict(color=blue, width=2)), row=3, col=1)
+    fig.add_scatter(x=wet["date"], y=wet["ndwi"], mode="markers", name="open water at pixel",
+                    marker=dict(size=14, color="rgba(0,0,0,0)", line=dict(color=orange, width=2)), row=4, col=1)
+    fig.add_hline(y=0, line_dash="dash", line_color="#8a8985", row=4, col=1)
     for start, end, label in _phases():
         fig.add_vrect(x0=start, x1=end, fillcolor="#8a8985", opacity=0.10, line_width=0,
                       annotation_text=label, annotation_position="top left")
-    fig.update_yaxes(range=[-0.8, 1.0], row=3, col=1)
-    fig.update_layout(title=title, height=850, hovermode="x unified", template="plotly_white",
-                      legend=dict(orientation="h", y=-0.08))
+    fig.update_yaxes(range=[-0.2, 1.0], row=3, col=1)
+    fig.update_yaxes(range=[-0.8, 0.6], row=4, col=1)
+    fig.update_layout(title=title, width=width, height=height, hovermode="x unified",
+                      template="plotly_white", legend=dict(orientation="h", y=-0.06))
     if out_path:
         fig.write_html(str(out_path))
     return fig
