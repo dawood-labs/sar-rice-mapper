@@ -30,6 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "nbformat>=5.9"]
+plots = ["plotly>=5.18"]
 
 [project.scripts]
 sar-pipeline = "sar_pipeline.cli:main"

@@ -248,6 +248,14 @@ what the classifier sees. It also writes the class map, the probabilities, the p
 select a `_halfmonth.tif` layer and click a pixel: the plugin plots its 24 values. The plugin's x-axis
 shows band numbers, which `BANDS.txt` translates to dates.
 
+**In a notebook (everything about one pixel).** `notebooks/05_pixel_investigation.ipynb`: set `AOI`
+and `PID`, choose `BACKEND = "plotly"` or `"matplotlib"`, run all. It plots VH, VV and VH-VV (single
+pixel and 5x5 mean, rainy dates marked), NDVI and NDWI from the exported Sentinel-2 images with
+**cloudy dates at that pixel dropped**, and the draft model's class and probabilities. Use the
+**"sar-rice-mapper (.venv)"** kernel (`python -m ipykernel install --user --name sar-rice-mapper`
+once): another project's `sar_pipeline` installed in the default kernel would otherwise be imported
+instead. The logic lives in `sar_pipeline.analysis.pixel_report`.
+
 **From the pipeline (every acquisition, with rain).** Read the pixel id (`pid`) from
 `pixel_index.tif` with QGIS *Identify*, then:
 
