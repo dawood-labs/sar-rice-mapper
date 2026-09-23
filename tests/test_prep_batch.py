@@ -148,3 +148,18 @@ def test_fallback_is_unused_when_an_eligible_secondary_exists():
     s = summary([("A", 40, 12, 100.0), ("B", 30, 12, 100.0), ("C", 35, 24, 100.0)])
     g = gaps([("C", "2025-06-01", "2025-06-25", 24)])
     assert batch.choose_tracks(s, g, FLOOD, fallback_secondary=True).secondary == "B"
+
+
+def test_pick_spread_takes_the_largest_and_keeps_its_distance():
+    import pandas as pd
+
+    index = pd.DataFrame({
+        "aoi": [1, 2, 3, 4],
+        "lon": [95.0, 95.01, 96.0, 95.5],
+        "lat": [17.0, 17.0, 17.0, 18.0],
+        "acres": [1000, 900, 500, 100],
+    })
+    # 2 sits ~1 km from 1, so it is skipped while distant AOIs remain; then it fills the batch.
+    assert batch.pick_spread(index, 3, min_km=15) == [1, 3, 4]
+    assert batch.pick_spread(index, 4, min_km=15) == [1, 3, 4, 2]
+    assert batch.pick_spread(index, 2, min_km=15, exclude=[1]) == [2, 3]

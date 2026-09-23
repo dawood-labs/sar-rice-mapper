@@ -203,6 +203,29 @@ acquisitions; it is **excluded** if any gap longer than 20 days overlaps the flo
 flooded period lasts about three weeks, so a longer blind spot can miss it entirely); the best
 remaining track is primary and the next is secondary, at most two.
 
+**Standing-rice map for many AOIs** (`sar_pipeline/monsoon_batch.py`). The rule of docs/09 needs,
+per AOI, the per-date Sentinel-2 export, the 5-day series and a Sentinel-1 season run. Run AOIs in
+batches of about 25 so the Earth Engine queue (about 3,000 tasks per project) never overfills:
+
+```bash
+# Pick a batch: largest AOIs first, each at least 15 km from the ones already picked, so one batch
+# covers several regions instead of one district.
+python -c "from sar_pipeline.prep import batch; i = batch.aoi_index(); print(batch.pick_spread(i, 25, exclude=[...done ids...]))"
+
+# Sentinel-1: configs, grid + audit, tracks, then new-run / export / monitor / download / stack per config
+python -m sar_pipeline.prep batch-configs --template config/<working>.yaml --split-dir <split_folder> \
+    --season-key monsoon2026 --start 2026-03-15 --end 2026-09-24 --ids <ids>
+python -m sar_pipeline.prep batch-tracks --season-key monsoon2026 --flood-start 2026-05-01 --flood-end 2026-08-31 --ids <ids>
+
+# Sentinel-2: every date with its mask bands; waits whenever the project queue is near its limit
+python -m sar_pipeline.monsoon_batch s2-export --ids <ids> --yes
+
+# When both are on disk: 5-day series + rule, acres per class merged into one CSV
+python -m sar_pipeline.monsoon_batch rule --ids <ids>
+```
+
+Every step skips what is already done, so a batch can be re-run after an interruption.
+
 **Name AOI files distinctively** (`batch-configs` zero-pads the id to three digits). The hygiene
 test treats every AOI file name in a local config as private, and a short unpadded name made of the
 prefix plus a single digit also matches ordinary code, such as the EPSG:4326 helpers.
