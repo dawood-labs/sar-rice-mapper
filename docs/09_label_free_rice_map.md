@@ -339,6 +339,15 @@ This route fixes both:
    makes it **rice** (1), otherwise **rice, water unconfirmed** (3). The optical LSWI is only
    reported, because it missed the shallow water of the capital region that the radar saw.
 
+   **Standing on the map date.** The deliverable (decided with the client's manager) is rice
+   standing on the map date, mature enough to show a canopy: the last window must be at or above
+   the canopy floor and not more than 0.25 below the peak. A rice-like crop already cut is class 4
+   (`harvested`) and a crop still too small is class 2 (`young`); both are reported, neither is
+   delivered as rice, and the map is re-run with new imagery when the client asks again. Because a
+   standing crop was transplanted within one rice season of the map date, the trough is searched
+   only in the last 110 days — which also stops May's bare dry field being taken for the
+   transplanting of a July crop.
+
    ```python
    from sar_pipeline.analysis import monsoon_rule as mr
    mr.run_aoi(114)                 # writes <aoi>_monsoon2026.tif: 0 not rice, 1 rice, 2 young, 255 no data

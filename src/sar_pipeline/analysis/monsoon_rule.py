@@ -39,8 +39,18 @@ read. Where the dip is there the pixel is **rice** (1); where the radar could lo
 or could not look at all, it is **rice by phenology, water unconfirmed** (3) — kept apart so that
 "no water" and "could not check" are never mixed with confirmed rice.
 
-Classes written: 0 not rice, 1 rice (water confirmed by radar), 2 young, 3 rice by phenology with
-water unconfirmed, 255 no data. Areas in acres.
+The target is rice **standing on the map date** (decided with the client's manager): the canopy
+must be there on the last window (``CANOPY_MIN``) and must not have fallen from its peak by more
+than ``STANDING_FALL_MAX`` — a field already cut is not standing rice, however rice-like its
+season was. Because a standing crop was transplanted within roughly one rice season of the map date,
+the trough is looked for only in the last ``LOOKBACK_DAYS``; this also stops the bare, dry field of
+May from being taken for the transplanting of a crop that started in July. Crops still too young
+to show a canopy are reported as ``young`` and crops already cut as ``harvested``, as information:
+neither is delivered as rice, and the map is re-run with new imagery when the client asks again.
+
+Classes written: 0 not rice, 1 rice standing (water confirmed by radar), 2 young, 3 rice standing
+by phenology with water unconfirmed, 4 rice-like but harvested / not standing, 255 no data.
+Areas in acres.
 """
 from __future__ import annotations
 
@@ -59,22 +69,32 @@ CANOPY_MIN = 0.50
 YOUNG_CANOPY_MIN = 0.30
 #: The season: rice planted in May 2026 or later. The dry-season crop is out of scope.
 SEASON = ("2026-05-01", "2026-09-24")
+#: A crop standing on the last date was transplanted within about one rice season of it
+#: (transplanting to harvest is 100-120 days), so its trough is looked for in this many days
+#: before the last window and not earlier.
+LOOKBACK_DAYS = 110
+#: A standing crop may have lost this much NDVI from its peak (haze, early senescence) and still be
+#: standing; a harvested field has lost far more.
+STANDING_FALL_MAX = 0.25
 #: LSWI must rise by this much from the field's own driest level in the 60 days before the trough
 #: (and end at or above zero) to count as wetting for transplanting.
 WET_RISE_MIN = 0.15
 WET_LOOKBACK_DAYS, WET_LOOKAHEAD_DAYS = 60, 25
-CLASSES = {0: "not rice", 1: "rice", 2: "young", 3: "rice_unconfirmed", 255: "no data"}
+CLASSES = {0: "not rice", 1: "rice", 2: "young", 3: "rice_unconfirmed", 4: "harvested", 255: "no data"}
 
 
-def pixel_events(ndvi, lswi, windows, season=SEASON) -> pd.DataFrame:
-    """Per pixel: trough date and value inside the season, LSWI there, and the climb after it.
+def pixel_events(ndvi, lswi, windows, season=SEASON, lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
+    """Per pixel: trough date and value inside the search window, LSWI there, and the climb after it.
 
     ``ndvi``/``lswi`` are (windows, pixels) fitted series. Vectorised, so an AOI of half a million
-    pixels takes seconds. ``climb_date`` is the first window after the trough where NDVI has risen by
-    ``RISE_MIN`` — the moment the crop became a confirmed canopy.
+    pixels takes seconds. The search window is the season cut to the last ``lookback_days`` before
+    the last window (see ``LOOKBACK_DAYS``). ``climb_date`` is the first window after the trough
+    where NDVI has risen by ``RISE_MIN`` — the moment the crop became a confirmed canopy.
+    ``standing`` says whether that canopy is still there on the last window.
     """
     windows = pd.DatetimeIndex(windows)
-    inside = (windows >= season[0]) & (windows < season[1])
+    earliest = max(pd.Timestamp(season[0]), windows[-1] - pd.Timedelta(days=lookback_days))
+    inside = (windows >= earliest) & (windows < season[1])
     idx = np.flatnonzero(inside)
     sub = ndvi[idx]
     n_pix = ndvi.shape[1]
@@ -108,23 +128,27 @@ def pixel_events(ndvi, lswi, windows, season=SEASON) -> pd.DataFrame:
         "rise": peak_after - trough_ndvi, "peak_after": peak_after,
         "climb_date": pd.Series(np.where(first >= 0, windows[idx][np.clip(first, 0, None)], pd.NaT)),
         "last_ndvi": ndvi[-1],
+        "standing": (ndvi[-1] >= CANOPY_MIN) & (ndvi[-1] >= peak_after - STANDING_FALL_MAX),
     })
 
 
 def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, young_min=YOUNG_MIN,
              canopy_min=CANOPY_MIN, young_canopy_min=YOUNG_CANOPY_MIN, radar_wet=None):
-    """0 not rice, 1 rice, 2 young, 3 rice with water unconfirmed, 255 no data.
+    """0 not rice, 1 rice standing, 2 young, 3 standing with water unconfirmed, 4 harvested, 255 no data.
 
-    ``radar_wet`` (bool per pixel, from ``radar_water.pixel_dips``) splits the phenology-rice pixels
-    into confirmed (1) and unconfirmed (3). Without it every phenology-rice pixel is unconfirmed.
+    ``radar_wet`` (bool per pixel, from ``radar_water.pixel_dips``) splits the standing phenology-rice
+    pixels into confirmed (1) and unconfirmed (3). Without it every such pixel is unconfirmed.
     """
     out = np.zeros(len(events), dtype="uint8")
     low = events["trough_ndvi"] <= trough_max
-    rice = (low & (events["rise"] >= rise_min) & (events["peak_after"] >= canopy_min)).to_numpy()
-    young = (low & ~rice & (events["rise"] >= young_min) & (events["peak_after"] >= young_canopy_min)).to_numpy()
+    grown = (low & (events["rise"] >= rise_min) & (events["peak_after"] >= canopy_min)).to_numpy()
+    standing = events["standing"].to_numpy() if "standing" in events else np.ones(len(events), dtype=bool)
+    rice = grown & standing
+    young = (low & ~grown & (events["rise"] >= young_min) & (events["peak_after"] >= young_canopy_min)).to_numpy()
     wet = np.zeros(len(events), dtype=bool) if radar_wet is None else np.asarray(radar_wet, dtype=bool)
     out[rice & wet] = 1
     out[rice & ~wet] = 3
+    out[grown & ~standing] = 4
     out[young] = 2
     out[~events["valid"].to_numpy()] = 255
     return out
