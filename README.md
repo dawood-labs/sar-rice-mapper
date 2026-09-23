@@ -226,6 +226,14 @@ python -m sar_pipeline.monsoon_batch rule --ids <ids>
 
 Every step skips what is already done, so a batch can be re-run after an interruption.
 
+The whole sequence for one batch, including the evidence report, is also one script (it starts
+Earth Engine exports, so confirm the batch first; takes about 2-3 hours for 25 AOIs, most of it
+waiting for the export queue):
+
+```bash
+scripts/monsoon_batch_chain.sh config/<working>.yaml <split_folder> batch3 <ids>
+```
+
 **Why did each AOI come out the way it did?** `python -m sar_pipeline.analysis.batch_report --ids <ids>`
 writes, per AOI, the evidence behind the classes (dates, observation gaps, radar dips at the trough,
 at the end of the bare period and anywhere before the climb, and a split of "not rice") to
