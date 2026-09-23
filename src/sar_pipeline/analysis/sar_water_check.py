@@ -5,13 +5,19 @@ Why
 The optical water test (LSWI) missed most of the certain-rice plots in one region, and even after
 it was read relative to the field's own dry level it still leaves gaps where the transplanting week
 fell under cloud. Radar does not care about cloud, turbidity or depth: a flooded field is a mirror
-to the radar, the signal bounces away from the sensor, and **VV** (the more water-sensitive
-polarisation) drops by 5-15 dB; **VH** drops less but then climbs steeply as the canopy fills in.
+to the radar, the signal bounces away from the sensor, and both polarisations drop. Textbooks
+call **VV** the more water-sensitive one (open water can take it down 10 dB or more); on these
+5x5-averaged paddies with a shallow, turbid layer, stubble and seedlings, the first two AOIs showed
+the opposite: VH dropped 5 dB (below the plot's own dry level in 91 % of plots), VV 3-4 dB
+(67-76 %). Both are measured and reported; VH then climbs steeply as the canopy fills in.
 
 So, for every field plot: take the plot's radar series (median over its pixels of the 5x5-mean dB
 stacks, per track), line it up on the plot's optical transplant date (the NDVI trough), and read
 
-* the **dry level** before transplanting: the median in ``[-60, -20]`` days;
+* the **dry level** before transplanting: the median in ``[-40, -15]`` days. Not earlier: on
+  double-cropped fields the previous crop is still standing 60 days before the trough, and a canopy
+  is not a dry level. The window sits after that harvest, when the field is bare and dry — the
+  brightest the radar sees it all season, because dry bare soil is rough;
 * the **flood level**: the minimum in ``[-10, +15]`` days around the trough;
 * the **dip** = dry level - flood level, in dB, per polarisation.
 
@@ -30,7 +36,7 @@ from . import pixel_report as pr
 from . import sar_curve
 from .plot_curves import plot_pixels
 
-DRY_WINDOW = (-60, -20)
+DRY_WINDOW = (-40, -15)
 FLOOD_WINDOW = (-10, 15)
 #: A VV drop at least this large below the field's own dry level counts as flooding.
 DIP_MIN_DB = 3.0
@@ -89,7 +95,8 @@ def summary(dip_table: pd.DataFrame, dip_min: float = DIP_MIN_DB) -> pd.DataFram
         plots=("plot_id", "nunique"),
         VV_dry=("VV_dry", "median"), VV_flood=("VV_flood", "median"), VV_dip=("VV_dip", "median"),
         VH_dip=("VH_dip", "median"),
-        flooded_pct=("VV_dip", lambda v: round(100 * float((v >= dip_min).mean()))),
+        VV_flooded_pct=("VV_dip", lambda v: round(100 * float((v >= dip_min).mean()))),
+        VH_flooded_pct=("VH_dip", lambda v: round(100 * float((v >= dip_min).mean()))),
         flood_day=("VV_flood_day", "median")).round(1).reset_index())
 
 

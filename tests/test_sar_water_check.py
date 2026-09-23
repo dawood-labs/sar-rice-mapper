@@ -25,11 +25,11 @@ def test_dip_is_read_relative_to_the_plots_own_dry_level():
     row = table.iloc[0]
     assert 7.0 < row["VV_dip"] < 9.5
     assert -10 <= row["VV_flood_day"] <= 15
-    assert sw.summary(table).loc[0, "flooded_pct"] == 100
+    assert sw.summary(table).loc[0, "VV_flooded_pct"] == 100
 
 
 def test_no_dip_means_not_flooded():
     s, ev = _series(dip_db=0.0)
     table = sw.dips(sw.align(s, ev))
     assert abs(table.iloc[0]["VV_dip"]) < 1.0
-    assert sw.summary(table).loc[0, "flooded_pct"] == 0
+    assert sw.summary(table).loc[0, "VV_flooded_pct"] == 0
