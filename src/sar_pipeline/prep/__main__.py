@@ -69,6 +69,9 @@ def _parser() -> argparse.ArgumentParser:
     bt.add_argument("--fallback-secondary", action="store_true",
                     help="if no second track is eligible, allow one excluded only for a flooding gap "
                          "as secondary (confirmation only, never primary)")
+    bt.add_argument("--ids", nargs="*", type=int, help="only these AOI ids")
+    bt.add_argument("--force", action="store_true",
+                    help="also rewrite configs that already have tracks (a hand-edited choice is kept otherwise)")
     return parser
 
 
@@ -111,8 +114,17 @@ def _run_batch_tracks(args) -> int:
 
     rows = []
     configs = sorted(Path("config").glob(f"aoi*_{args.season_key}.yaml"))
+    wanted = None if not getattr(args, "ids", None) else {f"aoi{i}_{args.season_key}.yaml" for i in args.ids}
     for path in configs:
+        if wanted is not None and path.name not in wanted:
+            continue
         cfg = config_mod.load_config(path)
+        # A config that already names its tracks may have been edited by hand (e.g. a third track
+        # added for denser sampling); rewriting it silently undid such a choice once. Keep it.
+        if cfg["s1"].get("tracks") and not getattr(args, "force", False):
+            rows.append({"config": path.name, "primary": None, "secondary": None,
+                         "reasons": "kept: tracks already set (use --force to rewrite)"})
+            continue
         try:
             audit = config_mod.latest_audit_dir(cfg)
         except Exception as exc:  # no audit yet for this AOI
