@@ -362,6 +362,16 @@ This route fixes both:
    r["summary"]                      # per track: median VV/VH dip, % plots with a VV dip >= 3 dB
    ```
 
+   Result on the first delivery (three AOIs, 601 plots reported as standing rice): in every AOI
+   and on every track, the radar's lowest point of the season sits **on the optical transplant
+   date** (median 1-5 days after the NDVI trough). In the delta AOI the drop below the field's own
+   dry level was 8 dB in both VV and VH (86 % of plots on the better track), and flooding began
+   about 25 days before the trough — deep, prolonged water. In the two AOIs where the optical LSWI
+   had seen almost no water (0-13 % of plots), VH still dropped 5 dB in 91 % of plots and VV 3-4 dB
+   in 67-76 %: shallow, short-lived water that the optical test missed. Two independent sensors
+   agreeing on the date is the evidence that the trough is transplanting, and that the water was
+   there.
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`
