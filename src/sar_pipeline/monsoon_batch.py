@@ -98,6 +98,29 @@ def s2_export(ids, start=S2_START, end=S2_END, limit=QUEUE_LIMIT, log=print) -> 
     return pd.DataFrame(rows)
 
 
+def wait_for_s2(aoi_id: int, log=print, status_of=None, sleep=None) -> list[str]:
+    """Wait until every Sentinel-2 task in the AOI's manifest has finished; return the dates that failed.
+
+    Why: the 5-day series is built from whatever files are on GCS. Building it while exports are
+    still running would silently leave dates out, and a missing date inside the transplanting
+    window is exactly what the rule cannot afford.
+    """
+    from . import auth, config as config_mod, optical_export as ox
+
+    path = Path(OUT_ROOT) / f"aoi{aoi_id}_export_manifest.csv"
+    if not path.exists():
+        return []
+    manifest = pd.read_csv(path)
+    ids = [t for t in manifest.get("task_id", pd.Series(dtype=str)).dropna().astype(str) if t]
+    if not ids:
+        return []
+    if status_of is None:
+        auth.init_ee(config_mod.load_config(config_path(aoi_id)))
+    states = ox.wait_for_tasks(ids, poll_seconds=POLL_SECONDS, status_of=status_of, sleep=sleep, log=log)
+    bad = {t for t, s in states.items() if s in ("FAILED", "CANCELLED")}
+    return manifest.loc[manifest["task_id"].astype(str).isin(bad), "date"].astype(str).tolist()
+
+
 def rule(ids, out_csv=None, log=print) -> pd.DataFrame:
     """Build the 5-day series (if missing) and run the rule for each AOI; acres per class in one table.
 
@@ -110,6 +133,11 @@ def rule(ids, out_csv=None, log=print) -> pd.DataFrame:
     for aoi_id in ids:
         try:
             if not (Path(OUT_ROOT) / f"aoi{aoi_id}" / f"aoi{aoi_id}_ndvi5d.tif").exists():
+                if not (Path(OUT_ROOT) / f"aoi{aoi_id}_export_manifest.csv").exists():
+                    raise FileNotFoundError("no Sentinel-2 export manifest yet: run s2-export first")
+                failed = wait_for_s2(aoi_id, log=log)
+                if failed:
+                    log(f"aoi{aoi_id}: {len(failed)} Sentinel-2 dates failed; run s2-export again to retry them")
                 nd.build(aoi_id, log=log)
             rows.append(mr.run_aoi(aoi_id))
         except Exception as exc:  # keep the batch going; the table says which AOI failed
