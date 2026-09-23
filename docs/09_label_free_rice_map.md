@@ -326,6 +326,25 @@ This route fixes both:
    instead of the assumed 10; and in one region LSWI never rose above NDVI at the trough, so a
    wet-at-sowing test cannot be a hard requirement.
 
+8. **The current-season rule** — `analysis/monsoon_rule.py`. Per pixel, inside the season window
+   (1 June to today): the NDVI **trough**, the **climb** after it, and the canopy reached. Thresholds
+   read off the field plots: trough <= 0.40, climb >= 0.30 and canopy >= 0.50 for **rice**; climb
+   >= 0.15 and canopy >= 0.30 for **young** (a crop has started, not confirmable yet). Water at the
+   trough (LSWI > NDVI) is reported, not required — one region's certain rice never showed it. The
+   canopy floor exists because a control AOI with no crop went from water (-0.35) to bare soil (0.2),
+   a "climb" that is not a canopy.
+
+   ```python
+   from sar_pipeline.analysis import monsoon_rule as mr
+   mr.run_aoi(114)                 # writes <aoi>_monsoon2026.tif: 0 not rice, 1 rice, 2 young, 255 no data
+   mr.plot_recall(20, plots)       # share of field-plot pixels called rice / young / not rice
+   ```
+
+   Checked on 2,950 field plots: 88-100 % of plot pixels are called rice where the crop was more
+   than six weeks old; 9-44 % where it had just been transplanted (the rest are `young` or still
+   under water), which is the limit of optical data at that date. The control AOI came out at
+   0.1 acres of rice.
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`
