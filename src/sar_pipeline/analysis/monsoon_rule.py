@@ -186,6 +186,30 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     return out
 
 
+def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
+               radar_season: str | None = "monsoon2026"):
+    """The per-pixel evidence the rule decides on: ``(series, events, radar)``.
+
+    ``events`` holds, per grid pixel, the optical events of :func:`pixel_events` and, when the
+    Sentinel-1 season run exists (``radar`` True), the radar dips of ``radar_water.pixel_dips``.
+    Kept separate from :func:`run_aoi` so reports can look at the evidence behind a class, not only
+    the class.
+    """
+    from . import radar_water
+
+    d = nd.load(aoi_id, out_root=out_root)
+    ndvi = d["ndvi5d"].reshape(d["ndvi5d"].shape[0], -1)
+    lswi = d["lswi5d"].reshape(d["lswi5d"].shape[0], -1)
+    events = pixel_events(ndvi, lswi, d["windows"], season)
+    radar = bool(radar_season) and radar_water.season_run_exists(aoi_id, radar_season)
+    if radar:
+        trough = np.where(events["valid"].to_numpy(), events["trough_date"].to_numpy().astype("datetime64[D]"),
+                          np.datetime64("NaT"))
+        dips = radar_water.pixel_dips(aoi_id, trough, d["loc"]["grid"], radar_season)
+        events = pd.concat([events, dips], axis=1)
+    return d, events, radar
+
+
 def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, inside_only: bool = True,
             radar_season: str | None = "monsoon2026") -> dict:
     """Classify one AOI, write ``<aoi>_monsoon2026.tif``, return the acres per class.
@@ -196,19 +220,8 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, ins
     import rasterio
     from rasterio.transform import from_origin
 
-    from . import radar_water
-
-    d = nd.load(aoi_id, out_root=out_root)
+    d, events, radar = aoi_events(aoi_id, out_root, season, radar_season)
     shape = d["ndvi5d"].shape[1:]
-    ndvi = d["ndvi5d"].reshape(d["ndvi5d"].shape[0], -1)
-    lswi = d["lswi5d"].reshape(d["lswi5d"].shape[0], -1)
-    events = pixel_events(ndvi, lswi, d["windows"], season)
-    radar = bool(radar_season) and radar_water.season_run_exists(aoi_id, radar_season)
-    if radar:
-        trough = np.where(events["valid"].to_numpy(), events["trough_date"].to_numpy().astype("datetime64[D]"),
-                          np.datetime64("NaT"))
-        dips = radar_water.pixel_dips(aoi_id, trough, d["loc"]["grid"], radar_season)
-        events = pd.concat([events, dips], axis=1)
     classes = classify(events, radar_wet=events["radar_wet"] if radar else None)
     if inside_only:
         classes[~nd.inside_aoi(aoi_id)] = 255

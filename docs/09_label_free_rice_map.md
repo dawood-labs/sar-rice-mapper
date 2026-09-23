@@ -421,6 +421,51 @@ This route fixes both:
    share is not edge mixing; 28 of 1,735 plots disagreed as a whole, and the two looked at were a
    field still under water on the last date and a field whose new crop had just started.
 
+11. **The evidence behind each class, for a whole batch** — `analysis/batch_report.py`. The acres
+   table says how much of each class the rule found, not why. After the first batch of AOIs without
+   field plots, over a third of the standing rice-like area was class 3 (water unconfirmed), much
+   of it in a few AOIs. Rice is always transplanted into water, so the first suspect was the
+   detection. The report re-computes the rule's per-pixel evidence (`monsoon_rule.aoi_events`, the
+   same code the map uses) and adds three tests that do not depend on the rule's own date:
+
+   - **trough on the edge**: the share of pixels whose trough sits on the first window of the
+     110-day search, where the field was already bare and the argmin may be weeks early;
+   - **dip at the end of the bare period**: the radar dip measured at the last bare window before
+     the climb instead of at the trough;
+   - **drop before the climb**: the season's median backscatter minus the lowest value anywhere
+     from 10 days before the trough to the climb, best of VV/VH and tracks. Transplanting must fall
+     inside that span, so this test cannot miss the water by picking the wrong date.
+
+   It also splits "not rice" into open water on the map date, never a canopy, evergreen, and other.
+
+   ```bash
+   python -m sar_pipeline.analysis.batch_report --ids 20 24 25    # one summary CSV + pixel sample per AOI
+   ```
+   ```python
+   from sar_pipeline.analysis import batch_report as br
+   from sar_pipeline.prep import batch
+   t = br.combine(index=batch.aoi_index())           # one row per AOI, north first
+   br.figure(t, pixels, "processed/_batch/s2_2026/figures/batch_report_monsoon2026.png")
+   ```
+
+   First use (39 AOIs, pixel samples):
+
+   | Share of pixels with a drop of 3 dB or more before the climb | rice, water confirmed | water unconfirmed |
+   |---|---|---|
+   | AOIs with field plots | 97 % | 61 % |
+   | AOIs without field plots | 88 % | 27 % |
+
+   The trough sat on the edge equally often in both classes (28 % and 29 % without plots), and
+   measuring at the end of the bare period found water in only 25 % of class 3 (and 37 % of
+   class 1). So the date is not why class 3 lacks water: in the AOIs without plots, the same radar
+   tracks that see the water on neighbouring rice see none on most class-3 pixels at any date. That
+   is evidence against paddy rice there, not proof of another crop; naming the crop needs a field
+   check. Where plots exist, class 3 is small and mostly rice that just missed the 3 dB bar.
+
+   Not rice, over the 39 AOIs: open water on the map date 45 %, never a canopy 13 %, evergreen 3 %,
+   other 39 %. Open water in mid-September can be flooding or a field waiting for a late
+   transplanting; the next run with new imagery will tell.
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`

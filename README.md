@@ -226,6 +226,12 @@ python -m sar_pipeline.monsoon_batch rule --ids <ids>
 
 Every step skips what is already done, so a batch can be re-run after an interruption.
 
+**Why did each AOI come out the way it did?** `python -m sar_pipeline.analysis.batch_report --ids <ids>`
+writes, per AOI, the evidence behind the classes (dates, observation gaps, radar dips at the trough,
+at the end of the bare period and anywhere before the climb, and a split of "not rice") to
+`processed/_batch/s2_2026/report/`; `batch_report.combine` joins them into one table. See docs/09,
+step 11. About a minute per AOI.
+
 One AOI takes 6-8 minutes in `rule` (about 3 to read the dates from GCS, 3 to fit the curves, then
 the radar check) and about 2 GB of memory, so run several AOIs at once, each with its own CSV, and
 merge the CSVs afterwards (on a 12-CPU, 46 GB machine six at a time works):
