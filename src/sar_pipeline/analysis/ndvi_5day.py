@@ -61,11 +61,13 @@ ENVELOPE_ITERATIONS = 3
 LMBD = 1.0
 
 
-def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None):
+def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None, cs_min: float | None = None):
     """NDVI, NDWI, LSWI, QA60 cloud and SCL cloud for every exported date, shaped (dates, rows, cols).
 
-    ``ok`` is True where the pixel has data and QA60 does not flag cloud or cirrus. ``scl_cloud`` is
-    returned for comparison only.
+    ``ok`` is True where the pixel has data and QA60 does not flag cloud or cirrus. With ``cs_min``
+    the Cloud Score+ ``clear`` band (0-100, per 10 m pixel) must also reach that value: the stricter
+    mask used to test how much haze the light one lets through. ``scl_cloud`` is returned for
+    comparison only.
     """
     import rasterio
 
@@ -81,12 +83,13 @@ def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None)
         with rasterio.open(path) as ds:
             read = lambda n: ds.read(band_index(ds, n)).astype("float32")  # noqa: E731
             b3, b4, b8, b11, qa, sc = (read(n) for n in ("B3", "B4", "B8", "B11", "QA60", "SCL"))
+            cs = read("clear") if cs_min is not None else None
         data = (b4 > 0) & (b8 > 0)
         with np.errstate(invalid="ignore", divide="ignore"):
             ndvi.append(np.where(data, (b8 - b4) / (b8 + b4), np.nan))
             ndwi.append(np.where(data & (b3 + b8 > 0), (b3 - b8) / (b3 + b8), np.nan))
             lswi.append(np.where(data & (b8 + b11 > 0), (b8 - b11) / (b8 + b11), np.nan))
-        ok.append(data & ~qa60_cloud(qa))
+        ok.append(data & ~qa60_cloud(qa) & (cs >= cs_min if cs is not None else True))
         scl.append(data & np.isin(sc.astype("int64"), SCL_CLOUD_CLASSES))
     order = np.argsort(dates)
     pick = lambda xs: np.stack(xs)[order]  # noqa: E731
@@ -217,10 +220,14 @@ def gap_days(observed, step: int = STEP_DAYS):
 
 
 def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd: float = LMBD,
-          out_root="processed/_batch/s2_2026", folder: str = FOLDER, log=print) -> dict:
-    """Read, composite, fit and write the 5-day series of one AOI. Returns a summary dict."""
+          out_root="processed/_batch/s2_2026", folder: str = FOLDER, log=print, cs_min: float | None = None) -> dict:
+    """Read, composite, fit and write the 5-day series of one AOI. Returns a summary dict.
+
+    ``cs_min`` adds the Cloud Score+ requirement to the mask (see :func:`read_dates`); write such a
+    series to its own ``out_root`` so it is never confused with the light-mask one.
+    """
     t0 = time.time()
-    dates, ndvi, ndwi, lswi, ok, scl, loc = read_dates(aoi_id, folder)
+    dates, ndvi, ndwi, lswi, ok, scl, loc = read_dates(aoi_id, folder, cs_min=cs_min)
     h, w = ndvi.shape[1:]
     starts = window_starts(start, end)
     keep = (dates >= starts[0]) & (dates < pd.Timestamp(end))
@@ -297,8 +304,9 @@ def load(aoi_id: int, out_root="processed/_batch/s2_2026", folder: str = FOLDER)
     """Raw dates and the written stacks of one AOI, read once and kept in memory."""
     import rasterio
 
-    if aoi_id in _CACHE:
-        return _CACHE[aoi_id]
+    key = (aoi_id, str(out_root))
+    if key in _CACHE:
+        return _CACHE[key]
     dates, ndvi, _, lswi, ok, scl, loc = read_dates(aoi_id, folder)
     stacks = {}
     for key in ("ndvi5d", "lswi5d", "ndvi5d_raw", "gapdays5d"):
@@ -307,9 +315,9 @@ def load(aoi_id: int, out_root="processed/_batch/s2_2026", folder: str = FOLDER)
             arr[arr == ds.nodata] = np.nan
             stacks[key] = arr
             windows = pd.to_datetime(list(ds.descriptions))
-    _CACHE[aoi_id] = dict(dates=dates, ndvi=ndvi, lswi=lswi, ok=ok, scl=scl, loc=loc,
-                          windows=windows, **stacks)
-    return _CACHE[aoi_id]
+    _CACHE[key] = dict(dates=dates, ndvi=ndvi, lswi=lswi, ok=ok, scl=scl, loc=loc,
+                       windows=windows, **stacks)
+    return _CACHE[key]
 
 
 def forget():

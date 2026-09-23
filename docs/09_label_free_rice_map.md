@@ -339,6 +339,12 @@ This route fixes both:
    makes it **rice** (1), otherwise **rice, water unconfirmed** (3). The optical LSWI is only
    reported, because it missed the shallow water of the capital region that the radar saw.
 
+   **A field, not a haze dip.** The trough must last: fitted NDVI at or below 0.45 for at least 8
+   consecutive 5-day windows (about 40 days) around it. A real field start has weeks of bare,
+   puddled and seedling-covered ground; a haze dip the light mask let through on a tree canopy
+   lasts one or two windows. On the validation set (docs/10) this took evergreen false positives
+   from 7 % to 0 % without touching the recall on the plots.
+
    **Standing on the map date.** The deliverable (decided with the client's manager) is rice
    standing on the map date, mature enough to show a canopy: the last window must be at or above
    the canopy floor and not more than 0.25 below the peak. A rice-like crop already cut is class 4
