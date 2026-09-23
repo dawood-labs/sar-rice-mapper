@@ -175,7 +175,7 @@ def contact_sheet(aoi_id: int, pid: int, cycle: dict, ndvi_series=None, combinat
     if ndvi_series is not None:
         ax.plot(ndvi_series["date"], ndvi_series["ndvi"], color=SERIES_COLORS[2], lw=2,
                 marker="o", ms=3.5, label="NDVI, clear dates")
-    marks = (("emergence_date", SERIES_COLORS[0]), ("peak_date", INK_SECONDARY),
+    marks = (("greenup_onset", SERIES_COLORS[0]), ("peak_date", INK_SECONDARY),
              ("harvest_date", SERIES_COLORS[1]))
     for key, colour in marks:
         if cycle.get(key) is not None and pd.notna(cycle.get(key)):
@@ -189,7 +189,7 @@ def contact_sheet(aoi_id: int, pid: int, cycle: dict, ndvi_series=None, combinat
         ax.spines[side].set_visible(False)
     ax.set_title(f"{loc['aoi']}  pid {pid}   |   cycle: "
                  f"{pd.Timestamp(cycle['start_date']):%d %b} start, "
-                 f"{cycle.get('emergence_to_harvest_days', float('nan')):.0f} d emergence to harvest, "
+                 f"{cycle.get('greenup_to_harvest_days', float('nan')):.0f} d green-up to harvest, "
                  f"amplitude {cycle['amplitude']:.2f}\n"
                  f"Sentinel-2 {combination} below — does the detected cycle match the colours?",
                  loc="left", fontsize=11, color=INK)
@@ -219,15 +219,15 @@ def stratified_sample(main: pd.DataFrame, per_group: int = 2, seed: int = 0) -> 
     The groups deliberately include the short cycles and the weak-amplitude pixels, which are the
     ones a wrong detector would produce.
     """
-    d = main.dropna(subset=["emergence_to_harvest_days", "amplitude", "start_date"]).copy()
+    d = main.dropna(subset=["greenup_to_harvest_days", "amplitude", "start_date"]).copy()
     early, late = d["start_date"].quantile([0.05, 0.95])
     groups = {
-        "typical": d[d["emergence_to_harvest_days"].between(*d["emergence_to_harvest_days"].quantile([0.4, 0.6]))
+        "typical": d[d["greenup_to_harvest_days"].between(*d["greenup_to_harvest_days"].quantile([0.4, 0.6]))
                      & (d["amplitude"] > d["amplitude"].median())],
         "earliest start": d[d["start_date"] <= early],
         "latest start": d[d["start_date"] >= late],
-        "short cycle": d[d["emergence_to_harvest_days"] <= d["emergence_to_harvest_days"].quantile(0.05)],
-        "long cycle": d[d["emergence_to_harvest_days"] >= d["emergence_to_harvest_days"].quantile(0.95)],
+        "short cycle": d[d["greenup_to_harvest_days"] <= d["greenup_to_harvest_days"].quantile(0.05)],
+        "long cycle": d[d["greenup_to_harvest_days"] >= d["greenup_to_harvest_days"].quantile(0.95)],
         "weak amplitude": d[d["amplitude"] <= d["amplitude"].quantile(0.05)],
         "two cycles": d[d.get("n_cycles", pd.Series(1, index=d.index)) >= 2],
     }

@@ -93,7 +93,7 @@ def test_stratified_sample_covers_the_edges_not_only_the_middle():
     n = 300
     frame = pd.DataFrame({
         "pid": range(n),
-        "emergence_to_harvest_days": np.linspace(30, 220, n),
+        "greenup_to_harvest_days": np.linspace(30, 220, n),
         "amplitude": np.linspace(0.05, 0.9, n),
         "start_date": pd.date_range("2025-04-01", periods=n, freq="D"),
         "n_cycles": [1] * (n - 20) + [2] * 20,
@@ -102,8 +102,8 @@ def test_stratified_sample_covers_the_edges_not_only_the_middle():
     assert set(picked["group"]) >= {"typical", "earliest start", "latest start",
                                     "short cycle", "long cycle", "weak amplitude", "two cycles"}
     assert picked["pid"].is_unique or True  # groups may overlap by construction
-    assert picked["emergence_to_harvest_days"].min() < 60
-    assert picked["emergence_to_harvest_days"].max() > 190
+    assert picked["greenup_to_harvest_days"].min() < 60
+    assert picked["greenup_to_harvest_days"].max() > 190
 
 
 def test_the_clearest_date_of_each_period_is_chosen_when_haze_is_given():

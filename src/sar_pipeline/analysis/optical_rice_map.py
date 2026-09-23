@@ -35,7 +35,7 @@ AOIs span the country.
    greens and is cut inside two months is rice.
 5. **Short enough to be one crop** — trough to harvest no longer than ``max_cycle_days``. Beyond
    that the "cycle" is two crops the segmenter failed to separate, or permanent vegetation.
-6. **Wet when it started** — ``wet_at_sowing``: at the cycle's trough the NDVI sits *below* the
+6. **Wet when it started** — ``wet_at_transplant``: at the cycle's trough the NDVI sits *below* the
    field's own pre-season bare level while LSWI moves the *other way*. Drying bare soil takes both
    down together, so it is the opposite directions that mean standing water. This is the paddy test
    that the per-date exports could not answer, because Sentinel-2 never saw the transplanting window
@@ -152,7 +152,7 @@ def classify(cycles: pd.DataFrame, tolerance_days: float = TOLERANCE_DAYS,
     long_enough = chosen["start_to_harvest_days"] >= min_cycle_days
     short_enough = chosen["start_to_harvest_days"] <= max_cycle_days
     testable = chosen["prewet_ndvi_drop"].notna() & chosen["prewet_lswi_rise"].notna()
-    wet = (~testable) | chosen["wet_at_sowing"].fillna(False).astype(bool)
+    wet = (~testable) | chosen["wet_at_transplant"].fillna(False).astype(bool)
     rice = complete & strong & long_enough & short_enough & wet
     used = {"season_centre": centre.strftime("%d %b %Y"),
             "season_window": f"{start:%d %b} .. {end:%d %b}",

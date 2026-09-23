@@ -45,7 +45,7 @@ from . import optical_phenology as op
 #: AOI cubes already read, keyed by the settings they were read with. Cleared with :func:`forget`.
 _CUBES: dict[tuple, tuple] = {}
 
-MARKS = (("start_date", "start", "#8a8985"), ("emergence_date", "emergence", "#2a78d6"),
+MARKS = (("start_date", "start", "#8a8985"), ("greenup_onset", "green-up", "#2a78d6"),
          ("peak_date", "peak", "#52514e"), ("harvest_date", "harvest", "#eb6834"))
 
 
@@ -179,7 +179,7 @@ def _title(data):
         return head + "\nno cycle measured"
     return (head + f"\ncycle: {pd.Timestamp(m['start_date']):%d %b} start · "
             f"amplitude {m['amplitude']:.2f} · "
-            f"{m['emergence_to_harvest_days']:.0f} d emergence to harvest · "
+            f"{m['greenup_to_harvest_days']:.0f} d green-up to harvest · "
             f"{'complete' if m['complete'] else 'INCOMPLETE — runs into the edge of the series'}")
 
 

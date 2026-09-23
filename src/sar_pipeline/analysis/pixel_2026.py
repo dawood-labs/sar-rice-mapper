@@ -3,7 +3,7 @@
 Why
 ---
 Every decision about what is rice comes down to looking at pixels: does the smoothed curve follow the
-observations, are the detected sowing, emergence, peak and harvest dates where the field visibly
+observations, are the detected transplanting, green-up, peak and harvest dates where the field visibly
 changes, and what does the field actually look like on those dates. Doing that by hand means
 re-reading the exports, re-running the smoother and hunting for clear images each time — slow, and
 easy to do slightly differently from the pipeline. This module does it once, the pipeline's way:
@@ -26,11 +26,12 @@ the bright bare soil of May and the haze of September set the range and rendered
 almost black. Cloud is excluded from the percentiles either way, or it would squash the fields into
 the dark end.
 
-**Sowing.** The detector's ``sowing_date`` is its NDVI trough minus ten days. When a field sits low
-and flat for weeks before the crop, that trough can land far from the real start (one pixel: trough
-in early October, emergence on 10 December). Here sowing is estimated from the emergence the
-detector finds by acceleration, minus ``SOWING_LEAD_DAYS``, and the trough is shown alongside so
-the difference stays visible.
+**Transplanting, not sowing.** Rice here is transplanted (or direct-seeded) into a puddled field;
+the nursery sowing that precedes it happens elsewhere and cannot be seen in the pixel. So the
+field's start is the **trough** — the field as a pool of water with small seedlings, NDVI near zero —
+and ``transplant_date`` is that start. It is dated from the green-up onset minus the measured lag
+(``GREENUP_LAG_DAYS``) rather than from the trough directly, because on a field that sits low and
+flat for weeks the detector's trough can land far from the real start; the trough is shown alongside.
 
 Use it (``notebooks/07_pixel_2026.ipynb`` wraps this):
 
@@ -145,8 +146,8 @@ def stretch_limits(chips, clear, low: float = 2.0, high: float = 98.0):
     return np.asarray(limits, dtype="float64")
 
 
-def estimate_sowing(found: pd.DataFrame, lead_days: int = op.SOWING_LEAD_DAYS) -> pd.DataFrame:
-    """Sowing = emergence (acceleration) minus ``lead_days``; the trough-based date only as a fallback.
+def estimate_transplant(found: pd.DataFrame, lead_days: int = op.GREENUP_LAG_DAYS) -> pd.DataFrame:
+    """Transplant date = green-up onset (acceleration) minus ``lead_days``; the trough only as a fallback.
 
     Keeps the detector's trough as ``trough_date`` so both can be compared; see the module docstring.
     """
@@ -155,8 +156,8 @@ def estimate_sowing(found: pd.DataFrame, lead_days: int = op.SOWING_LEAD_DAYS) -
         return found
     found["trough_date"] = found["start_date"]
     lead = pd.Timedelta(days=lead_days)
-    emergence = pd.to_datetime(found["emergence_date"])
-    found["sowing_date"] = (emergence - lead).where(emergence.notna(),
+    onset = pd.to_datetime(found["greenup_onset"])
+    found["transplant_date"] = (onset - lead).where(onset.notna(),
                                                     pd.to_datetime(found["start_date"]) - lead)
     return found
 
@@ -167,7 +168,7 @@ def cycles(aoi_id: int, pid: int) -> tuple[pd.DataFrame, dict]:
     s = p["series"]
     found = op.pixel_cycles(pd.DatetimeIndex(s["window"]), s["ndvi_fit"].to_numpy(), None,
                             s["lswi_fit"].to_numpy(), observed=s["ndvi_composite"].notna().to_numpy())
-    return estimate_sowing(pd.DataFrame(found)), p
+    return estimate_transplant(pd.DataFrame(found)), p
 
 
 def info(aoi_id: int, pid: int, p: dict, found: pd.DataFrame) -> pd.Series:
@@ -203,7 +204,7 @@ def _class_2025(loc):
 
 
 #: Crop-date columns shown in the cycles table and drawn on the curve, with their colours.
-DATE_MARKS = (("sowing_date", "sowing", "#6b4f2a"), ("emergence_date", "emergence", "#1baf7a"),
+DATE_MARKS = (("transplant_date", "transplant", "#6b4f2a"), ("greenup_onset", "green-up", "#1baf7a"),
               ("peak_date", "peak", "#2a78d6"), ("harvest_date", "harvest", "#eb6834"))
 
 
@@ -211,9 +212,9 @@ def cycle_table(found: pd.DataFrame) -> pd.DataFrame:
     """The columns a person reads, dates as dates, lengths in days."""
     if found.empty:
         return found
-    cols = ["cycle", "complete", "trough_date", "sowing_date", "emergence_date", "greenup_date", "peak_date",
-            "peak_ndvi", "harvest_date", "end_date", "emergence_to_harvest_days", "growth_amplitude",
-            "lswi_at_start", "prewet_ndvi_drop", "prewet_lswi_rise", "wet_at_sowing"]
+    cols = ["cycle", "complete", "trough_date", "transplant_date", "greenup_onset", "greenup_date", "peak_date",
+            "peak_ndvi", "harvest_date", "end_date", "greenup_to_harvest_days", "growth_amplitude",
+            "lswi_at_start", "prewet_ndvi_drop", "prewet_lswi_rise", "wet_at_transplant"]
     table = found[[c for c in cols if c in found]].copy()
     for c in table.columns:
         if c.endswith("_date"):

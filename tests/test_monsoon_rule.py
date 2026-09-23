@@ -21,6 +21,10 @@ def _series():
     flood[season] = np.where(t[season] < t[season][10], -0.35, 0.2)                    # water, then soil
     ndvi = np.stack([rice, young, trees, bare, flood], axis=1)
     lswi = np.full_like(ndvi, 0.2)
+    # the young pixel dries out after a harvest (-0.2) and is then wetted to ~0.05: relative wetting only
+    dry = season & (t < t[season][0] + 3)
+    lswi[dry, 1] = -0.2
+    lswi[season & ~dry, 1] = 0.05
     return ndvi, lswi, windows
 
 
@@ -28,7 +32,8 @@ def test_classes_follow_trough_and_rise():
     ndvi, lswi, windows = _series()
     ev = mr.pixel_events(ndvi, lswi, windows)
     assert mr.classify(ev).tolist() == [1, 2, 0, 0, 0]   # water re-emerging as soil is not a canopy
-    assert ev.loc[0, "wet_at_trough"] and ev.loc[0, "trough_ndvi"] < 0.1
+    assert ev.loc[0, "wet_open"] and ev.loc[0, "trough_ndvi"] < 0.1
+    assert not ev.loc[1, "wet_open"] and ev.loc[1, "wet_relative"] and ev.loc[1, "wet_at_trough"]
     assert pd.notna(ev.loc[0, "climb_date"]) and pd.isna(ev.loc[1, "climb_date"])
 
 

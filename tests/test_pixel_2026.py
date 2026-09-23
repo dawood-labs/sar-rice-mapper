@@ -41,11 +41,11 @@ def test_stretch_ignores_cloud_pixels():
     assert (limits[:, 1] <= 1000).all()
 
 
-def test_sowing_is_estimated_from_emergence_not_the_trough():
+def test_transplant_is_estimated_from_greenup_not_the_trough():
     found = pd.DataFrame({"start_date": pd.to_datetime(["2025-10-06", "2026-05-01"]),
-                          "emergence_date": [pd.Timestamp("2025-12-10"), None]})
-    out = px.estimate_sowing(found, lead_days=10)
-    assert out["sowing_date"].dt.strftime("%Y-%m-%d").tolist() == ["2025-11-30", "2026-04-21"]
+                          "greenup_onset": [pd.Timestamp("2025-12-10"), None]})
+    out = px.estimate_transplant(found, lead_days=10)
+    assert out["transplant_date"].dt.strftime("%Y-%m-%d").tolist() == ["2025-11-30", "2026-04-21"]
     assert (out["trough_date"] == found["start_date"]).all()
 
 

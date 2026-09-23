@@ -32,7 +32,7 @@ def cycles_frame(rows):
     out["peak_date"] = pd.to_datetime(out["peak_date"])
     for col, default in (("growth_from_baseline", np.nan), ("complete", True),
                          ("start_to_harvest_days", 110.0), ("prewet_ndvi_drop", 0.1),
-                         ("prewet_lswi_rise", 0.05), ("wet_at_sowing", True)):
+                         ("prewet_lswi_rise", 0.05), ("wet_at_transplant", True)):
         out[col] = default if col not in out else out[col].fillna(default)
     out.attrs.update(shape=(1, len(out)), grid={})
     return out
@@ -85,7 +85,7 @@ def test_a_cycle_that_is_too_short_or_too_long_is_not_rice():
 
 def test_a_field_that_was_dry_at_sowing_is_not_rice():
     frame = cycles_frame(season(40) + [dict(pid=96, peak_date="2025-08-08", growth_amplitude=0.7,
-                                            prewet_lswi_rise=-0.12, wet_at_sowing=False)])
+                                            prewet_lswi_rise=-0.12, wet_at_transplant=False)])
     chosen, rice, used = m.classify(frame, amplitude_cut=0.45)
     assert not dict(zip(chosen["pid"], rice))[96]
     assert used["failed_dry_at_sowing"] == 1
@@ -94,7 +94,7 @@ def test_a_field_that_was_dry_at_sowing_is_not_rice():
 def test_an_untestable_wetness_does_not_fail_a_pixel():
     """The baseline stretch can fall outside the observed period; that is not evidence of dryness."""
     frame = cycles_frame(season(40) + [dict(pid=95, peak_date="2025-08-08", growth_amplitude=0.7,
-                                            wet_at_sowing=False)])
+                                            wet_at_transplant=False)])
     frame.loc[frame["pid"] == 95, ["prewet_ndvi_drop", "prewet_lswi_rise"]] = np.nan
     chosen, rice, used = m.classify(frame, amplitude_cut=0.45)
     assert dict(zip(chosen["pid"], rice))[95]

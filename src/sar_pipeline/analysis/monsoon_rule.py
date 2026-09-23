@@ -8,8 +8,13 @@ looks like in the gap-free 5-day series, region by region:
 * the field goes to a **trough** — bare or flooded, NDVI 0 to 0.3 — somewhere between late June and
   late August depending on the region (two months apart between the delta and the capital region);
 * the canopy then **climbs** by 0.5 to 0.9 NDVI within six to nine weeks;
-* at the trough the field is often wet (LSWI above NDVI) — but not everywhere: in one region rice
-  was certain and LSWI never rose above NDVI. So water is **evidence, not a condition**.
+* at the trough the field is wet. In the delta that is open water (LSWI above NDVI, 79-100 % of
+  plots). In the capital region it is not: the field dried out after the summer harvest (LSWI -0.2)
+  and was then wetted for transplanting (LSWI up by 0.2-0.3 to about zero) under a shallow, turbid
+  layer with dense seedlings, so LSWI never rose above NDVI (0-13 % of plots) — yet the rise from
+  the field's own dry level was there in 71-86 % of them. Water is therefore read both ways
+  (``wet_open`` or ``wet_relative``), and is **evidence, not a condition**: it is reported per
+  pixel, and the rule does not fail a pixel for lacking it.
 
 So the rule is calendar-free within a season window, and needs no AOI-level season: per pixel, the
 trough inside the window and the climb after it. Two thresholds, both read off the plots:
@@ -45,7 +50,12 @@ RISE_MIN = 0.30
 YOUNG_MIN = 0.15
 CANOPY_MIN = 0.50
 YOUNG_CANOPY_MIN = 0.30
-SEASON = ("2026-06-01", "2026-09-24")
+#: The season: rice planted in May 2026 or later. The dry-season crop is out of scope.
+SEASON = ("2026-05-01", "2026-09-24")
+#: LSWI must rise by this much from the field's own driest level in the 60 days before the trough
+#: (and end at or above zero) to count as wetting for transplanting.
+WET_RISE_MIN = 0.15
+WET_LOOKBACK_DAYS, WET_LOOKAHEAD_DAYS = 60, 25
 CLASSES = {0: "not rice", 1: "rice", 2: "young", 255: "no data"}
 
 
@@ -65,9 +75,19 @@ def pixel_events(ndvi, lswi, windows, season=SEASON) -> pd.DataFrame:
     trough = np.where(valid, np.nanargmin(np.where(np.isfinite(sub), sub, np.inf), axis=0), 0)
     cols = np.arange(n_pix)
     trough_ndvi = sub[trough, cols]
-    lswi_at = lswi[idx][trough, cols]
+    lswi_sub = lswi[idx]
+    lswi_at = lswi_sub[trough, cols]
+    # wetting relative to the field's own dry level: driest LSWI in the weeks before the trough
+    # against the wettest in the weeks after it (the water is applied at or just after the trough)
+    step = np.arange(len(idx))[:, None]
+    when = windows[idx].to_numpy()
+    day_gap = (when[:, None] - when[trough][None, :]) / np.timedelta64(1, "D")
+    before = (day_gap >= -WET_LOOKBACK_DAYS) & (day_gap <= 0)
+    after_w = (day_gap >= 0) & (day_gap <= WET_LOOKAHEAD_DAYS)
+    lswi_dry = np.where(before, lswi_sub, np.inf).min(axis=0)
+    lswi_wet = np.where(after_w, lswi_sub, -np.inf).max(axis=0)
     # highest value after the trough, and the first window where the climb reaches RISE_MIN
-    after = np.where(np.arange(len(idx))[:, None] >= trough[None, :], sub, -np.inf)
+    after = np.where(step >= trough[None, :], sub, -np.inf)
     peak_after = after.max(axis=0)
     reached = after >= (trough_ndvi + RISE_MIN)[None, :]
     first = np.where(reached.any(axis=0), reached.argmax(axis=0), -1)
@@ -75,7 +95,9 @@ def pixel_events(ndvi, lswi, windows, season=SEASON) -> pd.DataFrame:
         "valid": valid,
         "trough_date": windows[idx][trough],
         "trough_ndvi": trough_ndvi, "lswi_at_trough": lswi_at,
-        "wet_at_trough": lswi_at > trough_ndvi,
+        "wet_open": lswi_at > trough_ndvi,
+        "wet_relative": (lswi_wet - lswi_dry >= WET_RISE_MIN) & (lswi_wet >= 0),
+        "wet_at_trough": (lswi_at > trough_ndvi) | ((lswi_wet - lswi_dry >= WET_RISE_MIN) & (lswi_wet >= 0)),
         "rise": peak_after - trough_ndvi, "peak_after": peak_after,
         "climb_date": pd.Series(np.where(first >= 0, windows[idx][np.clip(first, 0, None)], pd.NaT)),
         "last_ndvi": ndvi[-1],
@@ -121,6 +143,8 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, ins
     return {"aoi": d["loc"]["aoi"], **{f"{k}_acres": round(acres(v), 1) for k, v in counts.items()},
             "rice_pct_of_decided": round(100 * counts["rice"] / max(inside.sum(), 1), 1),
             "wet_pct_of_rice": round(100 * float(wet[classes == 1].mean()) if counts["rice"] else 0.0, 1),
+            "wet_open_pct_of_rice": round(100 * float(events["wet_open"].to_numpy()[classes == 1].mean())
+                                          if counts["rice"] else 0.0, 1),
             "trough_median": events.loc[classes == 1, "trough_date"].median().strftime("%d %b")
             if counts["rice"] else None,
             "climb_median": events.loc[classes == 1, "climb_date"].dropna().median().strftime("%d %b")

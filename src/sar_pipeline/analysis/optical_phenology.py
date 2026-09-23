@@ -72,11 +72,14 @@ from . import pixel_report as pr
 #: time, not a calendar date, so it travels between regions: transplanting and the puddling before it
 #: occupy two to three weeks wherever the field is.
 WATER_WINDOW_DAYS = 20
-#: How long before emergence the field was actually sown or transplanted: the seed goes in, or the
-#: seedlings are transplanted into a puddled field, about a week to ten days before the canopy starts
-#: to rise. It matters because the standing water is at *sowing*, so that is where the water test has
-#: to look. Emergence is the acceleration onset; the NDVI trough stands in only when none is found.
-SOWING_LEAD_DAYS = 10
+#: Days from the field's start (transplanting, or direct seeding) to the **green-up onset**, the
+#: point where NDVI starts to climb fastest. A 10 m pixel at transplanting is ~90 % water with small
+#: seedlings in it, so NDVI stays near zero until the plants have tillered enough to cover the water;
+#: the nursery sowing that precedes transplanting happens elsewhere and is invisible here. Measured on
+#: 2,950 field plots in September 2026: 15 days in the delta, 20 in the other regions. The trough is
+#: the field start whenever it is observed; this lag is only used to date the start from the onset
+#: when the trough fell in a cloud gap.
+GREENUP_LAG_DAYS = 15
 #: Where the field's dry baseline is read: a stretch before the cycle starts, far enough back to be
 #: before any puddling. The median over ``[start - BASELINE_FROM, start - BASELINE_TO]`` days.
 BASELINE_FROM, BASELINE_TO = 75, 25
@@ -392,7 +395,7 @@ def pixel_cycles(grid_dates, ndvi, ndwi, lswi=None, prominence_fraction: float =
         peak, low, high = float(ndvi[peak_i]), float(ndvi[lo]), float(ndvi[hi])
         cycle = {
             "cycle": k, "complete": complete,
-            # start_date is the NDVI trough; sowing_date is set below, from emergence when found.
+            # start_date is the NDVI trough; transplant_date is set below, from the green-up onset.
             "start_date": grid_dates[lo], "start_ndvi": low,
             "peak_date": grid_dates[peak_i], "peak_ndvi": peak,
             "end_date": grid_dates[hi], "end_ndvi": high,
@@ -416,21 +419,21 @@ def pixel_cycles(grid_dates, ndvi, ndwi, lswi=None, prominence_fraction: float =
             "max_fall_per_day": _extreme(slope[peak_i:hi + 1], False) if hi > peak_i else np.nan,
         }
         onset = acceleration_onset(ndvi, days, lo, peak_i)
-        cycle["emergence_date"] = None if onset is None else grid_dates[onset]
-        # Sowing is dated from emergence when the acceleration finds it. The trough is only a
-        # fallback: on a field that sits low and flat for weeks before the crop, the trough lands
-        # far too early (one pixel: trough 6 October, emergence 10 December), and the water test
-        # below would then look for the puddling two months before it happened.
-        sow_idx = lo if onset is None else onset
-        cycle["sowing_from"] = "trough" if onset is None else "emergence"
-        cycle["sowing_date"] = grid_dates[sow_idx] - pd.Timedelta(days=SOWING_LEAD_DAYS)
+        cycle["greenup_onset"] = None if onset is None else grid_dates[onset]
+        # The field start (transplanting / direct seeding) is dated from the green-up onset minus
+        # the measured lag. The trough is only a fallback: on a field that sits low and flat for
+        # weeks before the crop, the trough lands far too early (one pixel: trough 6 October, onset
+        # 10 December), and the water test below would then look two months before the puddling.
+        tp_idx = lo if onset is None else onset
+        cycle["transplant_from"] = "trough" if onset is None else "greenup"
+        cycle["transplant_date"] = grid_dates[tp_idx] - pd.Timedelta(days=GREENUP_LAG_DAYS)
         up = _cross(ndvi, lo, peak_i + 1, low + (peak - low) / 2, True)
         down = _cross(ndvi, peak_i, hi + 1, high + (peak - high) / 2, False)
         cycle["greenup_date"] = None if up is None else grid_dates[up]
         cycle["harvest_date"] = None if down is None else grid_dates[down]
         cycle["fwhm_days"] = np.nan if (up is None or down is None) else float(days[down] - days[up])
         cycle["start_to_harvest_days"] = np.nan if down is None else float(days[down] - days[lo])
-        cycle["emergence_to_harvest_days"] = (np.nan if (down is None or onset is None)
+        cycle["greenup_to_harvest_days"] = (np.nan if (down is None or onset is None)
                                               else float(days[down] - days[onset]))
 
         # Water at the start of this cycle, in a window measured in days rather than months.
@@ -455,9 +458,9 @@ def pixel_cycles(grid_dates, ndvi, ndwi, lswi=None, prominence_fraction: float =
         # measured against this pixel's own pre-season baseline, so no absolute level is assumed.
         # Look for the water around *sowing*, not around the trough: the field is puddled before the
         # seedlings go in, so the wettest moment sits about ten days ahead of the NDVI minimum.
-        sow_day = days[sow_idx] - SOWING_LEAD_DAYS
-        base = (days >= sow_day - BASELINE_FROM) & (days <= sow_day - BASELINE_TO)
-        around = np.abs(days - sow_day) <= water_window_days
+        tp_day = days[tp_idx] - GREENUP_LAG_DAYS
+        base = (days >= tp_day - BASELINE_FROM) & (days <= tp_day - BASELINE_TO)
+        around = np.abs(days - tp_day) <= water_window_days
         cycle["prewet_ndvi_drop"] = np.nan
         cycle["prewet_lswi_rise"] = np.nan
         cycle["growth_from_baseline"] = np.nan
@@ -471,7 +474,7 @@ def pixel_cycles(grid_dates, ndvi, ndwi, lswi=None, prominence_fraction: float =
             if lswi is not None and np.isfinite(lswi[base]).any() and np.isfinite(lswi[around]).any():
                 cycle["prewet_lswi_rise"] = (_extreme(lswi[around], largest=True)
                                              - float(np.nanmedian(lswi[base])))
-        cycle["wet_at_sowing"] = bool(cycle["prewet_ndvi_drop"] > 0 and cycle["prewet_lswi_rise"] > 0)
+        cycle["wet_at_transplant"] = bool(cycle["prewet_ndvi_drop"] > 0 and cycle["prewet_lswi_rise"] > 0)
 
         # How much of this cycle was actually seen. The smoother draws a continuous curve across a
         # cloudy fortnight, which is what lets the cycle be detected at all; these two numbers say

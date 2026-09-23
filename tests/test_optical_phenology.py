@@ -34,13 +34,13 @@ def test_a_single_cycle_is_found_and_timed():
     c = op.pixel_cycles(grid(days), ndvi, np.full_like(ndvi, -0.5))
     assert len(c) == 1
     assert c[0]["peak_ndvi"] == 0.80
-    assert c[0]["harvest_date"] > c[0]["peak_date"] > c[0]["emergence_date"]
+    assert c[0]["harvest_date"] > c[0]["peak_date"] > c[0]["greenup_onset"]
 
 
 def test_shifting_the_season_moves_the_dates_but_not_the_shape():
     """A crop sown 40 days later must measure as the same crop, only later."""
     shape_keys = ("amplitude", "rise_days", "fall_days", "fwhm_days",
-                  "start_to_harvest_days", "emergence_to_harvest_days")
+                  "start_to_harvest_days", "greenup_to_harvest_days")
     early = op.pixel_cycles(*(grid(one_cycle(0)[0]),), one_cycle(0)[1], np.full(73, -0.5))[0]
     late = op.pixel_cycles(*(grid(one_cycle(40)[0]),), one_cycle(40)[1], np.full(73, -0.5))[0]
     for key in shape_keys:
@@ -185,7 +185,7 @@ def test_a_cycle_whose_rise_falls_in_a_blanked_gap_reports_no_rate_quietly():
     assert all(np.isnan(x["max_rise_per_day"]) or np.isfinite(x["max_rise_per_day"]) for x in c)
 
 
-def test_sowing_is_dated_from_emergence_when_the_field_sits_low_for_weeks():
+def test_transplant_is_dated_from_greenup_when_the_field_sits_low_for_weeks():
     """A long flat low stretch before the crop must not drag the sowing date weeks early."""
     import numpy as np
     import pandas as pd
@@ -199,6 +199,6 @@ def test_sowing_is_dated_from_emergence_when_the_field_sits_low_for_weeks():
     ndvi[0] = 0.08                                    # the trough sits at the very start
     dates = pd.date_range("2025-09-01", periods=len(days), freq="5D")
     c = op.pixel_cycles(dates, ndvi, None, None)[0]
-    assert c["sowing_from"] == "emergence"
-    assert c["sowing_date"] == c["emergence_date"] - pd.Timedelta(days=op.SOWING_LEAD_DAYS)
-    assert (c["sowing_date"] - c["start_date"]).days > 60
+    assert c["transplant_from"] == "greenup"
+    assert c["transplant_date"] == c["greenup_onset"] - pd.Timedelta(days=op.GREENUP_LAG_DAYS)
+    assert (c["transplant_date"] - c["start_date"]).days > 60

@@ -108,7 +108,8 @@ How a pixel's year is cut into cycles:
 3. The curve is split at its own **local minima**. A dip only ends a crop if the field stays down for
    **20 days** — otherwise a short dip (a cloud residue, a weeding) would split one crop into two.
 4. **Emergence** (`start_date`) is where the rise *accelerates* hardest (maximum of the second
-   derivative), not where NDVI crosses some level. **Sowing** (`sowing_date`) is 10 days earlier.
+   derivative), not where NDVI crosses some level. The field's start (`transplant_date`) is
+   `GREENUP_LAG_DAYS` (15) earlier.
 
 ```python
 from sar_pipeline.analysis import optical_phenology as op
@@ -251,11 +252,12 @@ This route fixes both:
    chip. Each chip gets its own 2-98 % stretch on clear pixels plus gamma 0.7, for the sharpest
    colours; `STRETCH = "series"` shares one stretch so colours can be compared between dates.
 
-   **Sowing is estimated as emergence minus 10 days.** The detector's own `sowing_date` is its NDVI
-   trough minus 10 days, and on fields that sit low and flat for weeks before the crop that trough
-   lands far too early (one pixel: 6 October against an emergence on 10 December). The table shows
-   both (`trough_date`, `sowing_date`). The wet-at-sowing test in `optical_phenology` still looks
-   around the trough and needs the same fix before it is used on this season.
+   **Transplanting, not sowing.** Rice is transplanted (or direct-seeded) into a flooded field; the
+   nursery sowing before it happens elsewhere and is invisible. The field's start is the trough (the
+   field as a pool of water with small seedlings, NDVI near zero); NDVI only starts to climb once
+   the plants have tillered enough to cover the water, **15-20 days later** as measured on the field
+   plots (`GREENUP_LAG_DAYS`). `transplant_date` is the green-up onset minus that lag; the table also
+   shows `trough_date`. Names: `greenup_onset` (was "emergence"), `transplant_date` (was "sowing").
 
 4. **Is there a crop in a given season at all?** — `analysis/aoi_profile.py` summarises **every pixel
    inside the AOI on every date**, under two independent masks (QA60 and Cloud Score+ `clear` >= 60):
