@@ -202,3 +202,18 @@ def aoi_event_summary(events: pd.DataFrame) -> pd.DataFrame:
         onset=("onset_date", med_date), trough_to_onset_days=("trough_to_onset_days", "median"),
         last_ndvi=("last_ndvi", "median"), last_ndvi_p25=("last_ndvi", lambda v: v.quantile(.25)),
         peak_after=("peak_ndvi_after_trough", "median")).round(2).reset_index())
+
+
+def interior_pixels(pixels: dict, width: int) -> dict:
+    """``{plot_id: boolean array}``: True where a plot pixel's four neighbours are all in the same plot.
+
+    Why: a 10 m pixel on a plot's edge straddles the bund, a path or the neighbour's field, and the
+    5x5 radar mean straddles even more. When a plot's edge pixels disagree with its interior the
+    disagreement is the mixing, not the crop; when a whole plot disagrees, the label or the polygon
+    deserves a look.
+    """
+    out = {}
+    for pid, pix in pixels.items():
+        inside = set(int(p) for p in pix)
+        out[pid] = np.array([all(q in inside for q in (p - 1, p + 1, p - width, p + width)) for p in pix])
+    return out

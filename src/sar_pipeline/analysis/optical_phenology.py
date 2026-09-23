@@ -91,6 +91,9 @@ PROMINENCE_FRACTION = 0.3
 #: residual cloud, not a harvest. Without this one crop was being cut into two cycles by a single
 #: contaminated observation, and the larger fragment was then reported as the pixel's main crop.
 MIN_LOW_DAYS = 20
+#: Smallest NDVI climb that lets the last sample count as the peak of a crop still growing (see
+#: ``_segment``). Only that edge case uses an absolute number.
+EDGE_RISE_MIN = 0.1
 #: Cloud Score+ value a pixel-date must reach to be used. Applies only to the per-date exports; the
 #: window composites are masked with s2cloudless before compositing and carry no clear score. 0.60
 #: let through enough thin haze to put a 0.3-amplitude sawtooth through the whole monsoon; 0.75 keeps
@@ -336,6 +339,21 @@ def _segment(ndvi, days=None, prominence_fraction: float = PROMINENCE_FRACTION,
     minima, _ = find_peaks(-filled, prominence=span * prominence_fraction)
     if days is not None and len(minima):
         minima = _durable_minima(filled, np.asarray(days, dtype="float64"), peaks, minima, min_low_days)
+    # A crop still climbing on the last date has no descent after it, so find_peaks never sees its
+    # peak, and standing rice at the end of the series went undetected (every field plot of one
+    # region: transplanted in July, still rising in September, "no cycle"). The last sample counts
+    # as a peak when the series has risen by the prominence since its last minimum and is at its
+    # highest there; the cycle is then reported incomplete, with no harvest.
+    # Unlike an interior peak, this one has no descent to prove it is a crop, so a small absolute
+    # floor guards it: a canopy starting to close rises far more than EDGE_RISE_MIN, and the noise
+    # left on flat ground by the smoother is far less.
+    last = len(filled) - 1
+    tail_start = int(minima[-1]) if len(minima) else int(np.nanargmin(filled))
+    no_peak_after = len(peaks) == 0 or peaks[-1] < tail_start
+    tail = filled[tail_start:]
+    if (no_peak_after and last > tail_start and filled[last] >= tail.max() - 1e-9
+            and filled[last] - tail.min() >= max(span * prominence_fraction, EDGE_RISE_MIN)):
+        peaks = np.append(peaks, last).astype(int)
     return peaks, minima
 
 
@@ -368,7 +386,7 @@ def _bounds(ndvi, peak_i, minima):
     n = len(ndvi)
     before, after = minima[minima < peak_i], minima[minima > peak_i]
     lo = int(before[-1]) if len(before) else _flat_shoulder(ndvi, 0, peak_i, take_last=True)
-    hi = int(after[0]) if len(after) else _flat_shoulder(ndvi, peak_i + 1, n, take_last=False)
+    hi = int(after[0]) if len(after) else min(_flat_shoulder(ndvi, peak_i + 1, n, take_last=False), n - 1)
     return lo, hi, bool(lo > 0 and hi < n - 1)
 
 
@@ -428,7 +446,8 @@ def pixel_cycles(grid_dates, ndvi, ndwi, lswi=None, prominence_fraction: float =
         cycle["transplant_from"] = "trough" if onset is None else "greenup"
         cycle["transplant_date"] = grid_dates[tp_idx] - pd.Timedelta(days=GREENUP_LAG_DAYS)
         up = _cross(ndvi, lo, peak_i + 1, low + (peak - low) / 2, True)
-        down = _cross(ndvi, peak_i, hi + 1, high + (peak - high) / 2, False)
+        # a crop still climbing on the last date has no fall to read a harvest from
+        down = None if hi <= peak_i else _cross(ndvi, peak_i, hi + 1, high + (peak - high) / 2, False)
         cycle["greenup_date"] = None if up is None else grid_dates[up]
         cycle["harvest_date"] = None if down is None else grid_dates[down]
         cycle["fwhm_days"] = np.nan if (up is None or down is None) else float(days[down] - days[up])

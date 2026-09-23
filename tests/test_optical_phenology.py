@@ -202,3 +202,22 @@ def test_transplant_is_dated_from_greenup_when_the_field_sits_low_for_weeks():
     assert c["transplant_from"] == "greenup"
     assert c["transplant_date"] == c["greenup_onset"] - pd.Timedelta(days=op.GREENUP_LAG_DAYS)
     assert (c["transplant_date"] - c["start_date"]).days > 60
+
+
+def test_a_crop_still_climbing_on_the_last_date_is_a_cycle():
+    """Standing rice at the end of the series must not vanish just because it has not peaked."""
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import optical_phenology as op
+
+    dates = pd.date_range("2025-09-01", periods=78, freq="5D")
+    t = np.arange(78, dtype=float)
+    ndvi = np.full(78, 0.2)
+    ndvi[:30] = 0.2 + 0.6 * np.exp(-((t[:30] - 12) / 5) ** 2)         # a finished winter crop
+    ndvi[62:] = 0.2 + 0.55 * (t[62:] - 62) / 15                        # climbing to 0.75 at the end
+    found = op.pixel_cycles(dates, ndvi, None, None)
+    last = found[-1]
+    assert last["peak_date"] == dates[-1] and last["complete"] is False
+    assert last["harvest_date"] is None and last["growth_amplitude"] > 0.5
+    assert last["greenup_onset"] is not None and last["greenup_onset"] >= pd.Timestamp("2026-06-01")

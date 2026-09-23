@@ -196,3 +196,34 @@ def plot_recall(aoi_id: int, plots, out_root="processed/_batch/s2_2026") -> dict
     return {"aoi": d["loc"]["aoi"], "plot_pixels": int(len(pix)),
             **{f"{name}_pct": round(100 * float((c == code).sum()) / n, 1)
                for code, name in CLASSES.items() if code != 255}}
+
+
+def plot_recall_by_position(aoi_id: int, plots, out_root="processed/_batch/s2_2026") -> pd.DataFrame:
+    """Class shares of field-plot pixels split into plot interior and plot edge, plus per-plot shares.
+
+    Returns a frame with rows ``interior`` and ``edge`` (class percentages) and the attribute
+    ``per_plot``: per plot, the share of its pixels called rice, to find whole plots that disagree.
+    """
+    import rasterio
+
+    from .plot_curves import interior_pixels, plot_pixels
+
+    d = nd.load(aoi_id, out_root=out_root)
+    with rasterio.open(Path(out_root) / d["loc"]["aoi"] / f"{d['loc']['aoi']}_monsoon2026.tif") as ds:
+        classes = ds.read(1).ravel()
+    pixels = plot_pixels(plots, d["loc"]["grid"])
+    interior = interior_pixels(pixels, int(d["loc"]["grid"]["width"]))
+    rows, per_plot = {}, []
+    for name, want in (("interior", True), ("edge", False)):
+        pix = np.concatenate([p[interior[k] == want] for k, p in pixels.items()]) if pixels else np.array([], int)
+        c = classes[pix.astype(int)] if len(pix) else np.array([], "uint8")
+        n = max(int((c != 255).sum()), 1)
+        rows[name] = {"pixels": int(len(pix)), **{f"{label}_pct": round(100 * float((c == code).sum()) / n, 1)
+                                                 for code, label in CLASSES.items() if code != 255}}
+    for k, p in pixels.items():
+        c = classes[p]
+        per_plot.append({"plot_id": k, "n_pixels": len(p), "rice_pct": round(100 * float(np.isin(c, (1, 3)).mean()), 1),
+                         "confirmed_pct": round(100 * float((c == 1).mean()), 1)})
+    frame = pd.DataFrame(rows).T
+    frame.attrs["per_plot"] = pd.DataFrame(per_plot)
+    return frame

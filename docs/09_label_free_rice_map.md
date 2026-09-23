@@ -375,6 +375,37 @@ This route fixes both:
    agreeing on the date is the evidence that the trough is transplanting, and that the water was
    there.
 
+10. **Is the candidate crop the same crop as the field plots?** — `analysis/crop_signature.py`. When
+   the rule leaves a large area as "rice by phenology, water unconfirmed", either the analysis looked
+   for the water at the wrong moment or the crop is not rice. The module measures the **same
+   descriptors** on the known-rice plots and on a sample of the AOI's candidate pixels — the season's
+   cycle from the cycle detector (transplant date, peak, green-up to harvest, whether it was cut
+   before the last date) and the radar dip at *that cycle's* transplant date — and puts the
+   distributions side by side (`compare`).
+
+   ```python
+   from sar_pipeline.analysis import crop_signature as cs
+   ref = cs.plot_signatures(plot_curves_all)              # known rice, one row per plot
+   cand = cs.pixel_signatures(114, sample_pixels)         # candidates, one row per pixel
+   cs.compare(ref, cand)
+   ```
+
+   First use, on the large AOI without plots: the known-rice plots were **still standing** on the
+   last date (90 %) with a radar dip at transplanting in 71 %; the AOI's candidates had been **cut
+   before the last date** in 77 %, after cycles of about 45 days from green-up, with a radar dip in
+   29 %. Short crops harvested in July and August are not monsoon rice; the rule's "unconfirmed"
+   was right, and the water was not found because there was none.
+
+   Two detector fixes came out of this: a crop still climbing on the last date now counts as a
+   cycle (it has no descent, so `find_peaks` never saw its peak — every standing-rice plot of one
+   region had "no cycle"), and the season's cycle is chosen by its green-up onset, not by the
+   trough, which on a flat field can sit weeks before the crop.
+
+   `monsoon_rule.plot_recall_by_position` splits the plot pixels into interior and edge: on the
+   first delivery both agreed (interior 88-91 % confirmed rice, edge 85-90 %), so the unconfirmed
+   share is not edge mixing; 28 of 1,735 plots disagreed as a whole, and the two looked at were a
+   field still under water on the last date and a field whose new crop had just started.
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`
