@@ -257,6 +257,18 @@ This route fixes both:
    both (`trough_date`, `sowing_date`). The wet-at-sowing test in `optical_phenology` still looks
    around the trough and needs the same fix before it is used on this season.
 
+4. **Is there a crop in a given season at all?** — `analysis/aoi_profile.py` summarises **every pixel
+   inside the AOI on every date**, under two independent masks (QA60 and Cloud Score+ `clear` >= 60):
+   NDVI p10 / median / p90, the share with a canopy (NDVI > 0.5) and the share that looks flooded
+   (LSWI > NDVI). Sample pixels can miss a crop that covers part of an AOI, and one mask can hide a
+   whole season; this cannot.
+
+   ```python
+   from sar_pipeline.analysis import aoi_profile as ap
+   prof = ap.date_profile(143)          # one row per date and mask
+   ap.plot(prof, out_path="processed/_batch/s2_2026/aoi143/figures/aoi143_date_profile.png")
+   ```
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`
