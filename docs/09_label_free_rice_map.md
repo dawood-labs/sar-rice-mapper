@@ -243,6 +243,20 @@ This route fixes both:
    Band descriptions are the window start dates, so QGIS's Temporal/Spectral Profile Tool shows a
    pixel's curve with real dates.
 
+3. **Look at any pixel** — `notebooks/07_pixel_2026.ipynb` (logic in `analysis/pixel_2026.py`):
+   set `AOI` and `PID`, Run All. It shows the pixel's info (location, dates kept by QA60, longest
+   gap, last season's map class), its crop cycles (sowing, emergence, green-up, peak, harvest), the
+   curve with every raw date and the fit, and **5-3-2 chips centred on the pixel** (61 x 61 px,
+   ~610 m) for the clearest `PER_MONTH` dates of every month, ranked by Cloud Score+ over the whole
+   chip. Each chip gets its own 2-98 % stretch on clear pixels plus gamma 0.7, for the sharpest
+   colours; `STRETCH = "series"` shares one stretch so colours can be compared between dates.
+
+   **Sowing is estimated as emergence minus 10 days.** The detector's own `sowing_date` is its NDVI
+   trough minus 10 days, and on fields that sit low and flat for weeks before the crop that trough
+   lands far too early (one pixel: 6 October against an emergence on 10 December). The table shows
+   both (`trough_date`, `sowing_date`). The wet-at-sowing test in `optical_phenology` still looks
+   around the trough and needs the same fix before it is used on this season.
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`

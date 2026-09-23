@@ -305,7 +305,7 @@ config/            pipeline.example.yaml (tracked); your own *.yaml configs (git
 docs/              concepts, setup, runbook, outputs, troubleshooting, scaling, glossary
 docs/developer/    interface contract (interfaces.md) and testing guide
 notebooks/         01_grid_and_audit, 02_export, 03_download_and_stack, 04_pixel_explorer,
-                   05_pixel_investigation, 06_pixel_curve
+                   05_pixel_investigation, 06_pixel_curve, 07_pixel_2026 (one pixel: curve, crop dates, 5-3-2 chips)
 src/sar_pipeline/  the Python package
   config.py        config loading + processed/ folder conventions + run versioning
   auth.py          Earth Engine + Cloud Storage authentication
