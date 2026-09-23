@@ -269,6 +269,22 @@ This route fixes both:
    ap.plot(prof, out_path="processed/_batch/s2_2026/aoi143/figures/aoi143_date_profile.png")
    ```
 
+5. **Which AOIs carry a crop this season?** — `sar_pipeline/season_screen.py`, one read-only Earth
+   Engine request over every AOI, nothing exported (about 30 s for 132 AOIs). A pixel counts as
+   **seasonal canopy** when its maximum NDVI in the season window is above 0.5 *and* at least 0.3
+   above its median in the pre-season window; trees are green in both windows and are reported
+   separately as `evergreen`. Only Cloud Score+ clear pixels are used, and `seen_pct` says how much
+   of each AOI was observed in both windows. Areas in acres, sorted by seasonal area.
+
+   ```python
+   from sar_pipeline import auth, config, season_screen as ss
+   auth.init_ee(config.load_config("config/<any>.yaml"))
+   table = ss.screen(ss.aoi_polygons(), bare=("2026-04-01", "2026-06-01"),
+                     season=("2026-08-01", "2026-09-24"))
+   ```
+
+   It is a screen for choosing where to work, not a classification: a seasonal canopy can be any crop.
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`

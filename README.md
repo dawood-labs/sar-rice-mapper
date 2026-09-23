@@ -326,6 +326,7 @@ src/sar_pipeline/  the Python package
   pixel_query.py   pixel time series + plots
   optical_export.py  Sentinel-2 reference images, one clearest date per month
   s2_windows.py    Sentinel-2 5-day cloud-masked composites (docs/09)
+  season_screen.py which AOIs carry a crop in a season: one read-only pass (docs/09)
   analysis/        ground-truth QC, features, spatial CV, models, maps, field labels;
                    label-free route (docs/09): optical_phenology, optical_rice_map, pixel_curve,
                    chips, sar_curve, separability, sar_rice_map, phase_check
