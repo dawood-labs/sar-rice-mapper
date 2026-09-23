@@ -153,3 +153,21 @@ def test_run_batch_carries_on_past_a_failing_aoi(tmp_path, monkeypatch):
     assert len(frame) == 3
     assert frame.loc[1, "error"].startswith("ValueError")
     assert (tmp_path / "aoi_rice_acres.csv").exists()
+
+
+def test_run_batch_merges_into_the_existing_table(tmp_path, monkeypatch):
+    """Running one more AOI must keep every other AOI's row and replace only its own."""
+    def fake(aoi_id, out_root, **kw):
+        return {"aoi": f"aoi{aoi_id}", "rice_acres": float(aoi_id), "total_acres": 20.0,
+                "rice_pct_of_decided": 50.0, "season_window": "x"}
+
+    monkeypatch.setattr(m, "run_aoi", fake)
+    m.run_batch([1, 2], out_root=tmp_path, log=lambda *a: None)
+    monkeypatch.setattr(m, "run_aoi", lambda aoi_id, out_root, **kw: {**fake(aoi_id, out_root), "rice_acres": 99.0})
+    frame = m.run_batch([2, 3], out_root=tmp_path, log=lambda *a: None)
+
+    assert list(frame["aoi"]) == ["aoi2", "aoi3"]
+    table = pd.read_csv(tmp_path / "aoi_rice_acres.csv").set_index("aoi")
+    assert sorted(table.index) == ["aoi1", "aoi2", "aoi3"]
+    assert table.loc["aoi1", "rice_acres"] == 1.0
+    assert table.loc["aoi2", "rice_acres"] == 99.0

@@ -16,7 +16,7 @@ The first radar-only draft map was anchored to a fixed calendar ("monsoon season
 where VH is high). A pixel-by-pixel comparison with Sentinel-2 showed that the NDVI canopy peaked
 and the crop was **cut weeks before** VH reached its seasonal maximum. In other words the radar
 feature the model leaned on was measuring harvested fields, not the growing canopy. That check lives
-in `analysis/phase_check.py` (section 5).
+in `analysis/phase_check.py` (section 4).
 
 So the order was reversed:
 
@@ -152,7 +152,7 @@ Outputs in `processed/_batch/optical_v3/`:
 |---|---|
 | `<aoi>/<aoi>_rice_optical.tif` | 1 = rice, 0 = not rice, 255 = undecided |
 | `<aoi>/<aoi>_rice_optical_sieved_0p5ac.tif` | same, with patches under 0.5 acre (21 pixels) merged into their neighbour |
-| `aoi_rice_acres.csv` | one row per AOI: total, rice and undecided **acres**, rice % of decided, season window, the cuts used |
+| `aoi_rice_acres.csv` | one row per AOI: total, rice and undecided **acres**, rice % of decided, season window, the cuts used. **Merged** on every run: the AOIs just run replace their own rows, all others are kept |
 
 One failing AOI is logged and the batch carries on; its row carries an `error` column.
 

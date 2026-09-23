@@ -275,7 +275,13 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/optical_v3", sieve_acres=(0.
 
 
 def run_batch(aoi_ids, out_root="processed/_batch/optical_v3", log=print, **kw) -> pd.DataFrame:
-    """Run :func:`run_aoi` over several AOIs, carrying on past one that fails."""
+    """Run :func:`run_aoi` over several AOIs, carrying on past one that fails.
+
+    ``aoi_rice_acres.csv`` is **merged**, not overwritten: rows for the AOIs in this batch replace
+    their old rows and every other AOI's row is kept. AOIs are run a few at a time, and overwriting
+    meant that running one new AOI silently wiped the table for all the others. Returns only this
+    batch's rows.
+    """
     rows = []
     for aoi_id in aoi_ids:
         try:
@@ -288,5 +294,10 @@ def run_batch(aoi_ids, out_root="processed/_batch/optical_v3", log=print, **kw) 
         rows.append(row)
     frame = pd.DataFrame(rows)
     Path(out_root).mkdir(parents=True, exist_ok=True)
-    frame.to_csv(Path(out_root) / "aoi_rice_acres.csv", index=False)
+    table_path = Path(out_root) / "aoi_rice_acres.csv"
+    table = frame
+    if table_path.exists():
+        previous = pd.read_csv(table_path)
+        table = pd.concat([previous[~previous["aoi"].isin(frame["aoi"])], frame], ignore_index=True)
+    table.to_csv(table_path, index=False)
     return frame
