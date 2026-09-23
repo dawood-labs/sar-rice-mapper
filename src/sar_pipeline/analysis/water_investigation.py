@@ -626,3 +626,31 @@ def cross_track_support(aoi_id: int, pixels, when, pol, days: int = 14, drop_db:
                 hit = (near & (drops >= drop_db)).sum(axis=0)
             count += np.where(pol == p, hit, 0)
     return count
+
+
+def monsoon_flood_share(aoi_id: int, code: int = 3, n: int = 3000, seed: int = 0,
+                        start: str = "2026-05-15", end: str = "2026-09-24") -> dict:
+    """For interior pixels of one class: did the radar see standing water at ANY monsoon date?
+
+    The rule looks for the transplanting water before the climb. A field whose water came only
+    after the optical climb (a floodplain drowned in August, a late transplanting after an early
+    weed flush) or never came at all is left in class 3; this splits the two, without guards on
+    the optical dates: a drop of 4 dB below the field's own earlier level, confirmed by a second
+    pass on the same track and polarisation.
+    """
+    import rasterio
+
+    from . import radar_water as rw
+
+    with rasterio.open(Path("processed/_batch/s2_2026") / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026.tif") as ds:
+        c2 = ds.read(1)
+    pids = interior_pids(c2, code, n, seed=seed)
+    if not len(pids):
+        return {"aoi": f"aoi{aoi_id}", "n": 0}
+    anchor = np.full(len(pids), np.datetime64(end), dtype="datetime64[D]")
+    span = (-(np.datetime64(end) - np.datetime64(start)).astype(int), 0)
+    fl = rw.pixel_floods(aoi_id, anchor, pixels=pids, span=span)
+    wet = (fl["flood_drop"] >= 4) & (fl["flood_persist"] >= 2)
+    when = pd.to_datetime(fl.loc[wet, "flood_date"])
+    return {"aoi": f"aoi{aoi_id}", "n": int(len(pids)), "any_monsoon_flood_pct": round(100 * float(wet.mean()), 1),
+            "flood_month_median": when.median().strftime("%d %b") if len(when) else None}

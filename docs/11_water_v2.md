@@ -93,6 +93,13 @@ pixels). What remains in class 3 is concentrated in a few northern AOIs whose bl
 dry-land crops on fields that were bare and dry until the rains, plus floodplain fields whose water
 came only after the optical climb; naming those crops needs a field check.
 
+`water_investigation.monsoon_flood_share` asks the remaining class 3 a plainer question: did the
+radar see standing water at *any* monsoon date (4 dB below the field's own earlier level, on two
+passes)? Over the fourteen AOIs with the most class 3 the answer splits them cleanly: in some,
+45-87 % of the field interiors flooded, but only in August, weeks after the crop had closed its
+canopy (a river or rain flood over a standing crop, not transplanting water); in others 0-10 % ever
+flooded. Neither is evidence of transplanted rice, which is why class 3 stays a separate class.
+
 ## How to run
 
 ```python

@@ -234,6 +234,11 @@ waiting for the export queue):
 scripts/monsoon_batch_chain.sh config/<working>.yaml <split_folder> batch3 <ids>
 ```
 
+**Delivery package.** `python -m sar_pipeline.delivery` copies every AOI's map to
+`processed/_batch/s2_2026/delivery/` as `<aoi>_standing_rice_<map date>.tif` with a colour table and
+class names, and writes `acres_by_class.csv` (every class per AOI, plus totals), `legend.csv` and
+`METHODS.md` (from `docs/delivery_methods_note.md`).
+
 **Why did each AOI come out the way it did?** `python -m sar_pipeline.analysis.batch_report --ids <ids>`
 writes, per AOI, the evidence behind the classes (dates, observation gaps, radar dips at the trough,
 at the end of the bare period and anywhere before the climb, and a split of "not rice") to
