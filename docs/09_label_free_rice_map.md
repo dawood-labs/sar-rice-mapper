@@ -52,6 +52,7 @@ window keeps whatever clear ground any acquisition in it saw, and the windows no
 | 2.2 Measure cycles | `analysis.optical_phenology` | the composites (synced to `data/s2_windows5d/`) | one row per growth cycle per pixel (DataFrame) |
 | 2.3 Classify | `analysis.optical_rice_map` | the cycles | `<aoi>_rice_optical.tif`, sieved copy, `aoi_rice_acres.csv` |
 | 2.4 Check by eye | `analysis.pixel_curve`, `analysis.chips` | composites + cycles | plots, 5-3-2 contact sheets |
+| 2.5 Current-season series | `optical_export` + `analysis.ndvi_5day` | per-date exports with QA60/SCL | gap-free 5-day NDVI and LSWI stacks + `gap_days` |
 | 3.1 Radar curves | `analysis.sar_curve` | stacked Sentinel-1, both tracks | smoothed VH, VV, VH−VV per pixel on the same 5-day grid |
 | 3.2 Separability | `analysis.separability` | radar curves + optical map | AUC per feature per date |
 | 3.3 Radar map | `analysis.sar_rice_map` | radar curves + the AOI's sowing window | two-stage rice mask + agreement table |
@@ -182,6 +183,65 @@ distribution, not only typical ones. The colour stretch is computed **once over 
 on clear pixels only** — per-image stretching would erase the colour progression the check depends on.
 
 ---
+
+### 2.5 The current-season series: light mask, a value every 5 days — `ndvi_5day.py`
+
+**Why a second optical route.** Looking at the curves from 2.1–2.2 showed two problems. The
+s2cloudless + shadow + buffer mask threw away many clear observations, mostly in the sowing and
+monsoon months that matter most. And because that mask is baked into the export, trying a different
+mask meant exporting again. The curve was also blanked across long gaps, so some pixels had no value
+exactly when the classifier needed one.
+
+This route fixes both:
+
+1. **Export every acquisition date unmasked, with the product's own mask bands** (`QA60`, `SCL`),
+   so the mask is chosen locally and can change without a new export:
+
+   ```python
+   from sar_pipeline import auth, config, optical_export as ox
+   cfg = config.load_config("config/<aoi>.yaml"); auth.init_ee(cfg)
+   poly = ox.aoi_geojson_2d(__import__("geopandas").read_file(config.aoi_path(cfg)))
+   ox.mask_summary(poly, "2025-09-01", "2026-09-24")      # read-only: is QA60 populated? QA60 vs SCL
+   rows = ox.export_all_dates(["config/<aoi>.yaml"], "2025-09-01", "2026-09-24",
+                              bucket=cfg["gcs"]["bucket"],
+                              prefix=cfg["gcs"]["base_folder"] + "/s2_dates_masks",
+                              bands=ox.BANDS_WITH_MASKS)   # starts exports: confirm first
+   ox.wait_for_tasks([r["task_id"] for r in rows])        # blocks until every task has finished
+   ```
+
+   Bands, by name: B2 B3 B4 B5 B8 B11 B12 QA60 SCL clear. Each date is tried up to 5 times; a date
+   that still fails is recorded in its row's `error` and the rest carry on. Re-running skips files
+   already on GCS.
+
+2. **Build the gap-free series** (`analysis/ndvi_5day.py`):
+
+   ```python
+   from sar_pipeline.analysis import ndvi_5day as nd
+   nd.build(143)          # syncs data/s2_dates_masks/aoi143/, writes processed/_batch/s2_2026/aoi143/
+   ```
+
+   - **Mask:** only QA60 bit 10 (opaque cloud) and bit 11 (cirrus). There is no shadow mask on
+     purpose, because a flooded paddy is dark and shadow masks tend to delete it. SCL is reported,
+     not applied.
+   - **5-day maximum-value composite:** of the clear dates in a window, the highest NDVI is kept,
+     and LSWI and NDWI come from that same date. Haze only lowers NDVI, so the maximum is the
+     cleanest value.
+   - **Upper-envelope Whittaker** (Chen et al. 2004): points below the fit are down-weighted
+     over 3 passes, so haze dips that got past the light mask do not pull the curve down. Missing
+     windows are filled, so **every pixel has a value in every window**.
+   - **`gap_days`:** for each value, how many days away the nearest real observation was. The
+     value is always there, but a reader can see which values were measured and which were
+     filled in.
+
+   | Output (`processed/_batch/s2_2026/<aoi>/`) | Content, one band per 5-day window |
+   |---|---|
+   | `<aoi>_ndvi5d.tif` | fitted NDVI |
+   | `<aoi>_lswi5d.tif` | fitted LSWI (water signal) |
+   | `<aoi>_ndvi5d_raw.tif` | the composited observation before fitting; nodata where none |
+   | `<aoi>_gapdays5d.tif` | days to the nearest observed window |
+
+   Band descriptions are the window start dates, so QGIS's Temporal/Spectral Profile Tool shows a
+   pixel's curve with real dates.
 
 ## 3. Re-examining the radar against the optical map
 

@@ -212,7 +212,7 @@ def regrid(days, values, ok, grid_days, max_gap_days: float = 35):
 
 
 
-def whittaker(y, lmbd: float = 2.0, d: int = 2, dtd=None):
+def whittaker(y, lmbd: float = 2.0, d: int = 2, dtd=None, weights=None):
     """Smooth and gap-fill one series in a single step (Whittaker, second-difference penalty).
 
     Why here, when smoothing was rejected for the radar features: NDVI's gaps are *missing* dates,
@@ -222,6 +222,9 @@ def whittaker(y, lmbd: float = 2.0, d: int = 2, dtd=None):
 
     ``lmbd`` is deliberately small (2 by default, on a 5-day grid): enough to bridge a cloud gap,
     not enough to round off a harvest. Adapted from the sowing pipeline used on an earlier rice project.
+
+    ``weights`` (same length as ``y``, 0..1) lets a caller trust some observations less than others;
+    missing samples get weight 0 whatever is passed. ``ndvi_5day`` uses it for the upper envelope.
     """
     y = np.asarray(y, dtype="float64")
     mask = np.isfinite(y)
@@ -231,8 +234,9 @@ def whittaker(y, lmbd: float = 2.0, d: int = 2, dtd=None):
     if dtd is None:
         D = np.diff(np.eye(n), n=d, axis=0)
         dtd = D.T @ D
-    rhs = np.where(mask, y, 0.0)
-    A = np.diag(mask.astype(float)) + lmbd * dtd
+    w = mask.astype(float) if weights is None else np.where(mask, np.asarray(weights, float), 0.0)
+    rhs = np.where(mask, y, 0.0) * w
+    A = np.diag(w) + lmbd * dtd
     try:
         z = np.linalg.solve(A, rhs)
     except np.linalg.LinAlgError:
