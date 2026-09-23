@@ -290,6 +290,12 @@ supervised models with spatial cross-validation.
 Never skip step 3. A label set derived purely from thresholds will train a model that reproduces the
 thresholds, and its scores will look good while meaning nothing.
 
+**What this project actually did** is written up in
+[docs/09_label_free_rice_map.md](docs/09_label_free_rice_map.md): a rice map from cloud-masked
+5-day Sentinel-2 composites first (`s2_windows` → `optical_phenology` → `optical_rice_map`), then
+the radar measured against it date by date (`sar_curve` → `separability` → `sar_rice_map`), with the
+commands, inputs and outputs of every step.
+
 ---
 
 ## Repository layout
@@ -298,7 +304,8 @@ thresholds, and its scores will look good while meaning nothing.
 config/            pipeline.example.yaml (tracked); your own *.yaml configs (gitignored)
 docs/              concepts, setup, runbook, outputs, troubleshooting, scaling, glossary
 docs/developer/    interface contract (interfaces.md) and testing guide
-notebooks/         01_grid_and_audit, 02_export, 03_download_and_stack, 04_pixel_explorer
+notebooks/         01_grid_and_audit, 02_export, 03_download_and_stack, 04_pixel_explorer,
+                   05_pixel_investigation, 06_pixel_curve
 src/sar_pipeline/  the Python package
   config.py        config loading + processed/ folder conventions + run versioning
   auth.py          Earth Engine + Cloud Storage authentication
@@ -317,7 +324,11 @@ src/sar_pipeline/  the Python package
   download.py      GCS download + integrity checks
   stack.py         VRT stacks + QA
   pixel_query.py   pixel time series + plots
-  analysis/        ground-truth QC, features, spatial CV, models, maps, field labels
+  optical_export.py  Sentinel-2 reference images, one clearest date per month
+  s2_windows.py    Sentinel-2 5-day cloud-masked composites (docs/09)
+  analysis/        ground-truth QC, features, spatial CV, models, maps, field labels;
+                   label-free route (docs/09): optical_phenology, optical_rice_map, pixel_curve,
+                   chips, sar_curve, separability, sar_rice_map, phase_check
   cli.py           command-line interface
 tests/             unit tests (no network) and live read-only GEE tests (-m gee)
 data/  secrets/  processed/  reference/  logs/     local only, gitignored
@@ -364,6 +375,7 @@ factor is the same named constant `SQM_PER_ACRE` everywhere it is needed
 | [06 Troubleshooting](docs/06_troubleshooting.md) | something failed |
 | [07 Scaling to large AOIs](docs/07_scaling_to_large_aois.md) | processing a country-scale AOI or many scattered AOIs |
 | [08 Ground-truth analysis](docs/08_analysis.md) | checking labelled fields, comparing features, making a first class map — **assumes labels exist; see [Working without ground truth](#working-without-ground-truth)** |
+| [09 A rice map without ground truth](docs/09_label_free_rice_map.md) | there are no labels: the optical-first map and how the radar is checked against it |
 | [Glossary](docs/glossary.md) | a term is unclear |
 | [Developer: interfaces](docs/developer/interfaces.md) | changing code |
 | [Developer: testing](docs/developer/testing.md) | writing or running tests |
