@@ -178,8 +178,10 @@ def render_config(template: dict, aoi_id: int, aoi_path: str, season_key: str,
 def aoi_index(folder="data/aoi") -> pd.DataFrame:
     """``aoi``, ``lon``, ``lat``, ``acres`` for every per-AOI file ``aoi_NNN.gpkg`` in ``folder``.
 
-    The area comes from the file's own ``area`` column (already in acres) when there is one,
-    otherwise from the geometry in UTM zone 46N. Used to order and spread a batch.
+    The area is measured from the geometry in UTM zone 46N. The files' own ``area`` column is also
+    reported (``area_column``) but not trusted: in some AOI files it disagrees with the polygon
+    (0, or a value from another polygon), which once put a 137-acre AOI into a batch of large ones.
+    Used to order and spread a batch.
     """
     import geopandas as gpd
 
@@ -187,9 +189,10 @@ def aoi_index(folder="data/aoi") -> pd.DataFrame:
     for path in sorted(Path(folder).glob("aoi_[0-9]*.gpkg")):
         frame = gpd.read_file(path)
         centroid = frame.to_crs(4326).geometry.union_all().centroid
-        acres = float(frame["area"].sum()) if "area" in frame else float(frame.to_crs(32646).area.sum() / 4046.8564224)
+        acres = float(frame.to_crs(32646).area.sum() / 4046.8564224)
+        column = float(frame["area"].sum()) if "area" in frame else None
         rows.append({"aoi": int(path.stem.split("_")[1]), "lon": round(centroid.x, 4),
-                     "lat": round(centroid.y, 4), "acres": round(acres, 1)})
+                     "lat": round(centroid.y, 4), "acres": round(acres, 1), "area_column": column})
     return pd.DataFrame(rows)
 
 

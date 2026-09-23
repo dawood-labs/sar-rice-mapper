@@ -226,6 +226,15 @@ python -m sar_pipeline.monsoon_batch rule --ids <ids>
 
 Every step skips what is already done, so a batch can be re-run after an interruption.
 
+One AOI takes 6-8 minutes in `rule` (about 3 to read the dates from GCS, 3 to fit the curves, then
+the radar check) and about 2 GB of memory, so run several AOIs at once, each with its own CSV, and
+merge the CSVs afterwards (on a 12-CPU, 46 GB machine six at a time works):
+
+```bash
+echo <ids> | tr ' ' '\n' | xargs -P 6 -I{} python -m sar_pipeline.monsoon_batch rule --ids {} \
+    --out processed/_batch/s2_2026/batch_parts/aoi{}.csv
+```
+
 **Name AOI files distinctively** (`batch-configs` zero-pads the id to three digits). The hygiene
 test treats every AOI file name in a local config as private, and a short unpadded name made of the
 prefix plus a single digit also matches ordinary code, such as the EPSG:4326 helpers.
