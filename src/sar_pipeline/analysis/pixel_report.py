@@ -43,10 +43,17 @@ CLASS_NAMES = {0: "outside AOI", 1: "rice: monsoon only", 2: "rice: monsoon + dr
 
 
 def locate(aoi_id: int, pid: int, season_key: str = "year2025", config_dir="config") -> dict:
-    """Config, run, grid and row/col/lon/lat for a pixel id in an AOI."""
+    """Config, run, grid and row/col/lon/lat for a pixel id in an AOI.
+
+    A relative ``config_dir`` is resolved against the repository, not the working directory, so this
+    works from a notebook folder without anyone having to ``chdir`` first.
+    """
     import pyproj
 
-    cfg = config_mod.load_config(Path(config_dir) / f"aoi{aoi_id}_{season_key}.yaml")
+    path = Path(config_dir)
+    if not path.is_absolute():
+        path = config_mod.repo_root() / path
+    cfg = config_mod.load_config(path / f"aoi{aoi_id}_{season_key}.yaml")
     grid = json.loads((config_mod.grid_dir(cfg) / "grid_def.json").read_text())
     width, height = int(grid["width"]), int(grid["height"])
     if not 0 <= pid < width * height:
@@ -98,15 +105,22 @@ def sar_series(loc: dict, track: str | None = None, window: int = 5) -> pd.DataF
     return frame
 
 
-def sync_s2(loc: dict, cache_root="data/s2_reference") -> Path:
-    """Download this AOI's exported Sentinel-2 files once; later calls reuse the local copies."""
+def sync_s2(loc: dict, cache_root="data/s2_reference", folder: str = "s2_reference") -> Path:
+    """Download this AOI's exported Sentinel-2 files once; later calls reuse the local copies.
+
+    ``folder`` selects the GCS band set: ``s2_reference`` (B2-B5, B8) or ``s2_reference_swir``
+    (the same plus B11, B12), which is the one that can answer whether a field held water.
+    """
     from google.cloud import storage
 
     from .. import auth
 
     cfg = loc["cfg"]
-    prefix = f"{cfg['gcs']['base_folder']}/s2_reference/{loc['aoi']}/"
-    local = Path(cache_root) / loc["aoi"]
+    prefix = f"{cfg['gcs']['base_folder']}/{folder}/{loc['aoi']}/"
+    local = Path(cache_root)
+    if not local.is_absolute():
+        local = config_mod.repo_root() / local
+    local = local / loc["aoi"]
     local.mkdir(parents=True, exist_ok=True)
     client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
     for blob in client.list_blobs(cfg["gcs"]["bucket"], prefix=prefix):
@@ -116,25 +130,36 @@ def sync_s2(loc: dict, cache_root="data/s2_reference") -> Path:
     return local
 
 
-def s2_series(loc: dict, cache_root="data/s2_reference", clear_min: float = 60) -> pd.DataFrame:
-    """NDVI, NDWI and clear score at the pixel for every exported Sentinel-2 date.
+def s2_series(loc: dict, cache_root="data/s2_reference", clear_min: float = 60,
+              folder: str = "s2_reference") -> pd.DataFrame:
+    """NDVI, NDWI, LSWI (when SWIR was exported) and clear score at the pixel, per date.
 
     ``kept`` is False where the pixel's clear score is below ``clear_min`` or it has no data;
-    those rows are excluded from plots. ``flooded`` marks NDWI > 0 (open water at the pixel).
+    those rows are excluded from plots. ``flooded`` follows the published flooding rule
+    LSWI + 0.05 >= NDVI when B11 is present. It is left False on files without SWIR: the older
+    NDWI > 0 test never fired over these fields, because the water is shallow and muddy and NDWI
+    (green, NIR) is in any case a near-mirror of NDVI (r = -0.969) rather than a water measure.
     """
     import rasterio
 
+    from ..optical_export import band_index
+
     rows = []
-    for path in sorted(sync_s2(loc, cache_root).glob("*.tif")):
+    for path in sorted(sync_s2(loc, cache_root, folder).glob("*.tif")):
         date = pd.to_datetime(path.stem.rsplit("_S2_", 1)[1])
         with rasterio.open(path) as ds:
-            v = ds.read(window=((loc["row"], loc["row"] + 1), (loc["col"], loc["col"] + 1)))[:, 0, 0]
-        b2, b3, b4, b5, b8, clear = (float(x) for x in v)
+            window = ((loc["row"], loc["row"] + 1), (loc["col"], loc["col"] + 1))
+            have = {n: float(ds.read(band_index(ds, n), window=window)[0, 0])
+                    for n in ds.descriptions if n}
+        b3, b4, b8, clear = (have.get(k, np.nan) for k in ("B3", "B4", "B8", "clear"))
         valid = (b8 + b4 > 0) and (b3 + b8 > 0)
         ndvi = (b8 - b4) / (b8 + b4) if valid else np.nan
         ndwi = (b3 - b8) / (b3 + b8) if valid else np.nan
-        rows.append({"date": date, "ndvi": ndvi, "ndwi": ndwi, "clear": clear,
-                     "flooded": bool(valid and ndwi > 0), "kept": bool(valid and clear >= clear_min)})
+        b11 = have.get("B11", np.nan)
+        lswi = (b8 - b11) / (b8 + b11) if valid and np.isfinite(b11) and b8 + b11 > 0 else np.nan
+        rows.append({"date": date, "ndvi": ndvi, "ndwi": ndwi, "lswi": lswi, "clear": clear,
+                     "flooded": bool(np.isfinite(lswi) and lswi + 0.05 >= ndvi),
+                     "kept": bool(valid and clear >= clear_min)})
     frame = pd.DataFrame(rows).drop_duplicates("date").sort_values("date").reset_index(drop=True)
     return frame
 
@@ -155,12 +180,13 @@ def model_call(loc: dict, maps_dir="processed/_batch/model_v2/maps") -> dict:
     return out
 
 
-def investigate(aoi_id: int, pid: int, clear_min: float = 60, rain_mm: float = 5) -> dict:
+def investigate(aoi_id: int, pid: int, clear_min: float = 60, rain_mm: float = 5,
+                folder: str = "s2_reference") -> dict:
     """Gather everything for one pixel. Returns a dict of location, frames and a summary."""
     loc = locate(aoi_id, pid)
     sar = sar_series(loc)
     sar["rainy"] = sar["rain_24h_mm"] > rain_mm
-    s2 = s2_series(loc, clear_min=clear_min)
+    s2 = s2_series(loc, clear_min=clear_min, folder=folder)
     call = model_call(loc)
     summary = {
         "AOI": loc["aoi"], "pid": pid, "row / col": f"{loc['row']} / {loc['col']}",
@@ -169,7 +195,7 @@ def investigate(aoi_id: int, pid: int, clear_min: float = 60, rain_mm: float = 5
         "rainy SAR dates (>%g mm/24 h)" % rain_mm: int(sar["rainy"].sum()),
         "S2 dates": len(s2), "S2 dates kept (clear)": int(s2["kept"].sum()),
         "S2 dates dropped (cloud/nodata)": int((~s2["kept"]).sum()),
-        "S2 clear dates with open water (NDWI > 0)": int((s2["kept"] & s2["flooded"]).sum()),
+        "S2 clear dates flooded (LSWI + 0.05 >= NDVI)": int((s2["kept"] & s2["flooded"]).sum()),
         "model class": call.get("class_name", "n/a"),
         "rice probability %": call.get("rice_prob", "n/a"),
         "monsoon-rice probability %": call.get("monsoon_rice_prob", "n/a"),

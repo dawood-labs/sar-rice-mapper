@@ -57,3 +57,30 @@ def test_dates_already_on_gcs_are_skipped():
     todo = ox.dates_to_export(["2025-06-07", "2025-06-12", "2025-06-12"], lambda d: d[:7],
                               existing, "p", "aoiX")
     assert todo == ["2025-06-12"]
+
+
+class _FakeDataset:
+    """Stand-in for a rasterio dataset: only band descriptions are needed."""
+
+    def __init__(self, descriptions):
+        self.descriptions = tuple(descriptions)
+
+
+def test_band_index_is_looked_up_by_name_not_position():
+    without = _FakeDataset(ox.BANDS + ("clear",))
+    with_swir = _FakeDataset(ox.BANDS_WITH_SWIR + ("clear",))
+    assert ox.band_index(without, "clear") == 6
+    assert ox.band_index(with_swir, "clear") == 8
+    assert ox.band_index(with_swir, "B8") == ox.band_index(without, "B8")
+
+
+def test_band_index_rejects_a_missing_band():
+    import pytest
+
+    with pytest.raises(KeyError):
+        ox.band_index(_FakeDataset(ox.BANDS + ("clear",)), "B11")
+
+
+def test_swir_band_set_extends_the_default_without_reordering_it():
+    assert ox.BANDS_WITH_SWIR[:len(ox.BANDS)] == ox.BANDS
+    assert ox.BANDS_WITH_SWIR[len(ox.BANDS):] == ("B11", "B12")

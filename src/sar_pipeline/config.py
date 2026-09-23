@@ -26,6 +26,21 @@ from .errors import PipelineError
 log = logging.getLogger(__name__)
 
 
+def repo_root(start: str | Path | None = None) -> Path:
+    """The repository root, found by walking up to the directory holding ``pyproject.toml``.
+
+    Why this exists: paths such as ``config/`` and ``data/`` are written relative to the repository,
+    and a notebook runs with its own folder as the working directory. Library code should not depend
+    on where it was called from, so anything resolving those paths goes through here instead of
+    trusting ``Path.cwd()``. Falls back to the current directory when no marker is found.
+    """
+    here = Path(start or Path(__file__)).resolve()
+    for candidate in (here, *here.parents):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+    return Path.cwd()
+
+
 def load_config(config_path: str | Path, project_root: str | Path | None = None) -> dict:
     config_path = Path(config_path).resolve()
     with open(config_path) as f:

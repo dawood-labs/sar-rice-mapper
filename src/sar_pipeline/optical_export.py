@@ -22,7 +22,17 @@ Three choices that matter
 Output bands, in file order: ``B2`` (blue), ``B3`` (green), ``B4`` (red), ``B5`` (red edge),
 ``B8`` (NIR), ``clear`` (Cloud Score+ x 100). Reflectances are the collection's integer values
 (reflectance x 10000). Note that the file band number differs from the Sentinel-2 band number;
-the README gives the QGIS band mapping for each colour combination.
+the README gives the QGIS band mapping for each colour combination. Band *names* are written into
+the file, so readers should look a band up by name (:func:`band_index`) rather than by position.
+
+Why a SWIR band set exists
+--------------------------
+Deciding whether a field held water at sowing needs short-wave infrared. Water absorbs SWIR almost
+completely while dry bare soil is bright there, which is the contrast that
+LSWI = (B8 - B11) / (B8 + B11) turns into a flooding test. Without SWIR the only available water
+proxy is NDWI (green, NIR), and over these fields NDWI is a near-mirror of NDVI (measured r = -0.969
+over 904,458 clear pixel-dates), so it reports bare ground rather than water. :data:`BANDS_WITH_SWIR`
+adds B11 and B12; they are 20 m bands and are resampled onto the AOI's 10 m grid like B5 already is.
 """
 from __future__ import annotations
 
@@ -32,7 +42,21 @@ import json
 S2_COLLECTION = "COPERNICUS/S2_SR_HARMONIZED"
 CLOUD_SCORE_COLLECTION = "GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED"
 BANDS = ("B2", "B3", "B4", "B5", "B8")
+#: Band set that can answer the water-at-sowing question; see the module docstring.
+BANDS_WITH_SWIR = BANDS + ("B11", "B12")
 OUTPUT_BANDS = BANDS + ("clear",)
+
+
+def band_index(dataset, name: str) -> int:
+    """1-based band number of ``name`` in an exported file, by its written band description.
+
+    Positions differ between band sets (``clear`` is band 6 without SWIR and band 8 with it), so
+    nothing should hard-code a band number.
+    """
+    try:
+        return dataset.descriptions.index(name) + 1
+    except ValueError:
+        raise KeyError(f"band {name!r} not in this file: {dataset.descriptions}") from None
 
 #: QGIS "Multiband color" settings for the usual combinations, as *file* band numbers.
 QGIS_COMBINATIONS = {
@@ -126,7 +150,7 @@ def best_date(aoi_polygon_4326, month: str, threshold: float = 0.6):
     return top["date"], round(100 * float(top["clear"] or 0), 1), len(table)
 
 
-def export_image(date: str, grid_def: dict, bucket: str, name: str, region_4326):
+def export_image(date: str, grid_def: dict, bucket: str, name: str, region_4326, bands=BANDS):
     """Start one export of the same-day mosaic on ``date``; returns the started task."""
     import ee
 
@@ -135,7 +159,7 @@ def export_image(date: str, grid_def: dict, bucket: str, name: str, region_4326)
     s2 = (ee.ImageCollection(S2_COLLECTION).filterBounds(region).filterDate(day, day.advance(1, "day"))
           .linkCollection(ee.ImageCollection(CLOUD_SCORE_COLLECTION), ["cs_cdf"]))
     mosaic = s2.mosaic()
-    image = (mosaic.select(list(BANDS))
+    image = (mosaic.select(list(bands))
              .addBands(mosaic.select("cs_cdf").multiply(100).rename("clear"))
              .toUint16())
     description = name.rsplit("/", 1)[-1].replace("-", "")[:95]
@@ -148,7 +172,7 @@ def export_image(date: str, grid_def: dict, bucket: str, name: str, region_4326)
 
 
 def plan_and_export(configs, start_month: str, end_month: str, bucket: str, prefix: str,
-                    submit: bool = False, log=print):
+                    submit: bool = False, log=print, bands=BANDS):
     """For every config and month: pick the clearest date, and (with ``submit``) export it.
 
     Returns a list of dict rows for a manifest. Without ``submit`` nothing is exported; the plan
@@ -174,7 +198,7 @@ def plan_and_export(configs, start_month: str, end_month: str, bucket: str, pref
                 name = object_name(prefix, aoi, month, date)
                 row["gcs_uri"] = f"gs://{bucket}/{name}.tif"
                 if submit:
-                    row["task_id"] = export_image(date, grid_def, bucket, name, rect).id
+                    row["task_id"] = export_image(date, grid_def, bucket, name, rect, bands).id
             rows.append(row)
             log(f"{aoi} {month}: {date} clear {clear}% of AOI ({n_dates} dates)"
                 + (" -> submitted" if row["task_id"] else ""))
@@ -214,10 +238,12 @@ def scene_dates(region_4326, start: str, end: str):
     return best
 
 
-def export_all_dates(configs, start: str, end: str, bucket: str, prefix: str, log=print):
+def export_all_dates(configs, start: str, end: str, bucket: str, prefix: str, log=print, bands=BANDS):
     """Export every available date per AOI in [start, end), skipping files already on GCS.
 
-    Returns manifest rows. Exports start immediately; clouds are not masked.
+    Returns manifest rows. Exports start immediately; clouds are not masked. ``prefix`` selects the
+    GCS folder, so a different band set must be given its own prefix rather than overwriting an
+    existing one: a file already there is skipped by name and would otherwise keep the old bands.
     """
     import geopandas as gpd
     from google.cloud import storage
@@ -241,7 +267,7 @@ def export_all_dates(configs, start: str, end: str, bucket: str, prefix: str, lo
             f"{len(todo)} to export")
         for date in todo:
             name = object_name(prefix, aoi, date[:7], date)
-            task = export_image(date, grid_def, bucket, name, rect)
+            task = export_image(date, grid_def, bucket, name, rect, bands)
             rows.append({"aoi": aoi, "month": date[:7], "date": date,
                          "scene_cloud_pct_min": round(clouds[date], 1),
                          "gcs_uri": f"gs://{bucket}/{name}.tif", "task_id": task.id,
