@@ -285,6 +285,25 @@ This route fixes both:
 
    It is a screen for choosing where to work, not a classification: a seasonal canopy can be any crop.
 
+6. **Field plots** — `sar_pipeline/prep/field_plots.py`: loads every zipped shapefile in a delivery
+   folder (kept outside the repository), tags each plot with its `source` file, measures acres per
+   file in that file's own UTM zone, repairs invalid geometries, counts records with no geometry,
+   and finds the AOI each plot falls in.
+
+   ```python
+   from sar_pipeline.prep import field_plots as fp
+   from sar_pipeline import season_screen as ss
+   plots = fp.load("<field data folder>")
+   fp.summary(plots)                                  # per file: plots, acres, invalid, no geometry
+   fp.attribute_overview(plots)                       # what the attribute columns actually contain
+   where = fp.in_aois(plots, ss.aoi_polygons())       # plot_id, aoi, share_in_aoi
+   ```
+
+   First lesson from them: the season screen (step 5) assumes fields are bare in the pre-season
+   window. Where a dry-season crop is still green then and the monsoon crop follows straight after,
+   the field is green in both windows and the screen calls it `evergreen`. Plots reported as
+   standing rice fell almost entirely into `evergreen` in three AOIs.
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`
