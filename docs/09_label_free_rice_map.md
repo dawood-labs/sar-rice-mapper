@@ -304,6 +304,28 @@ This route fixes both:
    the field is green in both windows and the screen calls it `evergreen`. Plots reported as
    standing rice fell almost entirely into `evergreen` in three AOIs.
 
+7. **One curve per field plot** — `analysis/plot_curves.py`: the median fitted NDVI and LSWI over
+   the pixels whose centre lies inside each plot (`inner_buffer_m` shrinks plots first to drop edge
+   pixels), a figure per AOI (all curves, their median, a plots x time heatmap), and per-plot
+   season events (trough date and value, LSWI at the trough, onset of the climb, last value)
+   summarised per AOI.
+
+   ```python
+   from sar_pipeline.prep import field_plots as fp
+   from sar_pipeline.analysis import plot_curves as pc
+   plots = fp.repair(fp.load("<field data folder>"))
+   where = fp.in_aois(plots, ss.aoi_polygons())
+   allc = pc.run_aois([20, 24, 25], plots, where)         # builds the series, writes CSV + PNG per AOI
+   pc.aoi_event_summary(pc.season_events(allc))          # trough, wetness, onset, last NDVI per AOI
+   ```
+
+   What the first delivery showed (plots reported as standing rice in September): every region
+   grows **two rice crops** (a dry-season crop peaking in February to May, then the monsoon crop);
+   the monsoon trough falls between late June and late August depending on the region; the climb
+   starts **15-20 days after the trough** in most regions, which is the lead the detector should use
+   instead of the assumed 10; and in one region LSWI never rose above NDVI at the trough, so a
+   wet-at-sowing test cannot be a hard requirement.
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`
