@@ -84,3 +84,67 @@ def test_band_index_rejects_a_missing_band():
 def test_swir_band_set_extends_the_default_without_reordering_it():
     assert ox.BANDS_WITH_SWIR[:len(ox.BANDS)] == ox.BANDS
     assert ox.BANDS_WITH_SWIR[len(ox.BANDS):] == ("B11", "B12")
+
+
+def test_mask_band_set_adds_qa60_and_scl_after_the_swir_set():
+    assert ox.BANDS_WITH_MASKS[:len(ox.BANDS_WITH_SWIR)] == ox.BANDS_WITH_SWIR
+    assert ox.BANDS_WITH_MASKS[-2:] == ("QA60", "SCL")
+
+
+def test_qa60_cloud_reads_only_bits_10_and_11():
+    import numpy as np
+
+    qa = np.array([0, 1 << 10, 1 << 11, (1 << 10) | (1 << 11), 1 << 9, 1])
+    assert ox.qa60_cloud(qa).tolist() == [False, True, True, True, False, False]
+
+
+def test_start_with_retries_builds_a_fresh_task_each_attempt():
+    import ee
+
+    built = []
+
+    class Task:
+        def __init__(self, fail):
+            self.fail = fail
+
+        def start(self):
+            if self.fail:
+                raise ee.ee_exception.EEException("request_id collision")
+
+    def make():
+        built.append(Task(fail=len(built) < 2))
+        return built[-1]
+
+    task = ox.start_with_retries(make, attempts=5, sleep=lambda s: None)
+    assert len(built) == 3 and task is built[-1]
+
+
+def test_start_with_retries_gives_up_after_the_last_attempt():
+    import ee
+    import pytest
+
+    class Task:
+        def start(self):
+            raise ee.ee_exception.EEException("down")
+
+    with pytest.raises(RuntimeError, match="after 2 attempts"):
+        ox.start_with_retries(Task, attempts=2, sleep=lambda s: None)
+
+
+def test_submit_each_records_a_failure_and_carries_on():
+    def one(date):
+        if date == "b":
+            raise RuntimeError("could not start")
+        return {"date": date}
+
+    rows = ox.submit_each(["a", "b", "c"], one, log=lambda *a: None)
+    assert [r.get("date") for r in rows] == ["a", None, "c"]
+    assert rows[0]["error"] is None and rows[1]["error"].startswith("RuntimeError")
+
+
+def test_wait_for_tasks_polls_until_nothing_is_active():
+    rounds = iter([{"a": "RUNNING", "b": "READY"}, {"a": "COMPLETED", "b": "RUNNING"},
+                   {"a": "COMPLETED", "b": "FAILED"}])
+    states = ox.wait_for_tasks(["a", "b", None], status_of=lambda ids: next(rounds),
+                               sleep=lambda s: None, log=lambda *a: None)
+    assert states == {"a": "COMPLETED", "b": "FAILED"}

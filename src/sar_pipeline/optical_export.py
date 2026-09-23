@@ -33,6 +33,27 @@ LSWI = (B8 - B11) / (B8 + B11) turns into a flooding test. Without SWIR the only
 proxy is NDWI (green, NIR), and over these fields NDWI is a near-mirror of NDVI (measured r = -0.969
 over 904,458 clear pixel-dates), so it reports bare ground rather than water. :data:`BANDS_WITH_SWIR`
 adds B11 and B12; they are 20 m bands and are resampled onto the AOI's 10 m grid like B5 already is.
+
+Why a band set with the mask bands exists
+-----------------------------------------
+The 5-day composites (``s2_windows``) mask with s2cloudless, its projected shadow and a 50 m buffer
+*inside* Earth Engine. Looking at the NDVI curves showed that recipe throwing away a large share of
+clear observations, and because the mask is baked into the file, changing it means exporting again.
+
+:data:`BANDS_WITH_MASKS` exports every acquisition date **unmasked**, with the two mask bands that
+come with the product, so the mask is chosen on this machine and can be changed without a new export:
+
+* ``QA60`` — the product's own cloud bits: bit 10 opaque cloud, bit 11 cirrus. This is the mask
+  applied (:func:`qa60_cloud`). It is the lightest mask available, and it has no shadow class, which
+  is deliberate: a flooded paddy at transplanting is dark, and shadow masks tend to take it for a
+  shadow and delete the very observation that shows the water.
+* ``SCL`` — the scene classification (3 shadow, 8/9 cloud, 10 cirrus). Kept for comparison only.
+
+A light mask lets some haze through, and haze always *lowers* NDVI. The smoother that reads these
+files is expected to follow the upper envelope of the curve for that reason.
+
+In Earth Engine's copy of the collection QA60 was empty between January 2022 and February 2024;
+:func:`mask_summary` checks that it is populated for the dates in hand before anything relies on it.
 """
 from __future__ import annotations
 
@@ -45,6 +66,62 @@ BANDS = ("B2", "B3", "B4", "B5", "B8")
 #: Band set that can answer the water-at-sowing question; see the module docstring.
 BANDS_WITH_SWIR = BANDS + ("B11", "B12")
 OUTPUT_BANDS = BANDS + ("clear",)
+#: Every acquisition, unmasked, with the product's own mask bands; see the module docstring.
+BANDS_WITH_MASKS = BANDS_WITH_SWIR + ("QA60", "SCL")
+#: QA60 bits: 10 = opaque cloud, 11 = cirrus.
+QA60_CLOUD_BITS = (1 << 10) | (1 << 11)
+#: SCL classes treated as cloud when comparing masks: 3 shadow, 8 and 9 cloud, 10 cirrus.
+SCL_CLOUD_CLASSES = (3, 8, 9, 10)
+
+
+def qa60_cloud(qa60):
+    """True where QA60 flags opaque cloud or cirrus. Works on any integer numpy array."""
+    import numpy as np
+
+    return (np.asarray(qa60).astype("int64") & QA60_CLOUD_BITS) != 0
+
+
+def start_with_retries(make_task, attempts: int = 5, pause: float = 2.0, sleep=None):
+    """Build and start an export task, retrying transient Earth Engine errors.
+
+    Why: one rejected ``task.start()`` in a long run used to end the run, and everything after it was
+    never submitted. A new task is built on every attempt, because Earth Engine ties the request id to
+    the task object and retrying the same object collides with itself.
+    """
+    import time
+
+    import ee
+
+    sleep = sleep or time.sleep
+    last = None
+    for attempt in range(attempts):
+        try:
+            task = make_task()
+            task.start()
+            return task
+        except ee.ee_exception.EEException as error:
+            last = error
+            sleep(pause * (2 ** attempt))
+    raise RuntimeError(f"could not start the export after {attempts} attempts") from last
+
+
+def submit_each(items, submit_one, log=print) -> list[dict]:
+    """Call ``submit_one(item)`` for every item, recording a failure and carrying on.
+
+    ``submit_one`` returns a row dict; a failure becomes a row with ``error`` set, so one bad date
+    never stops the dates after it. Re-running the export picks the failed ones up, because only
+    files that exist on GCS are skipped.
+    """
+    rows = []
+    for item in items:
+        try:
+            row = submit_one(item)
+            row.setdefault("error", None)
+        except Exception as error:  # noqa: BLE001 - one date must not abandon the rest
+            row = {"item": item, "error": f"{type(error).__name__}: {error}"}
+            log(f"  {item}: {row['error']}")
+        rows.append(row)
+    return rows
 
 
 def band_index(dataset, name: str) -> int:
@@ -163,12 +240,10 @@ def export_image(date: str, grid_def: dict, bucket: str, name: str, region_4326,
              .addBands(mosaic.select("cs_cdf").multiply(100).rename("clear"))
              .toUint16())
     description = name.rsplit("/", 1)[-1].replace("-", "")[:95]
-    task = ee.batch.Export.image.toCloudStorage(
+    return start_with_retries(lambda: ee.batch.Export.image.toCloudStorage(
         image=image, description=description, bucket=bucket, fileNamePrefix=name,
         fileFormat="GeoTIFF", formatOptions={"cloudOptimized": True}, maxPixels=1e10,
-        **grid_export_params(grid_def))
-    task.start()
-    return task
+        **grid_export_params(grid_def)))
 
 
 def plan_and_export(configs, start_month: str, end_month: str, bucket: str, prefix: str,
@@ -265,11 +340,88 @@ def export_all_dates(configs, start: str, end: str, bucket: str, prefix: str, lo
         todo = dates_to_export(clouds, lambda d: d[:7], existing, prefix, aoi)
         log(f"{aoi}: {len(clouds)} dates available, {len(clouds) - len(todo)} already on GCS, "
             f"{len(todo)} to export")
-        for date in todo:
+        def submit_one(date):
             name = object_name(prefix, aoi, date[:7], date)
             task = export_image(date, grid_def, bucket, name, rect, bands)
-            rows.append({"aoi": aoi, "month": date[:7], "date": date,
-                         "scene_cloud_pct_min": round(clouds[date], 1),
-                         "gcs_uri": f"gs://{bucket}/{name}.tif", "task_id": task.id,
-                         "selection": "all_dates"})
+            return {"aoi": aoi, "month": date[:7], "date": date,
+                    "scene_cloud_pct_min": round(clouds[date], 1),
+                    "gcs_uri": f"gs://{bucket}/{name}.tif", "task_id": task.id,
+                    "selection": "all_dates"}
+
+        done = submit_each(todo, submit_one, log)
+        failed = sum(1 for r in done if r["error"])
+        if failed:
+            log(f"{aoi}: {failed} of {len(todo)} dates could not be submitted; run again to retry them")
+        rows.extend(done)
     return rows
+
+
+def mask_summary(region_4326, start: str, end: str, scale: int = 20):
+    """Per acquisition date over a region: data coverage, and cloud share by QA60 and by SCL.
+
+    Read-only (one ``getInfo``); nothing is exported. Answers two questions before a mask is
+    trusted: is QA60 populated at all for these dates (``qa60_present_pct``), and how far do the
+    light QA60 mask and the SCL mask disagree (``qa60_cloud_pct`` vs ``scl_cloud_pct``). Cloud
+    shares are percentages of the pixels that have data that day.
+    """
+    import ee
+    import pandas as pd
+
+    region = ee.Geometry(region_4326)
+    col = ee.ImageCollection(S2_COLLECTION).filterBounds(region).filterDate(start, end)
+    dates = col.aggregate_array("system:time_start").map(
+        lambda t: ee.Date(t).format("YYYY-MM-dd")).distinct()
+
+    def one(d):
+        day = ee.Date.parse("YYYY-MM-dd", d)
+        mosaic = col.filterDate(day, day.advance(1, "day")).mosaic()
+        data = mosaic.select("B4").mask().gt(0)
+        qa = mosaic.select("QA60")
+        scl = mosaic.select("SCL")
+        stack = ee.Image.cat([
+            data.rename("coverage"),
+            qa.mask().gt(0).updateMask(data).rename("qa60_present"),
+            qa.bitwiseAnd(QA60_CLOUD_BITS).neq(0).updateMask(data).rename("qa60_cloud"),
+            scl.remap(list(SCL_CLOUD_CLASSES), [1] * len(SCL_CLOUD_CLASSES), 0)
+               .updateMask(data).rename("scl_cloud"),
+        ])  # left masked: reduceRegion skips masked pixels, so shares are of the pixels with data
+        means = stack.reduceRegion(ee.Reducer.mean(), region, scale, maxPixels=1e10)
+        return ee.Feature(None, means.set("date", d))
+
+    table = ee.FeatureCollection(dates.map(one)).getInfo()["features"]
+    frame = pd.DataFrame([f["properties"] for f in table])
+    if frame.empty:
+        return frame
+    for col_name in ("coverage", "qa60_present", "qa60_cloud", "scl_cloud"):
+        frame[f"{col_name}_pct"] = (100 * frame.pop(col_name).astype(float)).round(1)
+    return frame.sort_values("date").reset_index(drop=True)
+
+
+def wait_for_tasks(task_ids, poll_seconds: float = 30, status_of=None, sleep=None, log=print) -> dict:
+    """Block until every task has finished; return ``{task_id: final state}``.
+
+    Why: the Sentinel-2 exports are started and forgotten, so without this a download could begin
+    while half the files are still being written, and a failed task would only show up later as a
+    missing date. States come from Earth Engine in batches of up to 100 ids per request.
+    """
+    import time
+
+    sleep = sleep or time.sleep
+    if status_of is None:
+        import ee
+
+        def status_of(ids):
+            return {s["id"]: s["state"] for s in ee.data.getTaskStatus(list(ids))}
+
+    active = {"UNSUBMITTED", "READY", "RUNNING", "CANCEL_REQUESTED"}
+    ids = [t for t in task_ids if t]
+    states = {}
+    while True:
+        for i in range(0, len(ids), 100):
+            states.update(status_of(ids[i:i + 100]))
+        running = [t for t in ids if states.get(t) in active]
+        done = {s: sum(1 for t in ids if states.get(t) == s) for s in ("COMPLETED", "FAILED", "CANCELLED")}
+        log(f"tasks: {len(ids) - len(running)} of {len(ids)} finished {done}")
+        if not running:
+            return states
+        sleep(poll_seconds)
