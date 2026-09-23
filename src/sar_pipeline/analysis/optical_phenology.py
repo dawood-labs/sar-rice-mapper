@@ -72,11 +72,10 @@ from . import pixel_report as pr
 #: time, not a calendar date, so it travels between regions: transplanting and the puddling before it
 #: occupy two to three weeks wherever the field is.
 WATER_WINDOW_DAYS = 20
-#: How long before the NDVI trough the field was actually sown or transplanted. The trough is the
-#: point where the canopy is at its lowest and about to rise — agronomically that is **emergence**,
-#: not sowing: the seed goes in, or the seedlings are transplanted into a puddled field, about a week
-#: to ten days earlier. It matters because the standing water is at *sowing*, so that is where the
-#: water test has to look.
+#: How long before emergence the field was actually sown or transplanted: the seed goes in, or the
+#: seedlings are transplanted into a puddled field, about a week to ten days before the canopy starts
+#: to rise. It matters because the standing water is at *sowing*, so that is where the water test has
+#: to look. Emergence is the acceleration onset; the NDVI trough stands in only when none is found.
 SOWING_LEAD_DAYS = 10
 #: Where the field's dry baseline is read: a stretch before the cycle starts, far enough back to be
 #: before any puddling. The median over ``[start - BASELINE_FROM, start - BASELINE_TO]`` days.
@@ -393,9 +392,8 @@ def pixel_cycles(grid_dates, ndvi, ndwi, lswi=None, prominence_fraction: float =
         peak, low, high = float(ndvi[peak_i]), float(ndvi[lo]), float(ndvi[hi])
         cycle = {
             "cycle": k, "complete": complete,
-            # start_date is the NDVI trough, i.e. emergence; sowing precedes it (SOWING_LEAD_DAYS).
+            # start_date is the NDVI trough; sowing_date is set below, from emergence when found.
             "start_date": grid_dates[lo], "start_ndvi": low,
-            "sowing_date": grid_dates[lo] - pd.Timedelta(days=SOWING_LEAD_DAYS),
             "peak_date": grid_dates[peak_i], "peak_ndvi": peak,
             "end_date": grid_dates[hi], "end_ndvi": high,
             # Three amplitudes, because they answer different questions and one of them was wrong.
@@ -419,6 +417,13 @@ def pixel_cycles(grid_dates, ndvi, ndwi, lswi=None, prominence_fraction: float =
         }
         onset = acceleration_onset(ndvi, days, lo, peak_i)
         cycle["emergence_date"] = None if onset is None else grid_dates[onset]
+        # Sowing is dated from emergence when the acceleration finds it. The trough is only a
+        # fallback: on a field that sits low and flat for weeks before the crop, the trough lands
+        # far too early (one pixel: trough 6 October, emergence 10 December), and the water test
+        # below would then look for the puddling two months before it happened.
+        sow_idx = lo if onset is None else onset
+        cycle["sowing_from"] = "trough" if onset is None else "emergence"
+        cycle["sowing_date"] = grid_dates[sow_idx] - pd.Timedelta(days=SOWING_LEAD_DAYS)
         up = _cross(ndvi, lo, peak_i + 1, low + (peak - low) / 2, True)
         down = _cross(ndvi, peak_i, hi + 1, high + (peak - high) / 2, False)
         cycle["greenup_date"] = None if up is None else grid_dates[up]
@@ -450,7 +455,7 @@ def pixel_cycles(grid_dates, ndvi, ndwi, lswi=None, prominence_fraction: float =
         # measured against this pixel's own pre-season baseline, so no absolute level is assumed.
         # Look for the water around *sowing*, not around the trough: the field is puddled before the
         # seedlings go in, so the wettest moment sits about ten days ahead of the NDVI minimum.
-        sow_day = days[lo] - SOWING_LEAD_DAYS
+        sow_day = days[sow_idx] - SOWING_LEAD_DAYS
         base = (days >= sow_day - BASELINE_FROM) & (days <= sow_day - BASELINE_TO)
         around = np.abs(days - sow_day) <= water_window_days
         cycle["prewet_ndvi_drop"] = np.nan

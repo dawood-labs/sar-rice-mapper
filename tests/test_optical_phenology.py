@@ -183,3 +183,22 @@ def test_a_cycle_whose_rise_falls_in_a_blanked_gap_reports_no_rate_quietly():
         warnings.simplefilter("error")     # any RuntimeWarning fails this test
         c = op.pixel_cycles(grid(days), ndvi, np.full_like(ndvi, -0.5))
     assert all(np.isnan(x["max_rise_per_day"]) or np.isfinite(x["max_rise_per_day"]) for x in c)
+
+
+def test_sowing_is_dated_from_emergence_when_the_field_sits_low_for_weeks():
+    """A long flat low stretch before the crop must not drag the sowing date weeks early."""
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import optical_phenology as op
+
+    days = np.arange(0, 300, 5, dtype=float)
+    ndvi = np.where(days < 150, 0.1, 0.1 + 0.8 * np.exp(-((days - 210) / 30.0) ** 2))
+    ndvi = np.where(days >= 150, np.maximum(ndvi, 0.1 + 0.8 * np.clip((days - 150) / 60, 0, 1) *
+                                            np.exp(-np.clip(days - 210, 0, None) / 25)), ndvi)
+    ndvi[0] = 0.08                                    # the trough sits at the very start
+    dates = pd.date_range("2025-09-01", periods=len(days), freq="5D")
+    c = op.pixel_cycles(dates, ndvi, None, None)[0]
+    assert c["sowing_from"] == "emergence"
+    assert c["sowing_date"] == c["emergence_date"] - pd.Timedelta(days=op.SOWING_LEAD_DAYS)
+    assert (c["sowing_date"] - c["start_date"]).days > 60
