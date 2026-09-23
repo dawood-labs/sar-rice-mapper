@@ -47,3 +47,10 @@ def test_sowing_is_estimated_from_emergence_not_the_trough():
     out = px.estimate_sowing(found, lead_days=10)
     assert out["sowing_date"].dt.strftime("%Y-%m-%d").tolist() == ["2025-11-30", "2026-04-21"]
     assert (out["trough_date"] == found["start_date"]).all()
+
+
+def test_pixel_clear_chips_keeps_every_date_the_pixel_is_clear():
+    table = pd.DataFrame({"date": pd.to_datetime(["2026-01-10", "2026-01-02", "2026-01-20"]),
+                          "pixel_clear": [59.0, 60.0, 95.0]})
+    picked = px.pixel_clear_chips(table, clear_min=60)
+    assert [d.strftime("%m-%d") for d in picked["date"]] == ["01-02", "01-20"]

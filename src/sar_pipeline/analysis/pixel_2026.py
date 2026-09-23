@@ -13,9 +13,11 @@ easy to do slightly differently from the pipeline. This module does it once, the
 * the **crop dates** come from ``optical_phenology.pixel_cycles`` run on that fitted curve — the same
   detector the maps use, so what is drawn is what is measured;
 * the **chips** are 5-3-2 (red edge, green, blue) cut from the same per-date files, **centred on the
-  pixel** with enough surroundings to see the whole field. For every month the clearest dates are
-  shown, ranked by the Cloud Score+ ``clear`` band over the *whole chip* — a date where the pixel is
-  clear but the field around it sits under haze is useless to the eye.
+  pixel** with enough surroundings to see the whole field. By default **every date on which the pixel
+  itself is clear** is shown (Cloud Score+ ``clear`` at the pixel >= ``CLEAR_MIN``; scored per 10 m
+  pixel, so it is finer than QA60), because each of those dates is an observation the curve rests on.
+  ``select="per_month"`` shows instead the ``per_month`` clearest dates of every month, ranked over
+  the whole chip, which keeps one image per month even through the cloudy season.
 
 Each chip is stretched **on its own**, 2nd-98th percentile per band over that chip's clear pixels
 (``stretch="chip"``, the default): the sharpest contrast on every date. One stretch shared by all
@@ -124,6 +126,11 @@ def pick_chips(table: pd.DataFrame, per_month: int = PER_MONTH, min_data_pct: fl
     best = (usable.sort_values(["chip_clear_pct", "pixel_clear"], ascending=False)
             .groupby("month", group_keys=False).head(per_month))
     return best.sort_values("date").drop(columns="month")
+
+
+def pixel_clear_chips(table: pd.DataFrame, clear_min: float = CLEAR_MIN) -> pd.DataFrame:
+    """Every date on which the target pixel itself is clear, in date order."""
+    return table[table["pixel_clear"] >= clear_min].sort_values("date")
 
 
 def stretch_limits(chips, clear, low: float = 2.0, high: float = 98.0):
@@ -268,7 +275,7 @@ def plot_curve(p: dict, found: pd.DataFrame, chip_dates=(), width: float = 16, h
 
 
 def plot_chips(picked: pd.DataFrame, chips, clear, dates, found: pd.DataFrame, half: int = HALF,
-               stretch: str = "chip", cols: int = 6, size: float = 2.9, gamma: float = GAMMA):
+               stretch: str = "chip", cols: int = 7, size: float = 2.7, gamma: float = GAMMA):
     """The picked chips in date order, pixel marked, crop-date chips framed in the date's colour."""
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
@@ -310,14 +317,14 @@ def plot_chips(picked: pd.DataFrame, chips, clear, dates, found: pd.DataFrame, h
 
 
 def report(aoi_id: int, pid: int, half: int = HALF, per_month: int = PER_MONTH, stretch: str = "chip",
-           gamma: float = GAMMA, out_dir=None) -> dict:
+           gamma: float = GAMMA, select: str = "pixel_clear", out_dir=None) -> dict:
     """Info, crop cycles, the curve figure and the chip figure for one pixel.
 
     With ``out_dir`` both figures are also saved there as PNG.
     """
     found, p = cycles(aoi_id, pid)
     table, chips, clear = chip_stack(aoi_id, pid, half)
-    picked = pick_chips(table, per_month)
+    picked = pixel_clear_chips(table) if select == "pixel_clear" else pick_chips(table, per_month)
     curve = plot_curve(p, found, chip_dates=list(picked["date"]))
     sheet = plot_chips(picked, chips, clear, table["date"].to_numpy(), found, half, stretch, gamma=gamma)
     if out_dir:
