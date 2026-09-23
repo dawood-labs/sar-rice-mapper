@@ -31,7 +31,8 @@ def _series():
 def test_classes_follow_trough_and_rise():
     ndvi, lswi, windows = _series()
     ev = mr.pixel_events(ndvi, lswi, windows)
-    assert mr.classify(ev).tolist() == [1, 2, 0, 0, 0]   # water re-emerging as soil is not a canopy
+    assert mr.classify(ev).tolist() == [3, 2, 0, 0, 0]   # no radar: rice is unconfirmed; water re-emerging as soil is not a canopy
+    assert mr.classify(ev, radar_wet=[True, True, True, True, True]).tolist() == [1, 2, 0, 0, 0]
     assert ev.loc[0, "wet_open"] and ev.loc[0, "trough_ndvi"] < 0.1
     assert not ev.loc[1, "wet_open"] and ev.loc[1, "wet_relative"] and ev.loc[1, "wet_at_trough"]
     assert pd.notna(ev.loc[0, "climb_date"]) and pd.isna(ev.loc[1, "climb_date"])

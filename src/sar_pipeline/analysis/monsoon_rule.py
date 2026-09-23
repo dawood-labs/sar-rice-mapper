@@ -33,7 +33,14 @@ all: there the fields went under water (NDVI -0.35) and re-emerged as bare soil 
 On the plots this gives 88-100 % recall where the crop was established and 30-60 % where it was
 still young — which is the honest limit of optical data at that date, not a flaw to tune away.
 
-Classes written: 0 not rice, 1 rice, 2 young, 255 no data. Areas in acres.
+Water is confirmed by radar (``radar_water``), not by the optical LSWI: for every rice pixel the
+Sentinel-1 backscatter is lined up on that pixel's own trough and the dip below its dry level is
+read. Where the dip is there the pixel is **rice** (1); where the radar could look and saw no dip,
+or could not look at all, it is **rice by phenology, water unconfirmed** (3) — kept apart so that
+"no water" and "could not check" are never mixed with confirmed rice.
+
+Classes written: 0 not rice, 1 rice (water confirmed by radar), 2 young, 3 rice by phenology with
+water unconfirmed, 255 no data. Areas in acres.
 """
 from __future__ import annotations
 
@@ -56,7 +63,7 @@ SEASON = ("2026-05-01", "2026-09-24")
 #: (and end at or above zero) to count as wetting for transplanting.
 WET_RISE_MIN = 0.15
 WET_LOOKBACK_DAYS, WET_LOOKAHEAD_DAYS = 60, 25
-CLASSES = {0: "not rice", 1: "rice", 2: "young", 255: "no data"}
+CLASSES = {0: "not rice", 1: "rice", 2: "young", 3: "rice_unconfirmed", 255: "no data"}
 
 
 def pixel_events(ndvi, lswi, windows, season=SEASON) -> pd.DataFrame:
@@ -105,29 +112,48 @@ def pixel_events(ndvi, lswi, windows, season=SEASON) -> pd.DataFrame:
 
 
 def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, young_min=YOUNG_MIN,
-             canopy_min=CANOPY_MIN, young_canopy_min=YOUNG_CANOPY_MIN):
-    """0 not rice, 1 rice, 2 young, 255 no data — from the per-pixel events."""
+             canopy_min=CANOPY_MIN, young_canopy_min=YOUNG_CANOPY_MIN, radar_wet=None):
+    """0 not rice, 1 rice, 2 young, 3 rice with water unconfirmed, 255 no data.
+
+    ``radar_wet`` (bool per pixel, from ``radar_water.pixel_dips``) splits the phenology-rice pixels
+    into confirmed (1) and unconfirmed (3). Without it every phenology-rice pixel is unconfirmed.
+    """
     out = np.zeros(len(events), dtype="uint8")
     low = events["trough_ndvi"] <= trough_max
-    rice = low & (events["rise"] >= rise_min) & (events["peak_after"] >= canopy_min)
-    young = low & ~rice & (events["rise"] >= young_min) & (events["peak_after"] >= young_canopy_min)
-    out[rice.to_numpy()] = 1
-    out[young.to_numpy()] = 2
+    rice = (low & (events["rise"] >= rise_min) & (events["peak_after"] >= canopy_min)).to_numpy()
+    young = (low & ~rice & (events["rise"] >= young_min) & (events["peak_after"] >= young_canopy_min)).to_numpy()
+    wet = np.zeros(len(events), dtype=bool) if radar_wet is None else np.asarray(radar_wet, dtype=bool)
+    out[rice & wet] = 1
+    out[rice & ~wet] = 3
+    out[young] = 2
     out[~events["valid"].to_numpy()] = 255
     return out
 
 
-def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, inside_only: bool = True) -> dict:
-    """Classify one AOI, write ``<aoi>_monsoon2026.tif``, return the acres per class."""
+def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, inside_only: bool = True,
+            radar_season: str | None = "monsoon2026") -> dict:
+    """Classify one AOI, write ``<aoi>_monsoon2026.tif``, return the acres per class.
+
+    ``radar_season`` names the Sentinel-1 season run used to confirm the water; when that run does
+    not exist for the AOI every phenology-rice pixel lands in class 3 and ``radar`` says ``False``.
+    """
     import rasterio
     from rasterio.transform import from_origin
+
+    from . import radar_water
 
     d = nd.load(aoi_id, out_root=out_root)
     shape = d["ndvi5d"].shape[1:]
     ndvi = d["ndvi5d"].reshape(d["ndvi5d"].shape[0], -1)
     lswi = d["lswi5d"].reshape(d["lswi5d"].shape[0], -1)
     events = pixel_events(ndvi, lswi, d["windows"], season)
-    classes = classify(events)
+    radar = bool(radar_season) and radar_water.season_run_exists(aoi_id, radar_season)
+    if radar:
+        trough = np.where(events["valid"].to_numpy(), events["trough_date"].to_numpy().astype("datetime64[D]"),
+                          np.datetime64("NaT"))
+        dips = radar_water.pixel_dips(aoi_id, trough, d["loc"]["grid"], radar_season)
+        events = pd.concat([events, dips], axis=1)
+    classes = classify(events, radar_wet=events["radar_wet"] if radar else None)
     if inside_only:
         classes[~nd.inside_aoi(aoi_id)] = 255
     grid = d["loc"]["grid"]
@@ -140,15 +166,18 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, ins
     counts = {name: int((classes == code).sum()) for code, name in CLASSES.items() if code != 255}
     inside = classes != 255
     wet = events["wet_at_trough"].to_numpy()
-    return {"aoi": d["loc"]["aoi"], **{f"{k}_acres": round(acres(v), 1) for k, v in counts.items()},
-            "rice_pct_of_decided": round(100 * counts["rice"] / max(inside.sum(), 1), 1),
-            "wet_pct_of_rice": round(100 * float(wet[classes == 1].mean()) if counts["rice"] else 0.0, 1),
-            "wet_open_pct_of_rice": round(100 * float(events["wet_open"].to_numpy()[classes == 1].mean())
-                                          if counts["rice"] else 0.0, 1),
-            "trough_median": events.loc[classes == 1, "trough_date"].median().strftime("%d %b")
-            if counts["rice"] else None,
-            "climb_median": events.loc[classes == 1, "climb_date"].dropna().median().strftime("%d %b")
-            if counts["rice"] else None,
+    n_rice = counts["rice"] + counts["rice_unconfirmed"]
+    return {"aoi": d["loc"]["aoi"], "radar": radar,
+            **{f"{k}_acres": round(acres(v), 1) for k, v in counts.items()},
+            "rice_pct_of_decided": round(100 * n_rice / max(inside.sum(), 1), 1),
+            "radar_wet_pct_of_rice": round(100 * counts["rice"] / max(n_rice, 1), 1),
+            "radar_checkable_pct_of_rice": (round(100 * float(events["radar_checkable"].to_numpy()[
+                np.isin(classes, (1, 3))].mean()), 1) if radar and n_rice else None),
+            "optical_wet_pct_of_rice": round(100 * float(wet[np.isin(classes, (1, 3))].mean()) if n_rice else 0.0, 1),
+            "trough_median": events.loc[np.isin(classes, (1, 3)), "trough_date"].median().strftime("%d %b")
+            if n_rice else None,
+            "climb_median": events.loc[np.isin(classes, (1, 3)), "climb_date"].dropna().median().strftime("%d %b")
+            if n_rice else None,
             "path": str(path)}
 
 

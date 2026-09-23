@@ -330,11 +330,14 @@ This route fixes both:
 
 8. **The current-season rule** — `analysis/monsoon_rule.py`. Per pixel, inside the season window
    (1 June to today): the NDVI **trough**, the **climb** after it, and the canopy reached. Thresholds
-   read off the field plots: trough <= 0.40, climb >= 0.30 and canopy >= 0.50 for **rice**; climb
-   >= 0.15 and canopy >= 0.30 for **young** (a crop has started, not confirmable yet). Water at the
-   trough (LSWI > NDVI) is reported, not required — one region's certain rice never showed it. The
-   canopy floor exists because a control AOI with no crop went from water (-0.35) to bare soil (0.2),
-   a "climb" that is not a canopy.
+   read off the field plots: trough <= 0.40, climb >= 0.30 and canopy >= 0.50 for rice by
+   phenology; climb >= 0.15 and canopy >= 0.30 for **young** (a crop has started, not confirmable
+   yet). The canopy floor exists because a control AOI with no crop went from water (-0.35) to bare
+   soil (0.2), a "climb" that is not a canopy. **Water is then confirmed by radar**
+   (`analysis/radar_water.py`): each phenology-rice pixel's Sentinel-1 series is lined up on its own
+   trough and the dip below its dry level (40-15 days before) is read; a dip of 3 dB in VV or VH
+   makes it **rice** (1), otherwise **rice, water unconfirmed** (3). The optical LSWI is only
+   reported, because it missed the shallow water of the capital region that the radar saw.
 
    ```python
    from sar_pipeline.analysis import monsoon_rule as mr
