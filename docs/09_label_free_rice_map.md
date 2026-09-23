@@ -347,6 +347,21 @@ This route fixes both:
    under water), which is the limit of optical data at that date. The control AOI came out at
    0.1 acres of rice.
 
+9. **Radar check of the water** — `analysis/sar_water_check.py`. For every field plot, the plot's
+   VV and VH series (median over its pixels of the 5x5-mean dB stacks of a season run, per track)
+   lined up on the plot's optical transplant date; the **dip** = median level 60-20 days before
+   minus the minimum 10 days before to 15 days after, in dB. VV is the more water-sensitive
+   polarisation (a flooded field mirrors the signal away and VV drops 5-15 dB); VH drops less and
+   then climbs with the canopy. A VV dip where the optical LSWI saw no water is the evidence that
+   the water was there and the optical test was what failed. Needs the Sentinel-1 pipeline
+   (stages 1-5) run for that season, e.g. season key `monsoon2026`.
+
+   ```python
+   from sar_pipeline.analysis import sar_water_check as sw
+   r = sw.run(29, plots, events)     # events: plot_curves.season_events output; writes CSV + PNG
+   r["summary"]                      # per track: median VV/VH dip, % plots with a VV dip >= 3 dB
+   ```
+
 ## 3. Re-examining the radar against the optical map
 
 ### 3.1 One smoothed radar curve per pixel — `analysis/sar_curve.py`
