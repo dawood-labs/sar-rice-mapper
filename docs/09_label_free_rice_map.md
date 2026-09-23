@@ -354,6 +354,9 @@ This route fixes both:
    only in the last 110 days — which also stops May's bare dry field being taken for the
    transplanting of a July crop.
 
+   **Water test v2 (docs/11):** the water is now also searched over the whole bare period before the
+   climb, and rice-like curves on ground the radar shows was never bare go to class 5 (not rice).
+
    ```python
    from sar_pipeline.analysis import monsoon_rule as mr
    mr.run_aoi(114)                 # writes <aoi>_monsoon2026.tif: 0 not rice, 1 rice, 2 young, 255 no data

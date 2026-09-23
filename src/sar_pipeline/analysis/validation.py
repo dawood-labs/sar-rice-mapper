@@ -338,3 +338,36 @@ def cloud_leakage(aoi_id: int, pixels, cs_min: float = 60, max_pixels: int = 600
         "suspect_obs_lower_by_more_than_0.2_pct": round(100 * float((diffs < -0.2).mean()), 1) if len(diffs) else None,
         "n_paired": int(len(diffs)),
     }
+
+
+def compare_versions(aoi_ids, plots, suffixes=("", "_v2"), out_root="processed/_batch/s2_2026") -> pd.DataFrame:
+    """Class shares of every reference set under each map version, per AOI (docs/11).
+
+    Reads the written maps ``<aoi>_monsoon2026<suffix>.tif`` (nothing is re-classified here), so
+    what is scored is exactly what would be delivered. Reference sets as :func:`reference_sets`:
+    field-plot interiors and edges, and the negatives built from the series alone.
+    """
+    import rasterio
+    from pathlib import Path
+
+    rows = []
+    for aoi_id in aoi_ids:
+        refs = reference_sets(aoi_id, plots[plots["aoi"] == f"aoi{aoi_id}"] if "aoi" in plots else plots,
+                              out_root=out_root)
+        for suffix in suffixes:
+            path = Path(out_root) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026{suffix}.tif"
+            if not path.exists():
+                continue
+            with rasterio.open(path) as ds:
+                classes = ds.read(1).ravel()
+            c = classes[refs["pixel"].to_numpy()]
+            frame = refs.assign(cls=c)
+            for (name, region), g in frame.groupby(["set", "region"]):
+                row = {"aoi": f"aoi{aoi_id}", "version": suffix or "v1", "set": name, "region": region,
+                       "pixels": len(g)}
+                for code, label in mr.CLASSES.items():
+                    if code != 255:
+                        row[f"{label}_pct"] = round(100 * float((g["cls"] == code).mean()), 1)
+                rows.append(row)
+        nd.forget()
+    return pd.DataFrame(rows)

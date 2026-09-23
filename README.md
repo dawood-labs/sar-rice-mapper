@@ -424,6 +424,7 @@ factor is the same named constant `SQM_PER_ACRE` everywhere it is needed
 | [08 Ground-truth analysis](docs/08_analysis.md) | checking labelled fields, comparing features, making a first class map — **assumes labels exist; see [Working without ground truth](#working-without-ground-truth)** |
 | [09 A rice map without ground truth](docs/09_label_free_rice_map.md) | there are no labels: the optical-first map and how the radar is checked against it |
 | [10 Validation against field plots](docs/10_validation_2026.md) | how the standing-rice rule was checked, what it got wrong, and the numbers |
+| [11 Refining the water test (v2)](docs/11_water_v2.md) | why rice-like fields lost their water, the flood searched over the whole bare period, class 5, and its validation |
 | [Glossary](docs/glossary.md) | a term is unclear |
 | [Developer: interfaces](docs/developer/interfaces.md) | changing code |
 | [Developer: testing](docs/developer/testing.md) | writing or running tests |

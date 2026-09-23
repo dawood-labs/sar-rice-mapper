@@ -55,3 +55,18 @@ def test_missing_values_in_the_season_are_no_data():
     ndvi, lswi, windows = _series()
     ndvi[70, 0] = np.nan
     assert mr.classify(mr.pixel_events(ndvi, lswi, windows))[0] == 255
+
+
+def test_classify_sends_never_bare_unconfirmed_pixels_to_class_5_only():
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import monsoon_rule as mr
+
+    ev = pd.DataFrame({"valid": [True] * 3, "trough_ndvi": [0.2] * 3, "rise": [0.5] * 3,
+                       "peak_after": [0.8] * 3, "standing": [True] * 3, "low_windows": [10] * 3})
+    wet = np.array([True, False, False])
+    never = np.array([True, True, False])
+    out = mr.classify(ev, radar_wet=wet, never_bare=never)
+    # water confirmed wins over never-bare; never-bare only relabels the unconfirmed
+    assert out.tolist() == [1, 5, 3]

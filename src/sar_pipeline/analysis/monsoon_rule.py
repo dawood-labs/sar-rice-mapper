@@ -88,7 +88,12 @@ LOW_WINDOWS_MIN = 8
 #: (and end at or above zero) to count as wetting for transplanting.
 WET_RISE_MIN = 0.15
 WET_LOOKBACK_DAYS, WET_LOOKAHEAD_DAYS = 60, 25
-CLASSES = {0: "not rice", 1: "rice", 2: "young", 3: "rice_unconfirmed", 4: "harvested", 255: "no data"}
+CLASSES = {0: "not rice", 1: "rice", 2: "young", 3: "rice_unconfirmed", 4: "harvested",
+           5: "never_bare", 255: "no data"}
+#: Water test versions: "v1" = dip at the optical trough only; "v2" (docs/11) = v1 OR the flood
+#: searched over the whole bare period, plus class 5 for "rice-like" curves on ground the radar
+#: shows was never bare (trees, houses: the optical trough there is haze).
+WATER_DEFAULT = "v2"
 
 
 def pixel_events(ndvi, lswi, windows, season=SEASON, lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
@@ -163,11 +168,14 @@ def low_run(ndvi, trough_idx, level: float, reach: int = 8) -> np.ndarray:
 
 def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, young_min=YOUNG_MIN,
              canopy_min=CANOPY_MIN, young_canopy_min=YOUNG_CANOPY_MIN, radar_wet=None,
-             low_windows_min: int = LOW_WINDOWS_MIN):
-    """0 not rice, 1 rice standing, 2 young, 3 standing with water unconfirmed, 4 harvested, 255 no data.
+             low_windows_min: int = LOW_WINDOWS_MIN, never_bare=None):
+    """0 not rice, 1 rice standing, 2 young, 3 standing with water unconfirmed, 4 harvested,
+    5 rice-like curve on ground that was never bare (radar), 255 no data.
 
-    ``radar_wet`` (bool per pixel, from ``radar_water.pixel_dips``) splits the standing phenology-rice
-    pixels into confirmed (1) and unconfirmed (3). Without it every such pixel is unconfirmed.
+    ``radar_wet`` (bool per pixel) splits the standing phenology-rice pixels into confirmed (1) and
+    unconfirmed (3). Without it every such pixel is unconfirmed. ``never_bare`` (bool per pixel,
+    ``radar_water.water_evidence``) moves unconfirmed pixels whose radar shows a canopy or buildings
+    all season to class 5.
     """
     out = np.zeros(len(events), dtype="uint8")
     low = events["trough_ndvi"] <= trough_max
@@ -180,6 +188,8 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     wet = np.zeros(len(events), dtype=bool) if radar_wet is None else np.asarray(radar_wet, dtype=bool)
     out[rice & wet] = 1
     out[rice & ~wet] = 3
+    if never_bare is not None:
+        out[rice & ~wet & np.asarray(never_bare, dtype=bool)] = 5
     out[grown & ~standing] = 4
     out[young] = 2
     out[~events["valid"].to_numpy()] = 255
@@ -187,7 +197,7 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
 
 
 def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
-               radar_season: str | None = "monsoon2026"):
+               radar_season: str | None = "monsoon2026", water: str = WATER_DEFAULT):
     """The per-pixel evidence the rule decides on: ``(series, events, radar)``.
 
     ``events`` holds, per grid pixel, the optical events of :func:`pixel_events` and, when the
@@ -207,11 +217,18 @@ def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
                           np.datetime64("NaT"))
         dips = radar_water.pixel_dips(aoi_id, trough, d["loc"]["grid"], radar_season)
         events = pd.concat([events, dips], axis=1)
+        if water == "v2":
+            climb = pd.to_datetime(events["climb_date"]).to_numpy().astype("datetime64[D]")
+            climb = np.where(events["valid"].to_numpy(), climb, np.datetime64("NaT"))
+            v2 = radar_water.water_evidence(aoi_id, trough, climb, ndvi, d["windows"], radar_season)
+            events = pd.concat([events, v2], axis=1)
+            events["radar_wet_v1"] = events["radar_wet"]
+            events["radar_wet"] = events["radar_wet"] | events["flood_ok"]
     return d, events, radar
 
 
 def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, inside_only: bool = True,
-            radar_season: str | None = "monsoon2026") -> dict:
+            radar_season: str | None = "monsoon2026", water: str = WATER_DEFAULT, suffix: str = "") -> dict:
     """Classify one AOI, write ``<aoi>_monsoon2026.tif``, return the acres per class.
 
     ``radar_season`` names the Sentinel-1 season run used to confirm the water; when that run does
@@ -220,13 +237,14 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, ins
     import rasterio
     from rasterio.transform import from_origin
 
-    d, events, radar = aoi_events(aoi_id, out_root, season, radar_season)
+    d, events, radar = aoi_events(aoi_id, out_root, season, radar_season, water)
     shape = d["ndvi5d"].shape[1:]
-    classes = classify(events, radar_wet=events["radar_wet"] if radar else None)
+    classes = classify(events, radar_wet=events["radar_wet"] if radar else None,
+                       never_bare=events["never_bare"] if radar and "never_bare" in events else None)
     if inside_only:
         classes[~nd.inside_aoi(aoi_id)] = 255
     grid = d["loc"]["grid"]
-    path = Path(out_root) / d["loc"]["aoi"] / f"{d['loc']['aoi']}_monsoon2026.tif"
+    path = Path(out_root) / d["loc"]["aoi"] / f"{d['loc']['aoi']}_monsoon2026{suffix}.tif"
     profile = dict(driver="GTiff", width=shape[1], height=shape[0], count=1, dtype="uint8", crs=grid["crs"],
                    nodata=255, compress="deflate", tiled=True,
                    transform=from_origin(grid["x0"], grid["y0"], grid["res"], grid["res"]))
@@ -236,7 +254,7 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, ins
     inside = classes != 255
     wet = events["wet_at_trough"].to_numpy()
     n_rice = counts["rice"] + counts["rice_unconfirmed"]
-    return {"aoi": d["loc"]["aoi"], "radar": radar,
+    return {"aoi": d["loc"]["aoi"], "radar": radar, "water": water if radar else None,
             **{f"{k}_acres": round(acres(v), 1) for k, v in counts.items()},
             "rice_pct_of_decided": round(100 * n_rice / max(inside.sum(), 1), 1),
             "radar_wet_pct_of_rice": round(100 * counts["rice"] / max(n_rice, 1), 1),
@@ -250,14 +268,14 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, ins
             "path": str(path)}
 
 
-def plot_recall(aoi_id: int, plots, out_root="processed/_batch/s2_2026") -> dict:
+def plot_recall(aoi_id: int, plots, out_root="processed/_batch/s2_2026", suffix: str = "") -> dict:
     """Share of field-plot pixels the map calls rice / young / not rice, for one AOI."""
     import rasterio
 
     from .plot_curves import plot_pixels
 
     d = nd.load(aoi_id, out_root=out_root)
-    with rasterio.open(Path(out_root) / d["loc"]["aoi"] / f"{d['loc']['aoi']}_monsoon2026.tif") as ds:
+    with rasterio.open(Path(out_root) / d["loc"]["aoi"] / f"{d['loc']['aoi']}_monsoon2026{suffix}.tif") as ds:
         classes = ds.read(1).ravel()
     pix = np.concatenate(list(plot_pixels(plots, d["loc"]["grid"]).values()))
     c = classes[pix]

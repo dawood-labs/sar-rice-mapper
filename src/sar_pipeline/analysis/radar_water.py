@@ -86,3 +86,197 @@ def season_run_exists(aoi_id: int, season_key: str = "monsoon2026") -> bool:
 
     return any((Path(loc["run"]) / "stack" / f"track_{t['track_id']}" / "stack_VH.vrt").exists()
                for t in loc["cfg"]["s1"]["tracks"])
+
+
+FLOOD_SPAN = (-75, 0)       # days relative to the optical climb in which the flooding is searched
+REF_WINDOW = (45, 12)       # the "before" level: median of dates 45 to 12 days before each date
+
+
+def local_drops(dates, cube, ref=REF_WINDOW) -> np.ndarray:
+    """For every date, how far the value sits below the pixel's own level of the weeks before, in dB.
+
+    ``drop[i] = median(values dated t_i - ref[0] .. t_i - ref[1]) - value[i]``; NaN where no earlier
+    date falls in that window. Why a *local* reference: a flood is a sudden fall from whatever the
+    field was just before (dry soil, a wet field, weeds), so it is measured against the preceding
+    weeks, not against a fixed window tied to an optical date that may be weeks off.
+    """
+    import warnings
+
+    day = pd.DatetimeIndex(dates).to_numpy().astype("datetime64[D]")
+    out = np.full(cube.shape, np.nan, dtype="float32")
+    for i in range(len(day)):
+        lag = (day[i] - day) / np.timedelta64(1, "D")
+        before = (lag >= ref[1]) & (lag <= ref[0])
+        if before.any():
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                out[i] = np.nanmedian(cube[before], axis=0) - cube[i]
+    return out
+
+
+def flood_search(dates, cube, anchor, span=FLOOD_SPAN, ref=REF_WINDOW, persist_db: float = 2.0,
+                 persist_days: int = 14):
+    """Largest local drop inside ``anchor + span`` per pixel, its date, and a persistence count.
+
+    ``anchor`` is datetime64 per pixel (NaT: skipped). ``persist`` counts the dates within
+    ``persist_days`` of the best one that are also ``persist_db`` or more below their own earlier
+    level: transplanting water stands for weeks, so a real flood is seen on more than one pass,
+    while a single speckled date is not. Returns ``(best_drop, best_date, persist)``.
+    """
+    import warnings
+
+    drops = local_drops(dates, cube, ref)
+    day = pd.DatetimeIndex(dates).to_numpy().astype("datetime64[D]")
+    a = np.asarray(anchor).astype("datetime64[D]")
+    rel = (day[:, None] - a[None, :]) / np.timedelta64(1, "D")
+    with np.errstate(invalid="ignore"):
+        inside = (rel >= span[0]) & (rel <= span[1])
+    masked = np.where(inside, drops, np.nan)
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        best = np.nanmax(masked, axis=0)
+    has = np.isfinite(best)
+    arg = np.where(has, np.nanargmax(np.where(np.isfinite(masked), masked, -np.inf), axis=0), 0)
+    best_day = np.where(has, day[arg], np.datetime64("NaT"))
+    near = np.abs((day[:, None] - best_day[None, :]) / np.timedelta64(1, "D")) <= persist_days
+    with np.errstate(invalid="ignore"):
+        persist = (near & inside & (drops >= persist_db)).sum(axis=0)
+    return best, best_day, np.where(has, persist, 0)
+
+
+def pixel_floods(aoi_id: int, anchor, pixels=None, season_key: str = "monsoon2026", window: int = 5,
+                 span=FLOOD_SPAN) -> pd.DataFrame:
+    """:func:`flood_search` over every track and polarisation, best per pixel.
+
+    Returns ``flood_drop`` (dB), ``flood_date``, ``flood_pol``, ``flood_track`` and ``flood_persist``
+    (the persistence count of the best track and polarisation). ``pixels`` limits the work to a
+    subset (flat indices); ``anchor`` then has one date per selected pixel.
+    """
+    loc = pr.locate(aoi_id, 0, season_key=season_key)
+    n = int(loc["grid"]["width"]) * int(loc["grid"]["height"])
+    pix = np.arange(n) if pixels is None else np.asarray(pixels)
+    best = np.full(len(pix), -np.inf)
+    out = {"flood_date": np.full(len(pix), np.datetime64("NaT"), dtype="datetime64[D]"),
+           "flood_pol": np.full(len(pix), "", dtype=object), "flood_track": np.full(len(pix), "", dtype=object),
+           "flood_persist": np.zeros(len(pix), dtype=int)}
+    for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
+        dates, cubes = sar_curve.read_track(loc, track, window)
+        for pol in ("VV", "VH"):
+            b, when, persist = flood_search(dates, cubes[pol].reshape(len(dates), -1)[:, pix], anchor, span)
+            better = np.isfinite(b) & (b > best)
+            best = np.where(better, b, best)
+            out["flood_date"] = np.where(better, when, out["flood_date"])
+            out["flood_pol"] = np.where(better, pol, out["flood_pol"])
+            out["flood_track"] = np.where(better, track, out["flood_track"])
+            out["flood_persist"] = np.where(better, persist, out["flood_persist"])
+    frame = pd.DataFrame(out, index=pix)
+    frame.insert(0, "flood_drop", np.where(np.isfinite(best), best, np.nan))
+    return frame
+
+
+# --- water evidence v2 (docs/11): the flood searched over the whole bare period -------------------
+LONG_SPAN = (-100, -5)       # days relative to the optical climb
+FLOOD_DROP_MIN = 4.0         # dB below the field's own level of the weeks before
+FLOOD_VH_MAX = -19.0         # VH on the flood pass; plots: 90 % at or below -19.4 dB, trees and bare never
+FLOOD_NDVI_MAX = 0.5         # no canopy on the field at the flood date (a harvest is also a drop)
+SUPPORT_MIN = 2              # passes (any track) within 14 days that also show the drop
+VEG_VH_MIN = -15.0           # VH around the trough above this: a canopy or buildings, not a bare field
+VEG_FLOOD_VH_MIN = -17.0     # ... and never darker than this before the climb
+FLOOD_EARLIEST = "2026-05-15"  # monsoon water only: the plots' floods all came after this (99 %+)
+
+
+def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = "monsoon2026",
+                   window: int = 5) -> pd.DataFrame:
+    """Per pixel: the flood searched over the whole bare period, and whether the field was ever bare.
+
+    Why (docs/11): the first rule looked for the water only 10 days before to 15 days after the
+    optical trough and measured it against a "dry" level 40-15 days before. Where cloud hid the
+    field for months, the trough landed at the end of a long flood and the flood itself became the
+    "dry" level, so real rice lost its water; where haze faked a trough on trees or houses, nothing
+    in the radar said so. This test uses the optical **climb** (a sharper event than the trough) as
+    the anchor and lets the radar find its own flood date:
+
+    * ``flood_drop``: largest drop of any pass, over all tracks and both polarisations, below the
+      field's own level of the 12-45 days before it, anywhere 100 to 5 days before the climb;
+    * ``flood_vh``: VH on the flood pass itself (open water under Sentinel-1 is below -20 dB); the
+      flood is only searched from ``FLOOD_EARLIEST`` (monsoon onset), because a dry-season pass on
+      a harvested, drying field also drops to about -22 dB;
+    * ``ndvi_at_flood``: fitted NDVI on the flood date (a canopy there means a harvest, not water);
+    * ``support``: passes (any track) within 14 days of it that also sit 2 dB below their earlier level;
+    * ``flood_ok``: all four agree;
+    * ``vh_at_trough`` and ``never_bare``: VH stayed high around the trough and its second-darkest
+      pass before the climb never went dark (one outlier pass is ignored):
+      the ground carried a canopy or buildings throughout, so a low optical trough there is haze.
+
+    ``trough``/``climb`` datetime64 per pixel (NaT allowed); ``ndvi`` (windows, pixels) fitted NDVI.
+    """
+    import warnings
+
+    loc = pr.locate(aoi_id, 0, season_key=season_key)
+    n = ndvi.shape[1]
+    trough = np.asarray(trough).astype("datetime64[D]")
+    climb = np.asarray(climb).astype("datetime64[D]")
+    best = np.full(n, -np.inf)
+    when = np.full(n, np.datetime64("NaT"), dtype="datetime64[D]")
+    pol_of = np.full(n, "", dtype=object)
+    vh_min = np.full(n, np.inf)
+    vh_low2 = np.full((2, n), np.inf)      # the two darkest VH passes in the span, over all tracks
+    vh_trough = np.full(n, -np.inf)
+    vh_at_flood = np.full(n, np.nan)
+    earliest = np.datetime64(FLOOD_EARLIEST)
+    tracks = []
+    for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
+        dates, cubes = sar_curve.read_track(loc, track, window)
+        day = pd.DatetimeIndex(dates).to_numpy().astype("datetime64[D]")
+        flat = {p: cubes[p].reshape(len(dates), -1) for p in ("VV", "VH")}
+        drops = {p: local_drops(dates, flat[p]) for p in ("VV", "VH")}
+        tracks.append((day, drops))
+        rel = (day[:, None] - climb[None, :]) / np.timedelta64(1, "D")
+        with np.errstate(invalid="ignore"):
+            span = (rel >= LONG_SPAN[0]) & (rel <= LONG_SPAN[1])
+            near_t = np.abs((day[:, None] - trough[None, :]) / np.timedelta64(1, "D")) <= 20
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            vh_min = np.fmin(vh_min, np.nanmin(np.where(span, flat["VH"], np.nan), axis=0))
+            cand = np.where(span & np.isfinite(flat["VH"]), flat["VH"], np.inf)
+            vh_low2 = np.sort(np.concatenate([vh_low2, cand]), axis=0)[:2]
+            vh_trough = np.fmax(vh_trough, np.nanmedian(np.where(near_t, flat["VH"], np.nan), axis=0))
+            # the flood itself: monsoon passes only. A dry-season pass on a freshly harvested,
+            # drying field is also a VH drop to about -22 dB (seen on a field in April).
+            monsoon = span & (day >= earliest)[:, None]
+            for p in ("VV", "VH"):
+                m = np.where(monsoon, drops[p], np.nan)
+                b = np.nanmax(m, axis=0)
+                arg = np.nanargmax(np.where(np.isfinite(m), m, -np.inf), axis=0)
+                better = np.isfinite(b) & (b > best)
+                best = np.where(better, b, best)
+                when = np.where(better, day[arg], when)
+                pol_of = np.where(better, p, pol_of)
+                vh_at_flood = np.where(better, flat["VH"][arg, np.arange(n)], vh_at_flood)
+    support = np.zeros(n, dtype=int)
+    for day, drops in tracks:
+        near = np.abs((day[:, None] - when[None, :]) / np.timedelta64(1, "D")) <= 14
+        for p in ("VV", "VH"):
+            with np.errstate(invalid="ignore"):
+                hit = (near & (drops[p] >= 2.0)).sum(axis=0)
+            support += np.where(pol_of == p, hit, 0)
+    win = pd.DatetimeIndex(windows).to_numpy().astype("datetime64[D]")
+    has = ~np.isnat(when)
+    idx = np.clip(np.searchsorted(win, np.where(has, when, win[0])), 0, len(win) - 1)
+    ndvi_at = np.where(has, ndvi[idx, np.arange(n)], np.nan)
+    out = pd.DataFrame({
+        "flood_drop": np.where(np.isfinite(best), best, np.nan),
+        "flood_date": when, "flood_pol": pol_of,
+        "flood_vh": vh_at_flood,
+        "vh_min_span": np.where(np.isfinite(vh_min), vh_min, np.nan),
+        "ndvi_at_flood": ndvi_at, "support": support,
+        "vh_at_trough": np.where(np.isfinite(vh_trough), vh_trough, np.nan),
+        "flood_vh_2nd": np.where(np.isfinite(vh_low2[1]), vh_low2[1], np.nan),
+    })
+    with np.errstate(invalid="ignore"):
+        out["flood_ok"] = ((out["flood_drop"] >= FLOOD_DROP_MIN) & (out["flood_vh"] <= FLOOD_VH_MAX)
+                           & (out["ndvi_at_flood"] <= FLOOD_NDVI_MAX) & (out["support"] >= SUPPORT_MIN))
+        # the second-darkest pass, not the darkest: one speckled or mis-registered pass must not
+        # decide that a village or a tree line was once a bare, wet field
+        out["never_bare"] = (out["vh_at_trough"] > VEG_VH_MIN) & (out["flood_vh_2nd"] > VEG_FLOOD_VH_MIN)
+    return out

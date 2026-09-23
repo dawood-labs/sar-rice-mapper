@@ -25,3 +25,23 @@ def test_trough_at_the_start_of_the_run_is_not_checkable():
     troughs = np.array(["2026-05-04"], dtype="datetime64[D]")
     _, _, dip = rw.dips_for_track(dates, np.full((len(dates), 1), -8.0), troughs)
     assert np.isnan(dip[0])                       # the dry window lies before the first date
+
+
+def test_flood_search_finds_a_flood_weeks_before_the_anchor():
+    import numpy as np
+
+    from sar_pipeline.analysis import radar_water as rw
+
+    dates = np.arange(np.datetime64("2026-04-01"), np.datetime64("2026-09-01"), 6)
+    v = np.full(len(dates), -9.0)
+    flood = (dates >= np.datetime64("2026-06-10")) & (dates <= np.datetime64("2026-06-25"))
+    v[flood] = -15.0
+    cube = v[:, None]
+    anchor = np.array(["2026-07-20"], dtype="datetime64[D]")
+    best, when, persist = rw.flood_search(dates, cube, anchor)
+    assert best[0] == 6.0 and np.datetime64("2026-06-10") <= when[0] <= np.datetime64("2026-06-25")
+    assert persist[0] >= 2
+    # a steadily rising field (a dry-land crop growing) never drops below its own earlier level
+    rising = np.linspace(-12, -5, len(dates))[:, None]
+    best, _, persist = rw.flood_search(dates, rising, anchor)
+    assert best[0] < 0 and persist[0] == 0
