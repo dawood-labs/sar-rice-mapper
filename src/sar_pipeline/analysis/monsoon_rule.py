@@ -239,9 +239,11 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
             # a confirmed flood is bare, wet ground (NDVI of water is at or below 0.2), so the climb
             # to a canopy is measured by the canopy itself; the fitted value on the flood date can
             # be an interpolation across a cloud gap and is not trusted for the rise
-            r_grown = (events["flood_ok"].to_numpy(dtype=bool) & (events["peak_after_flood"] >= canopy_min).to_numpy())
-            r_young = (~r_grown & events["flood_ok"].to_numpy(dtype=bool)
-                       & (events["peak_after_flood"] >= young_canopy_min).to_numpy())
+            ok = np.array(events["flood_ok"], dtype=bool)              # a copy: Series buffers can be read-only
+            if "bare_near_flood" in events:            # the pixel's own optical history must allow a field
+                ok &= np.array(events["bare_near_flood"], dtype=bool)
+            r_grown = ok & (events["peak_after_flood"] >= canopy_min).to_numpy()
+            r_young = ~r_grown & ok & (events["peak_after_flood"] >= young_canopy_min).to_numpy()
         r_standing = events["standing_after_flood"].to_numpy(dtype=bool)
         # the radar path only adds: a pixel the optical path already decided keeps that decision
         add = r_grown & ~grown & ~young

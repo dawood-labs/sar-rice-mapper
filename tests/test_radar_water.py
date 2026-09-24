@@ -111,7 +111,26 @@ def test_canopy_at_flood_is_judged_on_observations_not_on_the_fit():
     raw = np.full((len(windows), 3), np.nan)                 # nothing observed near the flood: pixel 0 passes
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
     assert ev.loc[0, "flood_ok"] and np.isnan(ev.loc[0, "ndvi_at_flood"])
-    near = np.abs((windows - pd.Timestamp("2026-06-12")).days) <= 10
-    raw[near, 0] = 0.7                                       # a canopy really seen on the flood date: a harvest drop
+    before = ((windows - pd.Timestamp("2026-06-12")).days >= -25) & ((windows - pd.Timestamp("2026-06-12")).days <= -15)
+    raw[before, 0] = 0.7                                     # a canopy seen 2-3 weeks before the drop: a harvest, not water
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
     assert not ev.loc[0, "flood_ok"] and ev.loc[0, "ndvi_at_flood"] == 0.7
+    raw[:] = np.nan
+    after = ((windows - pd.Timestamp("2026-06-12")).days >= 20) & ((windows - pd.Timestamp("2026-06-12")).days <= 30)
+    raw[after, 0] = 0.7                                      # a canopy 3-4 weeks after the flood is the rice itself
+    assert rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw).loc[0, "flood_ok"]
+
+
+def test_bare_near_flood_needs_one_clear_view_without_canopy():
+    series = _two_pol_series()
+    windows = pd.date_range("2026-03-01", "2026-09-21", freq="5D")
+    ndvi = np.full((len(windows), 3), 0.6)
+    trough = np.array(["2026-06-20"] * 3, dtype="datetime64[D]")
+    climb = np.array(["2026-07-25"] * 3, dtype="datetime64[D]")
+    raw = np.full((len(windows), 3), np.nan)
+    days = (windows - pd.Timestamp("2026-06-12")).days
+    raw[(days >= -60) & (days <= -35), 0] = 0.15                 # bare 5-8 weeks before the flood: a field
+    raw[(days >= -60) & (days <= -35), 1] = 0.75                 # green then, and nothing else seen: trees
+    ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
+    assert ev.loc[0, "bare_near_flood"] and not ev.loc[1, "bare_near_flood"]
+    assert ev.loc[2, "bare_near_flood"]                          # never observed: unknown, not a canopy

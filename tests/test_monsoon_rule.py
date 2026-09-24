@@ -109,6 +109,9 @@ def test_radar_trough_rescues_a_paddy_whose_optical_trough_was_hidden():
     assert mr.classify(ev, radar_wet=wet).tolist() == [0, 0, 1, 0]
     out = mr.classify(ev, radar_wet=wet, radar_trough=True)
     assert out.tolist() == [1, 0, 1, 6]        # pixel 3: a confirmed flood, a 0.45 canopy visible now = young rice
+    ev["bare_near_flood"] = [False, True, True, True]        # pixel 0 never seen bare: the radar alone may not decide
+    assert mr.classify(ev, radar_wet=wet, radar_trough=True).tolist() == [0, 0, 1, 6]
+    ev = ev.drop(columns="bare_near_flood")
     assert ev.loc[0, "rise_from_flood"] > 0.3 and np.isnan(ev.loc[1, "rise_from_flood"])
     # harvested after a radar trough: the canopy fell away at the end
     ndvi2 = ndvi.copy()

@@ -201,9 +201,21 @@ OTHER_POL_DROP_MIN = -1.0
 #: screened (issue 15) and must agree between polarisations.
 DEEP_FLOOD_VH_MAX = -24.0
 DEEP_FLOOD_DROP_MIN = 8.0
-#: Clear observations this many 5-day windows either side of the flood date decide whether a
-#: canopy stood on the field then (see ``water_evidence``).
-RAW_NEAR_WINDOWS = 2
+#: Clear observations from ``RAW_BEFORE_WINDOWS`` windows before to ``RAW_AFTER_WINDOWS`` after the
+#: flood date decide whether a canopy stood on the field then (see ``water_evidence``). Asymmetric:
+#: a canopy seen in the 25 days BEFORE the drop is the signature of a harvest (or of trees, which
+#: never lose it), while a canopy 2-3 weeks after a transplanting is the young rice itself.
+RAW_BEFORE_WINDOWS = 5
+RAW_AFTER_WINDOWS = 2
+#: ``bare_near_flood``: a clear observation without canopy (NDVI <= ``BARE_SEEN_NDVI``) from
+#: ``BARE_SEEN_BEFORE_WINDOWS`` windows before to ``BARE_SEEN_AFTER_WINDOWS`` after the flood. Why:
+#: the radar is read over a 5 x 5 box, so a tree line next to flooded paddies also "floods" in the
+#: radar; the pixel's own optical history must show bare ground at some point around the flood
+#: before the radar alone may call it rice (the radar-trough path). No observation at all in that
+#: span counts as unknown, not as a canopy.
+BARE_SEEN_NDVI = 0.40
+BARE_SEEN_BEFORE_WINDOWS = 12
+BARE_SEEN_AFTER_WINDOWS = 6
 
 
 def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = "monsoon2026",
@@ -234,8 +246,8 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
     ``series`` (optional): ``[(dates, {"VV": (dates, n), "VH": (dates, n)}), ...]`` per track, already
     read, e.g. field means (``analysis/field_level``); then the AOI's stacks are not read.
     ``ndvi_raw`` (optional, (windows, pixels), NaN where unobserved): the "no canopy on the flood
-    date" test then uses the clear observations within ``RAW_NEAR_WINDOWS`` windows of the flood
-    instead of the fitted value. Why (fix plan, stage 2.3): where cloud hides the weeks around
+    date" test then uses the clear observations from ``RAW_BEFORE_WINDOWS`` windows before to
+    ``RAW_AFTER_WINDOWS`` after the flood instead of the fitted value. Why (fix plan, stage 2.3): where cloud hides the weeks around
     transplanting, the fit runs straight across the gap and reads 0.5-0.6 on the flood date, so a
     10 dB two-track flood on a surveyed paddy failed this test; with no observation near the flood
     there is no evidence of a canopy, and the radar decides.
@@ -301,14 +313,19 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
     win = pd.DatetimeIndex(windows).to_numpy().astype("datetime64[D]")
     has = ~np.isnat(when)
     idx = np.clip(np.searchsorted(win, np.where(has, when, win[0])), 0, len(win) - 1)
+    bare_seen = np.ones(n, dtype=bool)
     if ndvi_raw is None:
         ndvi_at = np.where(has, ndvi[idx, np.arange(n)], np.nan)
     else:
         step = np.arange(len(win))[:, None]
-        near = np.abs(step - idx[None, :]) <= RAW_NEAR_WINDOWS
+        rel = step - idx[None, :]
+        near = (rel >= -RAW_BEFORE_WINDOWS) & (rel <= RAW_AFTER_WINDOWS)
+        around = (rel >= -BARE_SEEN_BEFORE_WINDOWS) & (rel <= BARE_SEEN_AFTER_WINDOWS)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             ndvi_at = np.where(has, np.nanmax(np.where(near, ndvi_raw, np.nan), axis=0), np.nan)
+            seen_min = np.nanmin(np.where(around, ndvi_raw, np.nan), axis=0)
+        bare_seen = ~(seen_min > BARE_SEEN_NDVI)           # unknown (no observation) stays True
     out = pd.DataFrame({
         "flood_drop": np.where(np.isfinite(best), best, np.nan),
         "flood_date": when, "flood_pol": pol_of,
@@ -318,6 +335,7 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
         "vh_at_trough": np.where(np.isfinite(vh_trough), vh_trough, np.nan),
         "flood_vh_2nd": np.where(np.isfinite(vh_low2[1]), vh_low2[1], np.nan),
         "flood_other_drop": other_drop,
+        "bare_near_flood": bare_seen,
     })
     with np.errstate(invalid="ignore"):
         # water lowers VV and VH together; a pass where one polarisation falls while the other
