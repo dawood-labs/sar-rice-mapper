@@ -117,3 +117,19 @@ def test_clear_mask_drops_a_blue_bright_canopy_as_haze():
     b2 = np.array([400, 1200, 1300])                     # clear canopy, hazy canopy, bright bare soil
     ndvi = np.array([0.7, 0.5, 0.15])
     assert nd.clear_mask(data, qa, cs, b8, ndvi, 60, 1 << 10, True, True, b2).tolist() == [True, False, True]
+
+
+def test_clear_mask_drops_grey_haze_whatever_the_ndvi_but_keeps_brown_soil():
+    import numpy as np
+
+    from sar_pipeline.analysis import ndvi_5day as nd
+
+    data = np.array([True, True, True, True])
+    qa = np.zeros(4, dtype=int)
+    cs = np.array([63, 63, 80, 90])
+    b2 = np.array([1652, 1200, 400, 300])       # hazy young canopy, dry soil, clear soil-ish, clear canopy
+    b4 = np.array([1557, 1800, 700, 500])
+    b8 = np.array([2651, 3000, 1400, 4000])
+    ndvi = (b8 - b4) / (b8 + b4)                 # 0.26, 0.25, 0.33, 0.78
+    out = nd.clear_mask(data, qa, cs, b8, ndvi, 40, 1 << 10, True, True, b2, b4)
+    assert out.tolist() == [False, True, True, True]

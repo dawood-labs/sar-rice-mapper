@@ -163,3 +163,39 @@ def test_report_classes_flooded_not_green_and_cut_unconfirmed():
     # cut with water -> 4, cut without -> 8; open water with a flood 11 days ago -> 7; an old flood -> stays 0
     assert out.tolist() == [4, 8, 7, 0]
     assert mr.classify(ev, radar_wet=wet).tolist() == [4, 8, 0, 0]       # no map date: no class 7
+
+
+def test_radar_canopy_rise_makes_young_rice_when_the_optical_end_is_stale():
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import monsoon_rule as mr
+
+    windows = pd.date_range("2026-05-01", "2026-09-21", freq="5D")
+    n = len(windows)
+    stale = np.r_[np.full(n - 6, 0.12), np.full(6, 0.12)]     # bare, last clear view before the transplanting
+    ndvi = np.stack([stale, stale, stale], axis=1)
+    ev = mr.pixel_events(ndvi, ndvi * 0, windows)
+    ev["flood_ok"] = [True, True, False]
+    ev["flood_date"] = pd.to_datetime(["2026-08-15", "2026-08-15", "NaT"])
+    ev["bare_near_flood"] = [True, True, True]
+    ev = pd.concat([ev, mr.radar_trough_events(ev, ndvi, windows)], axis=1)
+    ev["radar_canopy_rise"] = [6.0, 2.0, 6.0]                  # dB from the water to the season end
+    wet = ev["flood_ok"].to_numpy()
+    out = mr.classify(ev, radar_wet=wet, radar_trough=True, map_date=windows[-1])
+    assert out[0] == 6 and out[1] == 7 and out[2] == 0     # canopy in the radar; still water; no flood
+
+
+def test_a_ripening_crop_is_still_standing():
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import monsoon_rule as mr
+
+    windows = pd.date_range("2026-05-01", "2026-09-21", freq="5D")
+    n = len(windows)
+    ripening = np.r_[np.full(10, 0.1), np.linspace(0.1, 0.78, n - 16), np.linspace(0.75, 0.45, 6)]
+    cut = ripening.copy(); cut[-3:] = 0.2
+    ndvi = np.stack([ripening, cut], axis=1)
+    ev = mr.pixel_events(ndvi, ndvi * 0, windows)
+    assert mr.classify(ev, radar_wet=np.array([True, True])).tolist() == [1, 4]

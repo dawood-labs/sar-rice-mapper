@@ -216,6 +216,12 @@ RAW_AFTER_WINDOWS = 2
 BARE_SEEN_NDVI = 0.40
 BARE_SEEN_BEFORE_WINDOWS = 12
 BARE_SEEN_AFTER_WINDOWS = 6
+#: ``vh_end``: median VH of the passes in the last ``END_DAYS`` before the series end (any track);
+#: ``radar_canopy_rise`` = vh_end - flood_vh. Why: a young crop transplanted in August is often
+#: seen clear only through haze by the map date, but the radar sees its canopy: VH climbs from the
+#: water (-20 to -25 dB) to -17 / -15 within 3-5 weeks. A rise of 4 dB is well above pass-to-pass
+#: noise on a 5 x 5 box (~1 dB).
+END_DAYS = 20
 
 
 def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = "monsoon2026",
@@ -311,6 +317,16 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
             hit = (near & ((drops["VV"] >= 2.0) | (drops["VH"] >= 2.0))).sum(axis=0)
         support += hit
     win = pd.DatetimeIndex(windows).to_numpy().astype("datetime64[D]")
+    end_from = win[-1] - np.timedelta64(END_DAYS, "D")
+    vh_end_parts = []
+    for dates, flat in series:
+        day = pd.DatetimeIndex(dates).to_numpy().astype("datetime64[D]")
+        late = (day >= end_from) & (day <= win[-1] + np.timedelta64(3, "D"))
+        if late.any():
+            vh_end_parts.append(flat["VH"][late])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        vh_end = np.nanmedian(np.concatenate(vh_end_parts), axis=0) if vh_end_parts else np.full(n, np.nan)
     has = ~np.isnat(when)
     idx = np.clip(np.searchsorted(win, np.where(has, when, win[0])), 0, len(win) - 1)
     bare_seen = np.ones(n, dtype=bool)
@@ -336,6 +352,8 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
         "flood_vh_2nd": np.where(np.isfinite(vh_low2[1]), vh_low2[1], np.nan),
         "flood_other_drop": other_drop,
         "bare_near_flood": bare_seen,
+        "vh_end": vh_end,
+        "radar_canopy_rise": vh_end - vh_at_flood,
     })
     with np.errstate(invalid="ignore"):
         # water lowers VV and VH together; a pass where one polarisation falls while the other

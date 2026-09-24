@@ -89,14 +89,22 @@ DARK_NDVI_MAX = 0.30
 #: reasons, so the test is restricted to vegetated pixels.
 HAZE_B2_MIN = 900
 HAZE_NDVI_MIN = 0.30
+#: ... and, whatever the NDVI, a blue-bright observation whose blue is at least this share of its
+#: red is haze or thin cloud: haze and cloud are grey (blue ~ red), dry soil is brown (blue well
+#: below red, ~0.7) and water is dark. Why: haze over a young canopy pushed its NDVI below 0.30
+#: (B2 1,652, B4 1,557, NDVI 0.26 on 18 Sep) and slipped past the canopy test, then read as a fall
+#: at the end of the season ("harvested"). Cloud-contaminated values in gaps (B2 ~ B4 ~ 2,000-3,500,
+#: NDVI ~0.07) are caught by the same rule.
+HAZE_BLUE_TO_RED_MIN = 0.9
 
 
 def clear_mask(data, qa60, cs, b8, ndvi, cs_min: float | None, bits: int, keep_dark: bool = False,
-               drop_haze: bool = False, b2=None):
+               drop_haze: bool = False, b2=None, b4=None):
     """The observations the series keeps: data present, QA60 bits clear, and (when ``cs_min`` is
     set) Cloud Score+ ``clear`` at or above it, unless ``keep_dark`` and the pixel is dark
-    (see :data:`DARK_NIR_MAX`); with ``drop_haze`` a blue-bright canopy is removed as haze
-    (see :data:`HAZE_B2_MIN`; needs ``b2``)."""
+    (see :data:`DARK_NIR_MAX`); with ``drop_haze`` a blue-bright canopy, or a blue-bright grey
+    observation (blue >= 0.9 x red, see :data:`HAZE_BLUE_TO_RED_MIN`), is removed as haze (needs
+    ``b2``; ``b4`` for the grey test)."""
     from ..optical_export import qa60_cloud
 
     ok = data & ~qa60_cloud(qa60, bits)
@@ -110,7 +118,10 @@ def clear_mask(data, qa60, cs, b8, ndvi, cs_min: float | None, bits: int, keep_d
         if b2 is None:
             raise ValueError("drop_haze needs the blue band b2")
         with np.errstate(invalid="ignore"):
-            ok = ok & ~((ndvi >= HAZE_NDVI_MIN) & (b2 > HAZE_B2_MIN))
+            haze = (b2 > HAZE_B2_MIN) & (ndvi >= HAZE_NDVI_MIN)
+            if b4 is not None:
+                haze |= (b2 > HAZE_B2_MIN) & (b2 >= HAZE_BLUE_TO_RED_MIN * b4)
+            ok = ok & ~haze
     return ok
 
 
@@ -148,7 +159,7 @@ def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None,
             ndvi.append(np.where(data, (b8 - b4) / (b8 + b4), np.nan))
             ndwi.append(np.where(data & (b3 + b8 > 0), (b3 - b8) / (b3 + b8), np.nan))
             lswi.append(np.where(data & (b8 + b11 > 0), (b8 - b11) / (b8 + b11), np.nan))
-        ok.append(clear_mask(data, qa, cs, b8, ndvi[-1], cs_min, bits, keep_dark, drop_haze, b2))
+        ok.append(clear_mask(data, qa, cs, b8, ndvi[-1], cs_min, bits, keep_dark, drop_haze, b2, b4))
         scl.append(data & np.isin(sc.astype("int64"), SCL_CLOUD_CLASSES))
     order = np.argsort(dates)
     pick = lambda xs: np.stack(xs)[order]  # noqa: E731

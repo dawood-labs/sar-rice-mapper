@@ -75,7 +75,7 @@ SEASON = ("2026-05-01", "2026-09-24")
 LOOKBACK_DAYS = 110
 #: A standing crop may have lost this much NDVI from its peak (haze, early senescence) and still be
 #: standing; a harvested field has lost far more.
-STANDING_FALL_MAX = 0.25
+STANDING_FALL_MAX = 0.35
 #: The field must have been without a canopy (fitted NDVI at or below ``TROUGH_MAX + 0.05``) for at
 #: least this many consecutive 5-day windows around its trough — 8 windows, about 40 days. A field
 #: really starting a crop has weeks of bare, puddled and seedling-covered ground; a haze dip that
@@ -97,8 +97,20 @@ N_CLASSES = 9
 #: water not confirmed": a rice-like cycle cut before the map date without transplanting water,
 #: which the review found to be mostly rain-fed dry-land crops (issue 18), separated from class 4
 #: (harvested with water) so the harvested-paddy acres are not inflated.
-FLOODED_RECENT_DAYS = 45
+FLOODED_RECENT_DAYS = 60
 FLOODED_NDVI_MAX = 0.20
+#: Radar canopy after a confirmed flood (``radar_water.radar_canopy_rise``): at or above
+#: ``RADAR_YOUNG_RISE_DB`` the pixel is a young crop even when no clear optical view shows the
+#: canopy yet; at or above ``RADAR_VISIBLE_RISE_DB`` the canopy is real enough to deliver as young
+#: rice (class 6) without the optical ``YOUNG_VISIBLE`` test. Why: seven reviewed young-rice fields
+#: (late-August transplanting) fell to "not rice" once the hazy late observations were removed,
+#: while their radar showed the canopy rising 5-8 dB from the water.
+RADAR_YOUNG_RISE_DB = 4.0
+RADAR_VISIBLE_RISE_DB = 5.0
+#: A ripening (yellowing) crop is still standing: its NDVI falls from ~0.75 to ~0.45 before the
+#: cut. The standing test therefore accepts a last value at or above ``STANDING_MIN`` that has not
+#: fallen more than ``STANDING_FALL_MAX`` from the peak; a harvested field reads 0.15-0.30.
+STANDING_MIN = 0.40
 #: A young crop is delivered as young rice (class 6) when its water is confirmed and its canopy is
 #: already visible on the map date: 95 % of the field plots' pixels that sat in "young" were at or
 #: above 0.30 (bare soil 0.15-0.25, open water 0-0.1). docs/15.
@@ -135,7 +147,7 @@ def radar_trough_events(events: pd.DataFrame, ndvi, windows) -> pd.DataFrame:
         at = np.where(ok, ndvi[idx, np.arange(n)], np.nan)
         rise = peak - at
         last = ndvi[-1]
-        standing = ok & (last >= CANOPY_MIN) & (last >= peak - STANDING_FALL_MAX)
+        standing = ok & (last >= STANDING_MIN) & (last >= peak - STANDING_FALL_MAX)
     return pd.DataFrame({"ndvi_at_flood_fit": at, "peak_after_flood": peak, "rise_from_flood": rise,
                          "standing_after_flood": standing})
 
@@ -185,7 +197,7 @@ def pixel_events(ndvi, lswi, windows, season=SEASON, lookback_days: int = LOOKBA
         "rise": peak_after - trough_ndvi, "peak_after": peak_after,
         "climb_date": pd.Series(np.where(first >= 0, windows[idx][np.clip(first, 0, None)], pd.NaT)),
         "last_ndvi": ndvi[-1],
-        "standing": (ndvi[-1] >= CANOPY_MIN) & (ndvi[-1] >= peak_after - STANDING_FALL_MAX),
+        "standing": (ndvi[-1] >= STANDING_MIN) & (ndvi[-1] >= peak_after - STANDING_FALL_MAX),
         "low_windows": low_run(ndvi, idx[trough], TROUGH_MAX + 0.05),
     })
 
@@ -244,6 +256,9 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
                 ok &= np.array(events["bare_near_flood"], dtype=bool)
             r_grown = ok & (events["peak_after_flood"] >= canopy_min).to_numpy()
             r_young = ~r_grown & ok & (events["peak_after_flood"] >= young_canopy_min).to_numpy()
+            if "radar_canopy_rise" in events:          # the canopy seen by the radar alone
+                rise_db = np.array(events["radar_canopy_rise"], dtype=float)
+                r_young |= ~r_grown & ok & (rise_db >= RADAR_YOUNG_RISE_DB)
         r_standing = events["standing_after_flood"].to_numpy(dtype=bool)
         # the radar path only adds: a pixel the optical path already decided keeps that decision
         add = r_grown & ~grown & ~young
@@ -254,7 +269,11 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     out[rice & wet] = 1
     out[rice & ~wet] = 3
     last = events["last_ndvi"].to_numpy() if "last_ndvi" in events else np.zeros(len(events))
-    young_rice = young & wet & (last >= YOUNG_VISIBLE)
+    visible = last >= YOUNG_VISIBLE
+    if radar_trough and "radar_canopy_rise" in events:
+        with np.errstate(invalid="ignore"):
+            visible |= np.array(events["radar_canopy_rise"], dtype=float) >= RADAR_VISIBLE_RISE_DB
+    young_rice = young & wet & visible
     out[grown & ~standing & wet] = 4
     out[grown & ~standing & ~wet] = 8
     out[young] = 2

@@ -239,7 +239,7 @@ def bright_profile(aoi_id: int, dates, variant: str, control: str = "qa60") -> p
             v = VARIANTS[name]
             bits = (1 << 10) | (1 << 11) if v["qa60_mode"] == "both" else (1 << 10)
             keep[name] = nd.clear_mask(data, b["QA60"], b["clear"], b["B8"], ndvi, v["cs_min"], bits, v["keep_dark"],
-                                       v["drop_haze"], b["B2"])
+                                       v["drop_haze"], b["B2"], b["B4"])
         sel = inside & keep[control] & ~keep[variant]
         if sel.sum() < 20:
             continue
@@ -262,6 +262,70 @@ def write_sidecars(variants=None) -> int:
                 (d / f"{d.name}_series_mask.json").write_text(json.dumps(VARIANTS[v]))
                 n += 1
     return n
+
+
+def verdict_detail(ids, variant: str) -> pd.DataFrame:
+    """Every reviewed field of ``ids`` with its old label, its label under ``variant`` (field
+    majority of the variant's rule map on the current delineation) and whether it agrees with the
+    reviewer. Why: the summary counts say how many right fields broke; this says which, so the cause
+    can be found."""
+    from . import field_rice
+    from . import review_verdicts as rv
+
+    v = pd.read_csv(rv.OUT)
+    rows = []
+    for aoi_id in ids:
+        sub = v[v["aoi"] == f"aoi{aoi_id}"]
+        if sub.empty or not (Path(root(variant)) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026.tif").exists():
+            continue
+        fields, _, _ = field_rice.label_aoi(aoi_id, map_suffix="", src_root=root(variant))
+        m = sub.merge(fields[["field_id", "label", "rice_share", "pixels"]].rename(
+            columns={"label": "new_label", "rice_share": "new_rice_share", "pixels": "new_pixels"}), on="field_id", how="left")
+        rows.append(m)
+    t = pd.concat(rows, ignore_index=True)
+    t["new_rice"] = t["new_label"].isin(rv.DELIVERED)
+    t["old_rice"] = t["label"].isin(rv.DELIVERED)
+    t["agree_now"] = np.where(t["expected_rice"].isna(), np.nan, (t["new_rice"] == (t["expected_rice"] == 1)))
+    t["agreed_before"] = np.where(t["expected_rice"].isna(), np.nan, (t["old_rice"] == (t["expected_rice"] == 1)))
+    return t
+
+
+def field_obs(aoi_id: int, field_id: str, variant: str, since: str = "2026-08-01") -> pd.DataFrame:
+    """Per Sentinel-2 date since ``since``: the field's mean raw NDVI, blue, NIR and Cloud Score+, and
+    the share of its pixels the variant's mask keeps. Why: to see with one table why a field's end
+    of season looks the way it does under a mask (haze, shadow, cloud, or a real fall)."""
+    import rasterio
+
+    from ..optical_export import band_index
+    from . import field_rice
+    from . import ndvi_5day as nd
+    from . import pixel_report as pr
+
+    fields, idx, _ = field_rice.label_aoi(aoi_id, map_suffix="", src_root=root(variant))
+    i = int(np.flatnonzero(fields["field_id"].to_numpy() == field_id)[0])
+    sel = np.asarray(idx) == i
+    loc = pr.locate(aoi_id, 0)
+    v = VARIANTS[variant]
+    bits = (1 << 10) | (1 << 11) if v["qa60_mode"] == "both" else (1 << 10)
+    rows = []
+    for path in sorted(pr.sync_s2(loc, f"data/{nd.FOLDER}", nd.FOLDER).glob("*.tif")):
+        d = path.stem.rsplit("_S2_", 1)[1]
+        if d < since:
+            continue
+        with rasterio.open(path) as ds:
+            b = {n: ds.read(band_index(ds, n)).astype("float32")[sel] for n in ("B2", "B4", "B8", "QA60", "clear")}
+        data = (b["B4"] > 0) & (b["B8"] > 0)
+        if not data.any():
+            continue
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ndvi = (b["B8"] - b["B4"]) / (b["B8"] + b["B4"])
+        keep = nd.clear_mask(data, b["QA60"], b["clear"], b["B8"], ndvi, v["cs_min"], bits, v["keep_dark"],
+                             v["drop_haze"], b["B2"], b["B4"])
+        rows.append({"date": d, "ndvi": round(float(np.nanmedian(ndvi[data])), 2), "B2": round(float(np.median(b["B2"][data]))),
+                     "B8": round(float(np.median(b["B8"][data]))), "cs": round(float(np.median(b["clear"][data]))),
+                     "qa60_opaque_pct": round(100 * float(((b["QA60"][data].astype(int) & (1 << 10)) != 0).mean())),
+                     "kept_pct": round(100 * float(keep[data].mean()))})
+    return pd.DataFrame(rows)
 
 
 def summarise(refs: pd.DataFrame, verdicts: pd.DataFrame) -> str:
@@ -287,7 +351,7 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.mask_experiment", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["build", "rule", "score", "diagnose", "sidecars"])
+    p.add_argument("step", choices=["build", "rule", "score", "diagnose", "sidecars", "verdicts"])
     p.add_argument("--ids", nargs="*", type=int, default=[])
     p.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS))
     p.add_argument("--jobs", type=int, default=3)
@@ -300,6 +364,16 @@ def main(argv=None) -> int:
         global _INTO_STANDARD
         _INTO_STANDARD = True
     Path(OUT).mkdir(parents=True, exist_ok=True)
+    if args.step == "verdicts":
+        t = verdict_detail(args.ids, args.variants[0])
+        t.to_csv(Path(OUT) / f"verdict_detail_{args.variants[0]}.csv", index=False)
+        broke = t[(t["verdict"] == "right") & (t["agreed_before"] == 1) & (t["agree_now"] == 0)]
+        print(f"{len(t)} reviewed fields; right fields broken: {len(broke)}")
+        print(broke[["field_id", "label", "new_label", "new_rice_share", "expected_rice", "true_class_text", "issue"]].to_string(index=False))
+        still = t[(t["verdict"] == "wrong") & (t["agree_now"] == 0)]
+        print(f"wrong fields still wrong: {len(still)}")
+        print(still[["field_id", "label", "new_label", "new_rice_share", "expected_rice", "true_class_text", "issue"]].to_string(index=False))
+        return 0
     if args.step == "sidecars":
         print(f"{write_sidecars(args.variants)} sidecars written")
         return 0
