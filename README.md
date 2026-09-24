@@ -260,6 +260,16 @@ To look at a field or a pixel (NDVI curve, radar curves, Sentinel-2 chips), open
 `processed/aoi<N>/monsoon2026/grid/pixel_index.tif`); or on the command line:
 `python -m sar_pipeline.qgis_review field aoi116_000002` / `... pixel --aoi 116 --pid 317933`.
 
+**Radar colour composites.** Optical images are mostly cloudy in the season, so to check the map
+against the imagery use the radar. `python -m sar_pipeline.sar_composites aoi --ids <ids>` writes,
+per AOI, a 3-band "rice RGB" (R = VH mean August-September = canopy, G = darkest VH June-July =
+flood, B = VH mean April = dry season: paddy shows **red / magenta**, rain-sown dry-land crops
+yellow / orange, trees and villages white, water black) and a 12-band monthly VH/VV stack; then
+`python -m sar_pipeline.sar_composites mosaic` joins all AOIs into `sar_rice_rgb_mosaic.tif` and
+`sar_monthly_mosaic.tif` with QGIS styles (`.qml`) in `processed/_batch/s2_2026/qgis_review/sar/`;
+`... preview --ids <id>` saves a PNG of one AOI next to its final map. Values are dB x 100 (int16).
+How to load and read them in QGIS: docs/16.
+
 **Delivery package.** `python -m sar_pipeline.delivery` copies every AOI's map to
 `processed/_batch/s2_2026/delivery/` as `<aoi>_standing_rice_<map date>.tif` with a colour table and
 class names, and writes `acres_by_class.csv` (every class per AOI, plus totals), `legend.csv` and
@@ -460,6 +470,7 @@ factor is the same named constant `SQM_PER_ACRE` everywhere it is needed
 | [13 Final map: relabels and sieve](docs/13_sieve_and_final_map.md) | the user's relabels, the minimum mapping unit chosen from the plot sizes, and the delivered acres |
 | [14 One label per field](docs/14_field_labels.md) | the delineated field polygons labelled from the final map, validation and acres |
 | [15 Final audit](docs/15_final_audit.md) | acquisition, artefact passes, field registration, the rule re-run per field, every class, young rice, final numbers |
+| [16 Radar colour composites](docs/16_sar_visualisation.md) | checking the map by eye with radar pictures in QGIS: the rice RGB (paddy shows red), the monthly VH/VV stack, how to build them and how to style them |
 | [Glossary](docs/glossary.md) | a term is unclear |
 | [Developer: interfaces](docs/developer/interfaces.md) | changing code |
 | [Developer: testing](docs/developer/testing.md) | writing or running tests |
