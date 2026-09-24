@@ -140,6 +140,32 @@ def water_share_per_field(aoi_id: int, idx, n_fields: int, out_root=SRC) -> np.n
         return np.where(n > 0, w / np.maximum(n, 1), 0.0)
 
 
+#: Delivered rice whose flood came this late, after the field was green, is flagged (issue 23).
+LATE_FLOOD = "2026-07-25"
+STALE_DAYS = 45
+
+
+def confidence_notes(fl: pd.DataFrame, labels) -> np.ndarray:
+    """Why a field's label deserves a field check, from the field-level audit columns.
+
+    * "late flood after an earlier crop": delivered rice (1 / 6) whose confirmed flood is after
+      ``LATE_FLOOD`` and whose field was green (NDVI >= 0.5) in the 60 days before it (issue 23);
+    * "no clear view in the last 45 days": rice, young rice or harvested whose last clear
+      observation is older than ``STALE_DAYS`` (the standing decision rests on an old view).
+    """
+    lab = np.asarray(labels)
+    note = np.full(len(fl), "", dtype=object)
+    if "flood_date" in fl:
+        late = pd.to_datetime(fl["flood_date"]) >= pd.Timestamp(LATE_FLOOD)
+        m = np.isin(lab, (1, 6)) & late.to_numpy() & fl["green_before_flood"].to_numpy(dtype=bool)
+        note[m] = "late flood after an earlier crop"
+    if "days_since_clear" in fl:
+        stale = fl["days_since_clear"].to_numpy() > STALE_DAYS
+        m = np.isin(lab, (1, 4, 6)) & stale & (note == "")
+        note[m] = f"no clear view in the last {STALE_DAYS} days"
+    return note
+
+
 def acres_by_label(fields) -> dict:
     """Acres per class of the delineated fields (their own ``area_acres``; flagged non-fields excluded)."""
     f = fields[fields["is_field"]] if "is_field" in fields else fields
@@ -217,11 +243,15 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refin
             owner = np.where(classes.ravel() != NODATA, idx.ravel(), -1)
             keep = np.bincount(owner[owner >= 0], minlength=len(fields)) >= MIN_PX
             rule = np.full(len(fields), -1)
+            note = np.full(len(fields), "", dtype=object)
             if int(keep.sum()) == len(fl) and (fl["label"].to_numpy() == fields["label"].to_numpy()[keep]).all():
                 rule[keep] = fl["field_rule_label"].to_numpy()
+                note[keep] = confidence_notes(fl, fields["label"].to_numpy()[keep])
             fields["field_rule_label"] = rule
+            fields["confidence_note"] = note
             fields["label_confidence"] = np.where(fields["field_rule_label"] < 0, "not checked (small field)",
-                                            np.where(fields["field_rule_label"] == fields["label"], "high", "mixed"))
+                                            np.where(note != "", "low",
+                                            np.where(fields["field_rule_label"] == fields["label"], "high", "mixed")))
         out_file = Path(out_dir) / f"aoi{aoi_id}_fields_monsoon2026.gpkg"
         out_file.unlink(missing_ok=True)         # a fresh file: new columns cannot be added to an old layer
         fields.to_file(out_file, layer="fields", driver="GPKG")

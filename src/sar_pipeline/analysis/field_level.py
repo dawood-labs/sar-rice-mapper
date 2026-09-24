@@ -38,6 +38,10 @@ from .field_rice import NODATA, label_aoi
 
 SRC = "processed/_batch/s2_2026"
 MIN_PX = 4
+#: "Green before the flood" (issue 23): field-mean NDVI at or above this within the 60 days before
+#: the flood date means a crop stood there just before the wetting.
+GREEN_BEFORE_NDVI = 0.50
+GREEN_BEFORE_DAYS = 60
 
 
 def field_means(values, index, n_fields: int, weights_mask=None) -> np.ndarray:
@@ -108,8 +112,22 @@ def field_audit(aoi_id: int, out_dir=f"{SRC}/report/field_level") -> pd.DataFram
     v1 = checkable & ((vv_dip >= rw.DIP_MIN_DB) | (vh_dip >= rw.DIP_MIN_DB))
     v2 = rw.water_evidence(aoi_id, trough, climb, ndvi_f, windows, series=series)
     wet = v1 | v2["flood_ok"].to_numpy()
-    field_class = mr.classify(ev, radar_wet=wet, never_bare=v2["never_bare"].to_numpy())
-    out = fields.loc[keep, ["uid", "area_acres", "pixels", "label", "rice_share", "unconfirmed_share"]].reset_index(drop=True)
+    # the same decision path as the pixel rule (radar-defined trough, report classes)
+    ev2 = pd.concat([ev, v2], axis=1)
+    ev2 = pd.concat([ev2, mr.radar_trough_events(ev2, ndvi_f, windows)], axis=1)
+    field_class = mr.classify(ev2, radar_wet=wet, never_bare=v2["never_bare"].to_numpy(),
+                              radar_trough=mr.RADAR_TROUGH_DEFAULT, map_date=windows[-1])
+    # was the field green shortly before its flood? (issue 23: a mid-August wetting after a
+    # June-July crop may be a second transplanting or rain under a standing crop; the data cannot
+    # tell, so the field is delivered with low confidence and listed for a field check)
+    flood = pd.to_datetime(v2["flood_date"]).to_numpy().astype("datetime64[D]")
+    win = windows.to_numpy().astype("datetime64[D]")
+    rel = (win[:, None] - flood[None, :]) / np.timedelta64(1, "D")
+    with np.errstate(invalid="ignore"):
+        before = (rel >= -GREEN_BEFORE_DAYS) & (rel <= -5)
+        peak_before = np.where(before.any(axis=0), np.nanmax(np.where(before, ndvi_f, -np.inf), axis=0), np.nan)
+    cols = ["field_id", "uid", "area_acres", "pixels", "label", "rice_share", "unconfirmed_share"]
+    out = fields.loc[keep, [c for c in cols if c in fields]].reset_index(drop=True)
     out["field_rule_label"] = field_class
     out["trough_date"] = ev["trough_date"].to_numpy()
     out["climb_date"] = ev["climb_date"].to_numpy()
@@ -117,8 +135,12 @@ def field_audit(aoi_id: int, out_dir=f"{SRC}/report/field_level") -> pd.DataFram
     out["VV_dip"], out["VH_dip"] = vv_dip, vh_dip
     out["v1_wet"], out["v2_flood"] = v1, v2["flood_ok"].to_numpy()
     out["flood_drop"], out["flood_vh"] = v2["flood_drop"].to_numpy(), v2["flood_vh"].to_numpy()
+    out["flood_date"] = v2["flood_date"].to_numpy()
+    out["peak_before_flood"] = peak_before
+    out["green_before_flood"] = np.isfinite(peak_before) & (peak_before >= GREEN_BEFORE_NDVI)
     out["never_bare"] = v2["never_bare"].to_numpy()
     out["last_seen_clear"] = last_seen
+    out["days_since_clear"] = np.array([(windows[-1] - pd.Timestamp(t)).days if pd.notna(t) else np.nan for t in last_seen])
     out["monsoon_clear_dates"] = monsoon_seen
     out["aoi"] = f"aoi{aoi_id}"
     nd.forget()

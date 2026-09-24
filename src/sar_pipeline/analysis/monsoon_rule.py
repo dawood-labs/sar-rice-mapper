@@ -264,7 +264,7 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
         # trees, gardens and houses: the radar never saw bare ground, so the optical "cycle" is
         # haze. Applied to every rice-like class (fix plan, issues 2 and 5; before only class 3),
         # except where a confirmed flood says the ground was bare and wet after all.
-        nb = np.asarray(never_bare, dtype=bool)
+        nb = np.array(never_bare, dtype=bool)          # a copy: a Series' buffer can be read-only
         if "flood_ok" in events:
             nb &= ~events["flood_ok"].to_numpy(dtype=bool)
         out[np.isin(out, (1, 2, 3, 4, 6, 8)) & nb] = 5

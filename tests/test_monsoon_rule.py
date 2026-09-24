@@ -135,7 +135,7 @@ def test_never_bare_removes_every_rice_like_class_unless_a_flood_was_confirmed()
     ev["flood_ok"] = [False, True, False, False, False]
     wet = np.array([True, True, False, True, False])
     nb = np.array([True, True, True, True, True])
-    out = mr.classify(ev, radar_wet=wet, never_bare=nb)
+    out = mr.classify(ev, radar_wet=wet, never_bare=pd.Series(nb))      # a Series, as run_aoi passes it
     # class 1 (v1 water only), 4, 6 and 2 all fall to 5; the confirmed flood keeps its class 1
     assert out.tolist() == [5, 1, 5, 5, 5]
     assert mr.classify(ev, radar_wet=wet, never_bare=~nb).tolist() == [1, 1, 8, 6, 2]   # the cut pixel had no water: 8

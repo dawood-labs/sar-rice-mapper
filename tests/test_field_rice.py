@@ -30,3 +30,16 @@ def test_field_label_raster_leaves_pixels_of_flagged_non_fields_alone():
     classes = np.array([[3, 3, 0], [1, 4, 2]], dtype="uint8")
     out = fr.field_label_raster(idx, np.array([1, -1, 6]), classes)
     assert out.tolist() == [[1, 1, 0], [1, 4, 6]]       # field 1 is a flagged strip: its pixels keep 0 / 1
+
+
+def test_confidence_notes_flag_late_floods_after_a_crop_and_stale_views():
+    import pandas as pd
+
+    from sar_pipeline.analysis import field_rice as fr
+
+    fl = pd.DataFrame({"flood_date": pd.to_datetime(["2026-08-10", "2026-08-10", "2026-06-10", "NaT"]),
+                       "green_before_flood": [True, False, True, False],
+                       "days_since_clear": [10, 60, 60, 5]})
+    notes = fr.confidence_notes(fl, [1, 6, 1, 0])
+    assert notes.tolist() == ["late flood after an earlier crop", "no clear view in the last 45 days",
+                              "no clear view in the last 45 days", ""]
