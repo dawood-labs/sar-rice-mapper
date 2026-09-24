@@ -45,7 +45,23 @@ the first map (`analysis/compare_runs`).
   observations (NIR < 1,500, NDVI < 0.3) always kept; a vegetated observation with blue reflectance
   above 900 removed as haze (clear canopies measured at 150-770, hazy ones at 1,100-2,700; the one
   hazy scene Cloud Score+ called clear sat at 1,115-1,266). The Cloud Score+ threshold was chosen
-  by score (`analysis/mask_experiment`): TODO final choice and table.
+  by score (`analysis/mask_experiment`) on the 12 surveyed-plot AOIs and the 17 reviewed AOIs.
+  Plot-interior recall (%) in the three surveyed regions, raw rule maps, same rule for every mask:
+
+  | mask | delta | region B | region N | reviewed fields: right kept / wrong fixed |
+  |---|---|---|---|---|
+  | QA60 both bits (first map's mask, new rule) | 97.5 | 91.3 | 95.0 | 14/17, 6/14 (plot AOIs) |
+  | hybrid, Cloud Score+ >= 20 | 97.7 | 91.3 | 93.5 | 12/17, 11/14 |
+  | hybrid, Cloud Score+ >= 30 | 97.4 | 93.0 | 93.9 | 13/17, 11/14 |
+  | **hybrid, Cloud Score+ >= 40 (chosen)** | 97.0 | 94.7 | 93.9 | 14/17, 11/14 |
+  | hybrid, Cloud Score+ >= 50 | 95.7 | 92.1 | 94.0 | 13/17, 10/14 |
+  | hybrid, Cloud Score+ >= 60 | 90.1 | 89.2 | 92.6 | 11/17, 10/14 |
+  | haze test only, no Cloud Score+ | 40.1 | 91.0 | 89.9 | 13/17, 10/14 |
+
+  Without Cloud Score+ real clouds get in (the delta collapses); above 40 the stricter thresholds
+  remove too many observations in the two drier regions. The blue-band haze rule has a second part:
+  a blue-bright observation whose blue is at least 0.9 x its red is haze or thin cloud whatever
+  its NDVI (haze had pushed a young canopy to NDVI 0.26 and slipped past the canopy test).
 
 ### Rule
 * **Radar-defined trough** (`monsoon_rule.radar_trough_events`): a confirmed radar flood can stand
