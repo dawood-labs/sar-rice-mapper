@@ -37,6 +37,11 @@ AOI), every pass of the monsoon season.
 3. *Never bare.* Where the radar shows a canopy or buildings throughout, the low optical values were
    haze over a long cloud gap, and the pixel is not rice (class 5).
 
+**Finishing.** Where the user reviewed the evidence and decided that a whole class in an AOI is
+the same crop as its confirmed rice, that class is relabelled (recorded with its reason). Finally,
+patches smaller than 4 pixels (about 0.1 acre, smaller than 90 % of the surveyed fields) take the
+class that surrounds them.
+
 **Accuracy.** Checked against the field plots reported as standing rice: 89-95 % of plot pixels in
 the three established regions are mapped as rice with water confirmed. Areas known not to be rice
 (evergreen cover, permanent water, bare and built ground, fields cut before the map date) are mapped

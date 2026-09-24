@@ -3,7 +3,8 @@
 Why
 ---
 The rule writes its maps where the analysis needs them, with class codes only a reader of the code
-understands. The person receiving the maps needs each file to explain itself: a colour table so it
+understands. The map packaged is ``<aoi>_monsoon2026_final.tif`` (``analysis/finalize``: user relabels and the
+minimum mapping unit applied) when it exists. The person receiving the maps needs each file to explain itself: a colour table so it
 opens readably in any GIS, the class names in the file's metadata, the map date, and one table with
 the acres of every class per AOI plus the totals. Nothing is re-computed here; the files are copied
 from the rule's output and described.
@@ -41,7 +42,9 @@ def package_aoi(aoi: str, out_dir, map_date: str, src_root=SRC) -> dict:
     import numpy as np
     import rasterio
 
-    src = Path(src_root) / aoi / f"{aoi}_monsoon2026.tif"
+    src = Path(src_root) / aoi / f"{aoi}_monsoon2026_final.tif"     # rule + user relabels + sieve
+    if not src.exists():
+        src = Path(src_root) / aoi / f"{aoi}_monsoon2026.tif"
     with rasterio.open(src) as ds:
         data = ds.read(1)
         profile = ds.profile.copy()
