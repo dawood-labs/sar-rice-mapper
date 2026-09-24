@@ -98,3 +98,20 @@ def test_flood_support_counts_either_polarisation_and_a_deep_single_pass_needs_n
     assert ev.loc[0, "support"] >= 2 and ev.loc[0, "flood_ok"]
     assert ev.loc[1, "support"] == 1 and ev.loc[1, "flood_ok"]
     assert ev.loc[2, "support"] == 1 and not ev.loc[2, "flood_ok"]
+
+
+def test_canopy_at_flood_is_judged_on_observations_not_on_the_fit():
+    series = _two_pol_series()
+    windows = pd.date_range("2026-03-01", "2026-09-21", freq="5D")
+    # the fit interpolates 0.6 across a gap on the flood date for every pixel
+    ndvi = np.full((len(windows), 3), 0.6)
+    trough = np.array(["2026-06-20"] * 3, dtype="datetime64[D]")
+    climb = np.array(["2026-07-25"] * 3, dtype="datetime64[D]")
+    assert not rw.water_evidence(0, trough, climb, ndvi, windows, series=series).loc[0, "flood_ok"]
+    raw = np.full((len(windows), 3), np.nan)                 # nothing observed near the flood: pixel 0 passes
+    ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
+    assert ev.loc[0, "flood_ok"] and np.isnan(ev.loc[0, "ndvi_at_flood"])
+    near = np.abs((windows - pd.Timestamp("2026-06-12")).days) <= 10
+    raw[near, 0] = 0.7                                       # a canopy really seen on the flood date: a harvest drop
+    ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
+    assert not ev.loc[0, "flood_ok"] and ev.loc[0, "ndvi_at_flood"] == 0.7

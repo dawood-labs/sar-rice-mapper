@@ -201,10 +201,13 @@ OTHER_POL_DROP_MIN = -1.0
 #: screened (issue 15) and must agree between polarisations.
 DEEP_FLOOD_VH_MAX = -24.0
 DEEP_FLOOD_DROP_MIN = 8.0
+#: Clear observations this many 5-day windows either side of the flood date decide whether a
+#: canopy stood on the field then (see ``water_evidence``).
+RAW_NEAR_WINDOWS = 2
 
 
 def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = "monsoon2026",
-                   window: int = 5, series=None) -> pd.DataFrame:
+                   window: int = 5, series=None, ndvi_raw=None) -> pd.DataFrame:
     """Per pixel: the flood searched over the whole bare period, and whether the field was ever bare.
 
     Why (docs/11): the first rule looked for the water only 10 days before to 15 days after the
@@ -230,6 +233,12 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
     ``trough``/``climb`` datetime64 per pixel (NaT allowed); ``ndvi`` (windows, pixels) fitted NDVI.
     ``series`` (optional): ``[(dates, {"VV": (dates, n), "VH": (dates, n)}), ...]`` per track, already
     read, e.g. field means (``analysis/field_level``); then the AOI's stacks are not read.
+    ``ndvi_raw`` (optional, (windows, pixels), NaN where unobserved): the "no canopy on the flood
+    date" test then uses the clear observations within ``RAW_NEAR_WINDOWS`` windows of the flood
+    instead of the fitted value. Why (fix plan, stage 2.3): where cloud hides the weeks around
+    transplanting, the fit runs straight across the gap and reads 0.5-0.6 on the flood date, so a
+    10 dB two-track flood on a surveyed paddy failed this test; with no observation near the flood
+    there is no evidence of a canopy, and the radar decides.
     """
     import warnings
 
@@ -292,7 +301,14 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
     win = pd.DatetimeIndex(windows).to_numpy().astype("datetime64[D]")
     has = ~np.isnat(when)
     idx = np.clip(np.searchsorted(win, np.where(has, when, win[0])), 0, len(win) - 1)
-    ndvi_at = np.where(has, ndvi[idx, np.arange(n)], np.nan)
+    if ndvi_raw is None:
+        ndvi_at = np.where(has, ndvi[idx, np.arange(n)], np.nan)
+    else:
+        step = np.arange(len(win))[:, None]
+        near = np.abs(step - idx[None, :]) <= RAW_NEAR_WINDOWS
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            ndvi_at = np.where(has, np.nanmax(np.where(near, ndvi_raw, np.nan), axis=0), np.nan)
     out = pd.DataFrame({
         "flood_drop": np.where(np.isfinite(best), best, np.nan),
         "flood_date": when, "flood_pol": pol_of,
@@ -308,8 +324,9 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
         # rises is a broken pass (issue 15), not a flood. Unknown (no reference) is not held against it.
         consistent = ~(out["flood_other_drop"] < OTHER_POL_DROP_MIN)
         deep = (out["flood_vh"] <= DEEP_FLOOD_VH_MAX) & (out["flood_drop"] >= DEEP_FLOOD_DROP_MIN)
+        no_canopy = ~(out["ndvi_at_flood"] > FLOOD_NDVI_MAX)        # unknown (no observation) passes
         out["flood_ok"] = ((out["flood_drop"] >= FLOOD_DROP_MIN) & (out["flood_vh"] <= FLOOD_VH_MAX)
-                           & (out["ndvi_at_flood"] <= FLOOD_NDVI_MAX) & ((out["support"] >= SUPPORT_MIN) | deep)
+                           & no_canopy & ((out["support"] >= SUPPORT_MIN) | deep)
                            & consistent)
         # the second-darkest pass, not the darkest: one speckled or mis-registered pass must not
         # decide that a village or a tree line was once a bare, wet field

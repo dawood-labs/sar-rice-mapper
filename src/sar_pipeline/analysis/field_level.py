@@ -110,7 +110,8 @@ def field_audit(aoi_id: int, out_dir=f"{SRC}/report/field_level") -> pd.DataFram
         vv_dip, vh_dip = np.fmax(vv_dip, a), np.fmax(vh_dip, b)
         checkable |= np.isfinite(a)
     v1 = checkable & ((vv_dip >= rw.DIP_MIN_DB) | (vh_dip >= rw.DIP_MIN_DB))
-    v2 = rw.water_evidence(aoi_id, trough, climb, ndvi_f, windows, series=series)
+    raw_f = field_means(d["ndvi5d_raw"].reshape(W, -1), idx_flat, n_f)[:, keep] if "ndvi5d_raw" in d else None
+    v2 = rw.water_evidence(aoi_id, trough, climb, ndvi_f, windows, series=series, ndvi_raw=raw_f)
     wet = v1 | v2["flood_ok"].to_numpy()
     # the same decision path as the pixel rule (radar-defined trough, report classes)
     ev2 = pd.concat([ev, v2], axis=1)

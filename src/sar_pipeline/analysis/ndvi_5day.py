@@ -317,6 +317,10 @@ def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd:
                              ("ndvi5d_raw", raw, "float32"), ("gapdays5d", gaps, "int16")):
         written[key] = write_stack(cube.reshape(len(starts), h, w), names, loc["grid"],
                                    folder_out / f"{loc['aoi']}_{key}.tif", dtype)
+    import json
+
+    (folder_out / f"{loc['aoi']}_series_mask.json").write_text(json.dumps(
+        {"cs_min": cs_min, "qa60_mode": qa60_mode, "keep_dark": keep_dark, "drop_haze": drop_haze}))
     summary = {
         "aoi": loc["aoi"], "dates_read": int(keep.sum()), "windows": len(starts),
         "observed_window_pct": round(100 * float(observed.mean()), 1),
@@ -369,19 +373,26 @@ def load(aoi_id: int, out_root="processed/_batch/s2_2026", folder: str = FOLDER)
     """Raw dates and the written stacks of one AOI, read once and kept in memory."""
     import rasterio
 
+    import json
+
     key = (aoi_id, str(out_root))
     if key in _CACHE:
         return _CACHE[key]
-    dates, ndvi, _, lswi, ok, scl, loc = read_dates(aoi_id, folder)
+    loc0 = pr.locate(aoi_id, 0)
+    # the mask the series was built with (written by build); the raw dates are masked the same way,
+    # so "clear" means the same thing to every reader of this series
+    meta_path = Path(out_root) / loc0["aoi"] / f"{loc0['aoi']}_series_mask.json"
+    mask = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    dates, ndvi, _, lswi, ok, scl, loc = read_dates(aoi_id, folder, **mask)
     stacks = {}
-    for key in ("ndvi5d", "lswi5d", "ndvi5d_raw", "gapdays5d"):
-        with rasterio.open(Path(out_root) / loc["aoi"] / f"{loc['aoi']}_{key}.tif") as ds:
+    for name in ("ndvi5d", "lswi5d", "ndvi5d_raw", "gapdays5d"):
+        with rasterio.open(Path(out_root) / loc["aoi"] / f"{loc['aoi']}_{name}.tif") as ds:
             arr = ds.read().astype("float64")
             arr[arr == ds.nodata] = np.nan
-            stacks[key] = arr
+            stacks[name] = arr
             windows = pd.to_datetime(list(ds.descriptions))
     _CACHE[key] = dict(dates=dates, ndvi=ndvi, lswi=lswi, ok=ok, scl=scl, loc=loc,
-                       windows=windows, **stacks)
+                       windows=windows, mask=mask, **stacks)
     return _CACHE[key]
 
 

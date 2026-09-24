@@ -236,9 +236,12 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     wet = np.zeros(len(events), dtype=bool) if radar_wet is None else np.asarray(radar_wet, dtype=bool)
     if radar_trough and "rise_from_flood" in events:
         with np.errstate(invalid="ignore"):
-            r_grown = ((events["rise_from_flood"] >= rise_min) & (events["peak_after_flood"] >= canopy_min)).to_numpy()
-            r_young = (~r_grown & (events["rise_from_flood"] >= young_min)
-                       & (events["peak_after_flood"] >= young_canopy_min)).to_numpy()
+            # a confirmed flood is bare, wet ground (NDVI of water is at or below 0.2), so the climb
+            # to a canopy is measured by the canopy itself; the fitted value on the flood date can
+            # be an interpolation across a cloud gap and is not trusted for the rise
+            r_grown = (events["flood_ok"].to_numpy(dtype=bool) & (events["peak_after_flood"] >= canopy_min).to_numpy())
+            r_young = (~r_grown & events["flood_ok"].to_numpy(dtype=bool)
+                       & (events["peak_after_flood"] >= young_canopy_min).to_numpy())
         r_standing = events["standing_after_flood"].to_numpy(dtype=bool)
         # the radar path only adds: a pixel the optical path already decided keeps that decision
         add = r_grown & ~grown & ~young
@@ -299,7 +302,8 @@ def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
             last = np.datetime64(pd.DatetimeIndex(d["windows"])[-1].date())
             climb = np.where(np.isnat(climb), last, climb)
             climb = np.where(events["valid"].to_numpy(), climb, np.datetime64("NaT"))
-            v2 = radar_water.water_evidence(aoi_id, trough, climb, ndvi, d["windows"], radar_season)
+            raw = d["ndvi5d_raw"].reshape(d["ndvi5d_raw"].shape[0], -1) if "ndvi5d_raw" in d else None
+            v2 = radar_water.water_evidence(aoi_id, trough, climb, ndvi, d["windows"], radar_season, ndvi_raw=raw)
             events = pd.concat([events, v2], axis=1)
             events["radar_wet_v1"] = events["radar_wet"]
             events["radar_wet"] = events["radar_wet"] | events["flood_ok"]

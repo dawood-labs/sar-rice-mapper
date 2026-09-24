@@ -187,10 +187,20 @@ def diagnose(aoi_id: int, variant: str, control: str = "qa60") -> pd.DataFrame:
     for v in (control, variant):
         r = root(v) if v != control or Path(root(v)).exists() else BASE
         _, e, _ = mr.aoi_events(aoi_id, out_root=r)
-        ev[v] = e.loc[changed, ["trough_ndvi", "low_windows", "rise", "peak_after", "standing", "last_ndvi", "radar_wet"]]
+        cols = [c for c in ("trough_ndvi", "low_windows", "rise", "peak_after", "standing", "last_ndvi", "radar_wet",
+                            "flood_ok", "flood_drop", "flood_vh", "ndvi_at_flood", "support", "flood_other_drop",
+                            "rise_from_flood", "peak_after_flood", "standing_after_flood") if c in e]
+        ev[v] = e.loc[changed, cols]
         nd.forget()
-    print("events of the changed pixels, medians / shares:")
-    print(pd.DataFrame({v: ev[v].median(numeric_only=True) for v in ev}).round(2).to_string())
+    print("events of the changed pixels, medians (bool columns: share True):")
+    print(pd.DataFrame({v: ev[v].astype(float).median() for v in ev}).round(2).to_string())
+    lost = ev[variant][(maps[control][changed] == 1) & (maps[variant][changed] != 1)]
+    if len(lost):
+        print(f"pixels rice under {control} only ({round(mr.acres(len(lost)), 1)} ac), {variant} events, medians / shares:")
+        print(lost.astype(float).median().round(2).to_string())
+        print("  flood_ok share", round(float(lost["flood_ok"].mean()), 2) if "flood_ok" in lost else None,
+              "| of those, rise_from_flood>=0.3:", round(float((lost["rise_from_flood"] >= 0.3)[lost["flood_ok"]].mean()), 2) if "flood_ok" in lost and lost["flood_ok"].any() else None,
+              "| standing_after_flood:", round(float(lost["standing_after_flood"][lost["flood_ok"]].mean()), 2) if "flood_ok" in lost and lost["flood_ok"].any() else None)
     return per_date
 
 
@@ -235,6 +245,20 @@ def bright_profile(aoi_id: int, dates, variant: str, control: str = "qa60") -> p
     return pd.DataFrame(rows)
 
 
+def write_sidecars(variants=None) -> int:
+    """Write the ``<aoi>_series_mask.json`` sidecar (what ``ndvi_5day.load`` reads) into every
+    variant folder built before the sidecar existed. Returns the number written."""
+    import json
+
+    n = 0
+    for v in (variants or VARIANTS):
+        for d in Path(root(v)).glob("aoi*"):
+            if (d / f"{d.name}_ndvi5d.tif").exists() and not (d / f"{d.name}_series_mask.json").exists():
+                (d / f"{d.name}_series_mask.json").write_text(json.dumps(VARIANTS[v]))
+                n += 1
+    return n
+
+
 def summarise(refs: pd.DataFrame, verdicts: pd.DataFrame) -> str:
     lines = []
     if len(refs):
@@ -258,8 +282,8 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.mask_experiment", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["build", "rule", "score", "diagnose"])
-    p.add_argument("--ids", nargs="+", type=int, required=True)
+    p.add_argument("step", choices=["build", "rule", "score", "diagnose", "sidecars"])
+    p.add_argument("--ids", nargs="*", type=int, default=[])
     p.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS))
     p.add_argument("--jobs", type=int, default=3)
     p.add_argument("--into-standard", action="store_true",
@@ -271,6 +295,9 @@ def main(argv=None) -> int:
         global _INTO_STANDARD
         _INTO_STANDARD = True
     Path(OUT).mkdir(parents=True, exist_ok=True)
+    if args.step == "sidecars":
+        print(f"{write_sidecars(args.variants)} sidecars written")
+        return 0
     if args.step == "diagnose":
         for a in args.ids:
             t = diagnose(a, args.variants[0])
