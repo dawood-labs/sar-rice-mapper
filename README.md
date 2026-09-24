@@ -234,6 +234,11 @@ waiting for the export queue):
 scripts/monsoon_batch_chain.sh config/<working>.yaml <split_folder> batch3 <ids>
 ```
 
+**Looking at many fields at once.** `python -m sar_pipeline.analysis.water_investigation gallery --ids <ids>`
+draws, per AOI and class, 20 blocks from the middles of fields (NDVI on top, VV/VH of every track
+below) into `processed/_batch/s2_2026/figures/gallery/`. `python -m sar_pipeline.analysis.class3_audit
+--ids <ids>` runs every extra water test on class 1 and class 3 samples (docs/12).
+
 **Delivery package.** `python -m sar_pipeline.delivery` copies every AOI's map to
 `processed/_batch/s2_2026/delivery/` as `<aoi>_standing_rice_<map date>.tif` with a colour table and
 class names, and writes `acres_by_class.csv` (every class per AOI, plus totals), `legend.csv` and
@@ -430,6 +435,7 @@ factor is the same named constant `SQM_PER_ACRE` everywhere it is needed
 | [09 A rice map without ground truth](docs/09_label_free_rice_map.md) | there are no labels: the optical-first map and how the radar is checked against it |
 | [10 Validation against field plots](docs/10_validation_2026.md) | how the standing-rice rule was checked, what it got wrong, and the numbers |
 | [11 Refining the water test (v2)](docs/11_water_v2.md) | why rice-like fields lost their water, the flood searched over the whole bare period, class 5, and its validation |
+| [12 Class 3, second look](docs/12_class3_second_look.md) | every no-field-data check on the rice-like fields without water: radar window, darkness, optical water, rainfall, L-band, galleries of 20 fields per AOI |
 | [Glossary](docs/glossary.md) | a term is unclear |
 | [Developer: interfaces](docs/developer/interfaces.md) | changing code |
 | [Developer: testing](docs/developer/testing.md) | writing or running tests |

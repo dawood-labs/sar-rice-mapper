@@ -581,8 +581,7 @@ def main(argv=None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+
 
 
 def ndvi_at(aoi_id: int, pixels, when) -> np.ndarray:
@@ -654,3 +653,126 @@ def monsoon_flood_share(aoi_id: int, code: int = 3, n: int = 3000, seed: int = 0
     when = pd.to_datetime(fl.loc[wet, "flood_date"])
     return {"aoi": f"aoi{aoi_id}", "n": int(len(pids)), "any_monsoon_flood_pct": round(100 * float(wet.mean()), 1),
             "flood_month_median": when.median().strftime("%d %b") if len(when) else None}
+
+
+def block_series(aoi_id: int, center: int, block: int = 5, season=("2026-03-15", "2026-09-24"),
+                 tracks_cache: dict | None = None) -> dict:
+    """Median series of one field-interior block: raw NDVI (QA60-clear), fitted NDVI, VV/VH per track.
+
+    ``tracks_cache`` (track -> (dates, cubes)) avoids re-reading the AOI's radar stacks per block.
+    """
+    import warnings
+
+    from . import ndvi_5day as nd
+    from . import pixel_report as pr
+    from . import sar_curve
+
+    d = nd.load(aoi_id)
+    g = d["loc"]["grid"]
+    pids = block_pids(center, int(g["width"]), int(g["height"]), block)
+    dates = pd.DatetimeIndex(d["dates"])
+    ndvi = d["ndvi"].reshape(len(dates), -1)[:, pids]
+    ok = d["ok"].reshape(len(dates), -1)[:, pids]
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        raw = np.nanmedian(np.where(ok, ndvi, np.nan), axis=1)
+    windows = pd.DatetimeIndex(d["windows"])
+    fit = np.nanmedian(d["ndvi5d"].reshape(len(windows), -1)[:, pids], axis=1)
+    loc = pr.locate(aoi_id, int(center), season_key="monsoon2026")
+    radar = {}
+    for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
+        if tracks_cache is not None and track in tracks_cache:
+            rd, cubes = tracks_cache[track]
+        else:
+            rd, cubes = sar_curve.read_track(loc, track)
+            if tracks_cache is not None:
+                tracks_cache[track] = (rd, cubes)
+        radar[track] = (rd, {p: np.nanmedian(cubes[p].reshape(len(rd), -1)[:, pids], axis=1) for p in ("VV", "VH")})
+    t0, t1 = pd.Timestamp(season[0]), pd.Timestamp(season[1])
+    return {"dates": dates, "raw": raw, "windows": windows, "fit": fit, "radar": radar, "t0": t0, "t1": t1}
+
+
+def gallery(aoi_id: int, code: int, n: int = 20, seed: int = 0, out_dir=None, context: int = 9):
+    """Small multiples: ``n`` field-interior blocks of one class, NDVI on top, VV/VH below, one panel each.
+
+    Why: one or two pixels can mislead (an edge, a pond rim); twenty blocks from the middles of
+    fields show what the class really is, and the class-1 gallery of the same AOI is the reference.
+    """
+    import matplotlib.pyplot as plt
+    import rasterio
+
+    from . import ndvi_5day as nd
+    from .curves import INK, INK_MUTED, SURFACE
+
+    with rasterio.open(Path("processed/_batch/s2_2026") / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026.tif") as ds:
+        c = ds.read(1)
+    centers = group_centers(c, code, n, context=context, seed=seed)
+    if not len(centers):
+        centers = group_centers(c, code, n, context=5, seed=seed)
+    if not len(centers):
+        return None, []
+    cols = 5
+    rows = int(np.ceil(len(centers) / cols))
+    fig, axes = plt.subplots(rows * 2, cols, figsize=(4.2 * cols, 4.4 * rows), facecolor=SURFACE,
+                             squeeze=False, gridspec_kw={"height_ratios": [1, 1] * rows})
+    colours = ["#b45f06", "#2a78d6", "#7a3ab4"]
+    cache: dict = {}
+    for i, center in enumerate(centers):
+        s = block_series(aoi_id, int(center), tracks_cache=cache)
+        a1, a2 = axes[2 * (i // cols), i % cols], axes[2 * (i // cols) + 1, i % cols]
+        for a in (a1, a2):
+            a.set_facecolor(SURFACE)
+            a.grid(True, alpha=.2)
+            a.set_xlim(s["t0"], s["t1"])
+            a.tick_params(labelsize=6)
+        m = (s["dates"] >= s["t0"]) & (s["dates"] < s["t1"])
+        a1.scatter(s["dates"][m], s["raw"][m], s=6, color="#1f7a3a")
+        w = (s["windows"] >= s["t0"]) & (s["windows"] < s["t1"])
+        a1.plot(s["windows"][w], s["fit"][w], color="#2a78d6", lw=1.5)
+        a1.set_ylim(-0.3, 1.0)
+        a1.set_title(f"{center}", fontsize=7, color=INK_MUTED, loc="left")
+        for k, (track, (rd, v)) in enumerate(s["radar"].items()):
+            a2.plot(rd, v["VV"], "-", color=colours[k % 3], lw=1)
+            a2.plot(rd, v["VH"], ":", color=colours[k % 3], lw=1)
+        a2.axhline(-19, color=INK_MUTED, lw=.6, ls="--")
+        a2.set_ylim(-28, -2)
+        a1.set_xticklabels([])
+    for j in range(len(centers), rows * cols):
+        axes[2 * (j // cols), j % cols].set_visible(False)
+        axes[2 * (j // cols) + 1, j % cols].set_visible(False)
+    fig.suptitle(f"aoi{aoi_id} class {code}: {len(centers)} field-interior blocks. Top NDVI (dots clear obs, "
+                 f"line fit, -0.3..1). Bottom VV solid / VH dotted per track, dashed -19 dB",
+                 x=0.01, ha="left", fontsize=10, color=INK)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    nd.forget()
+    if out_dir:
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        fig.savefig(Path(out_dir) / f"aoi{aoi_id}_class{code}_gallery.png", dpi=75, facecolor=SURFACE)
+    plt.close(fig)
+    return fig, list(centers)
+
+
+def gallery_main(argv=None) -> int:
+    """Command line: galleries for the given classes of the given AOIs."""
+    import argparse
+
+    p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.water_investigation gallery")
+    p.add_argument("--ids", nargs="+", type=int, required=True)
+    p.add_argument("--codes", nargs="+", type=int, default=[3, 1])
+    p.add_argument("--n", type=int, default=20)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--out", default="processed/_batch/s2_2026/figures/gallery")
+    args = p.parse_args(argv)
+    for a in args.ids:
+        for code in args.codes:
+            _, c = gallery(a, code, args.n, seed=args.seed, out_dir=args.out)
+            print(f"aoi{a} class {code}: {len(c)} blocks")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "gallery":
+        raise SystemExit(gallery_main(sys.argv[2:]))
+    raise SystemExit(main())
