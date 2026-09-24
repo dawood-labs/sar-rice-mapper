@@ -42,6 +42,14 @@ the same crop as its confirmed rice, that class is relabelled (recorded with its
 patches smaller than 4 pixels (about 0.1 acre, smaller than 90 % of the surveyed fields) take the
 class that surrounds them.
 
+**Fields.** Every delineated field polygon (traced on high-resolution imagery) carries one label:
+the class holding most of its pixels (`label`, `class_name`), with `rice_share` and
+`unconfirmed_share` so another threshold can be applied, and `pixels` (0 for fields smaller than one
+pixel, labelled from the pixel under them). One GeoPackage per AOI in `fields/`;
+`field_acres_by_class.csv` gives, per AOI, the acres of each class on the pixel map and on the
+field-labelled map inside the AOI (field polygons can extend past the AOI edge; their full area is
+in `area_acres`).
+
 **Accuracy.** Checked against the field plots reported as standing rice: 89-95 % of plot pixels in
 the three established regions are mapped as rice with water confirmed. Areas known not to be rice
 (evergreen cover, permanent water, bare and built ground, fields cut before the map date) are mapped

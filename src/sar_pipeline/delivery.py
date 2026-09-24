@@ -80,6 +80,16 @@ def package(out_dir, map_date: str | None = None, src_root=SRC) -> pd.DataFrame:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     table.to_csv(Path(out_dir) / "acres_by_class.csv", index=False)
     legend_table().to_csv(Path(out_dir) / "legend.csv", index=False)
+    fields_dir = Path(src_root) / "fields"                  # analysis/field_rice (phase 7)
+    if fields_dir.exists():
+        import shutil
+
+        out_fields = Path(out_dir) / "fields"
+        out_fields.mkdir(parents=True, exist_ok=True)
+        for f in sorted(fields_dir.glob("aoi*_fields_monsoon2026.gpkg")):
+            shutil.copy2(f, out_fields / f.name.replace("monsoon2026", f"standing_rice_{map_date}"))
+        if (fields_dir / "field_acres_by_class.csv").exists():
+            shutil.copy2(fields_dir / "field_acres_by_class.csv", Path(out_dir) / "field_acres_by_class.csv")
     note = Path(__file__).resolve().parents[2] / "docs" / "delivery_methods_note.md"
     if note.exists():
         (Path(out_dir) / "METHODS.md").write_text(note.read_text())

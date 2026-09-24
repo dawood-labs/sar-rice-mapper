@@ -243,6 +243,10 @@ below) into `processed/_batch/s2_2026/figures/gallery/`. `python -m sar_pipeline
 (`config/class_overrides_monsoon2026.yaml`, local) and a 4-pixel sieve (docs/13) to every rule map,
 writing `<aoi>_monsoon2026_final.tif` and `monsoon2026_final_acres.csv`.
 
+**Field labels (phase 7).** `python -m sar_pipeline.analysis.field_rice` labels every delineated
+field polygon (`../data/delineation/`, from the field-delineation run) from the final map: one
+GeoPackage per AOI in `processed/_batch/s2_2026/fields/` and `field_acres_by_class.csv` (docs/14).
+
 **Delivery package.** `python -m sar_pipeline.delivery` copies every AOI's map to
 `processed/_batch/s2_2026/delivery/` as `<aoi>_standing_rice_<map date>.tif` with a colour table and
 class names, and writes `acres_by_class.csv` (every class per AOI, plus totals), `legend.csv` and
@@ -441,6 +445,7 @@ factor is the same named constant `SQM_PER_ACRE` everywhere it is needed
 | [11 Refining the water test (v2)](docs/11_water_v2.md) | why rice-like fields lost their water, the flood searched over the whole bare period, class 5, and its validation |
 | [12 Class 3, second look](docs/12_class3_second_look.md) | every no-field-data check on the rice-like fields without water: radar window, darkness, optical water, rainfall, L-band, galleries of 20 fields per AOI |
 | [13 Final map: relabels and sieve](docs/13_sieve_and_final_map.md) | the user's relabels, the minimum mapping unit chosen from the plot sizes, and the delivered acres |
+| [14 One label per field](docs/14_field_labels.md) | the delineated field polygons labelled from the final map, validation and acres |
 | [Glossary](docs/glossary.md) | a term is unclear |
 | [Developer: interfaces](docs/developer/interfaces.md) | changing code |
 | [Developer: testing](docs/developer/testing.md) | writing or running tests |
