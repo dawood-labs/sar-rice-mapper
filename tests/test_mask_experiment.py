@@ -14,3 +14,10 @@ def test_variants_are_distinct_folders_and_summary_reads():
         {"variant": "hyb60", "aoi": "aoi2", "set": "rice_plot_interior", "region": "R", "pixels": 300, "delivered_pct": 98.0}])
     text = me.summarise(refs, pd.DataFrame())
     assert "96.0" in text and "97.5" in text      # pixel-weighted: (100*96 + 300*98) / 400 = 97.5
+
+
+def test_into_standard_redirects_the_series_root(monkeypatch):
+    monkeypatch.setattr(me, "_INTO_STANDARD", True)
+    assert me.root("hyb60") == me.BASE
+    monkeypatch.setattr(me, "_INTO_STANDARD", False)
+    assert me.root("hyb60") == f"{me.BASE}_hyb60"

@@ -46,15 +46,21 @@ VARIANTS = {
 OUT = f"{BASE}/report/mask_experiment"
 
 
+#: Set by ``--into-standard`` (stage 4): the chosen mask's series go to the standard folder, where
+#: the batch, the field labels and the delivery read them.
+_INTO_STANDARD = False
+
+
 def root(variant: str) -> str:
-    return f"{BASE}_{variant}"
+    return BASE if _INTO_STANDARD else f"{BASE}_{variant}"
 
 
 def build_one(args) -> dict:
     aoi_id, variant = args
     from . import ndvi_5day as nd
 
-    if (Path(root(variant)) / f"aoi{aoi_id}" / f"aoi{aoi_id}_ndvi5d.tif").exists():
+    marker = Path(root(variant)) / f"aoi{aoi_id}" / f"aoi{aoi_id}_ndvi5d.tif"
+    if marker.exists() and not _INTO_STANDARD:
         return {"aoi": f"aoi{aoi_id}", "variant": variant, "skipped": True}
     s = nd.build(aoi_id, out_root=root(variant), log=lambda *_: None, **VARIANTS[variant])
     nd.forget()
@@ -75,17 +81,10 @@ def run_many(func, ids, variants, jobs: int = 3) -> pd.DataFrame:
     """``func`` over every (aoi, variant) pair, ``jobs`` processes; failures are recorded, not raised."""
     from concurrent.futures import ProcessPoolExecutor
 
-    tasks = [(a, v) for v in variants for a in ids]
+    tasks = [(a, v, _INTO_STANDARD) for v in variants for a in ids] if _INTO_STANDARD else [(a, v) for v in variants for a in ids]
     rows = []
-
-    def safe(t):
-        try:
-            return func(t)
-        except Exception as exc:  # keep the batch going
-            return {"aoi": f"aoi{t[0]}", "variant": t[1], "error": f"{type(exc).__name__}: {exc}"}
-
     if jobs <= 1:
-        rows = [safe(t) for t in tasks]
+        rows = [_safe_call((func, t)) for t in tasks]
     else:
         with ProcessPoolExecutor(max_workers=jobs) as ex:
             rows = list(ex.map(_safe_call, [(func, t) for t in tasks]))
@@ -94,6 +93,10 @@ def run_many(func, ids, variants, jobs: int = 3) -> pd.DataFrame:
 
 def _safe_call(pair):
     func, t = pair
+    global _INTO_STANDARD
+    if len(t) == 3:                       # (aoi, variant, into_standard) from a worker process
+        _INTO_STANDARD = t[2]
+        t = t[:2]
     try:
         return func(t)
     except Exception as exc:  # noqa: BLE001
@@ -259,7 +262,14 @@ def main(argv=None) -> int:
     p.add_argument("--ids", nargs="+", type=int, required=True)
     p.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS))
     p.add_argument("--jobs", type=int, default=3)
+    p.add_argument("--into-standard", action="store_true",
+                   help="build: write the series into the standard folder (the chosen mask, stage 4)")
     args = p.parse_args(argv)
+    if args.into_standard:
+        if args.step != "build" or len(args.variants) != 1:
+            p.error("--into-standard takes exactly one variant with the build step")
+        global _INTO_STANDARD
+        _INTO_STANDARD = True
     Path(OUT).mkdir(parents=True, exist_ok=True)
     if args.step == "diagnose":
         for a in args.ids:
