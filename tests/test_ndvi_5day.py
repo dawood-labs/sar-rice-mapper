@@ -75,3 +75,31 @@ def test_choose_lambda_prefers_more_smoothing_for_noisy_data():
     raw = truth[:, None] + rng.normal(0, 0.08, (60, 50))
     chosen, table = nd.choose_lambda(raw, lambdas=(0.01, 5), n_pixels=50)
     assert chosen == 5 and list(table["lambda"]) == [0.01, 5]
+
+
+def test_clear_mask_keeps_dark_water_under_a_strict_cloud_score():
+    import numpy as np
+
+    from sar_pipeline.analysis import ndvi_5day as nd
+
+    data = np.array([True, True, True, True, True])
+    qa = np.array([0, 1 << 10, 1 << 11, 0, 0])            # clear, opaque, cirrus, clear, clear
+    cs = np.array([90, 90, 90, 20, 20])                    # ... Cloud Score+ cloudy on the last two
+    b8 = np.array([3000, 3000, 3000, 600, 3200])           # last two: dark water, bright haze
+    ndvi = np.array([0.6, 0.1, 0.6, 0.05, 0.4])
+    both = (1 << 10) | (1 << 11)
+    assert nd.clear_mask(data, qa, cs, b8, ndvi, None, both).tolist() == [True, False, False, True, True]
+    assert nd.clear_mask(data, qa, cs, b8, ndvi, 60, 1 << 10).tolist() == [True, False, True, False, False]
+    assert nd.clear_mask(data, qa, cs, b8, ndvi, 60, 1 << 10, keep_dark=True).tolist() == [True, False, True, True, False]
+
+
+def test_upper_envelope_never_dives_below_the_observations_in_a_gap():
+    import numpy as np
+
+    from sar_pipeline.analysis import ndvi_5day as nd
+
+    y = np.full(40, np.nan)
+    y[:6] = [0.75, 0.8, 0.78, 0.6, 0.35, 0.2]      # a crop cut in spring ...
+    y[30:] = np.linspace(0.6, 0.85, 10)            # ... and a new canopy in autumn; nothing between
+    fit, _ = nd.upper_envelope(y, 1.0)
+    assert np.nanmin(fit) >= 0.2 - nd.FIT_FLOOR_MARGIN - 1e-9

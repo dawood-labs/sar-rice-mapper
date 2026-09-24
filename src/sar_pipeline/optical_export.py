@@ -74,11 +74,12 @@ QA60_CLOUD_BITS = (1 << 10) | (1 << 11)
 SCL_CLOUD_CLASSES = (3, 8, 9, 10)
 
 
-def qa60_cloud(qa60):
-    """True where QA60 flags opaque cloud or cirrus. Works on any integer numpy array."""
+def qa60_cloud(qa60, bits: int = QA60_CLOUD_BITS):
+    """True where QA60 flags any of ``bits`` (default: opaque cloud or cirrus). Works on any integer
+    numpy array."""
     import numpy as np
 
-    return (np.asarray(qa60).astype("int64") & QA60_CLOUD_BITS) != 0
+    return (np.asarray(qa60).astype("int64") & bits) != 0
 
 
 def start_with_retries(make_task, attempts: int = 5, pause: float = 2.0, sleep=None):

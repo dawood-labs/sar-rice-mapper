@@ -45,3 +45,32 @@ def test_flood_search_finds_a_flood_weeks_before_the_anchor():
     rising = np.linspace(-12, -5, len(dates))[:, None]
     best, _, persist = rw.flood_search(dates, rising, anchor)
     assert best[0] < 0 and persist[0] == 0
+
+
+def _two_pol_series(n_pixels=3):
+    """One track, 6-day passes; pixel 0 a real flood (VV and VH fall), pixel 1 a broken pass (VH
+    falls 8 dB while VV rises 2 dB), pixel 2 dry all season."""
+    dates = pd.DatetimeIndex(np.arange(np.datetime64("2026-04-01"), np.datetime64("2026-09-20"), 6))
+    day = dates.to_numpy().astype("datetime64[D]")
+    vv = np.full((len(dates), n_pixels), -9.0)
+    vh = np.full((len(dates), n_pixels), -16.0)
+    flood = (day >= np.datetime64("2026-06-10")) & (day <= np.datetime64("2026-06-28"))
+    vv[flood, 0] = -16.0
+    vh[flood, 0] = -23.0
+    one = day == np.datetime64("2026-06-18")      # a pass date (6-day steps from 1 Apr)
+    vh[one, 1] = -24.0
+    vv[one, 1] = -7.0
+    return [(dates, {"VV": vv, "VH": vh})]
+
+
+def test_water_evidence_rejects_a_pass_where_only_one_polarisation_fell():
+    series = _two_pol_series()
+    windows = pd.date_range("2026-03-01", "2026-09-21", freq="5D")
+    ndvi = np.full((len(windows), 3), 0.2)
+    trough = np.array(["2026-06-20"] * 3, dtype="datetime64[D]")
+    climb = np.array(["2026-07-25"] * 3, dtype="datetime64[D]")
+    ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series)
+    assert ev.loc[0, "flood_ok"] and ev.loc[0, "flood_other_drop"] > 0        # both fell: water
+    assert ev.loc[1, "flood_drop"] >= 4 and ev.loc[1, "flood_vh"] <= -19       # looks like water in VH...
+    assert ev.loc[1, "flood_other_drop"] < rw.OTHER_POL_DROP_MIN and not ev.loc[1, "flood_ok"]
+    assert not ev.loc[2, "flood_ok"]

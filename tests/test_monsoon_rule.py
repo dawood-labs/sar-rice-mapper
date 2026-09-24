@@ -84,3 +84,35 @@ def test_young_with_water_and_visible_canopy_is_young_rice():
                        "last_ndvi": [0.35, 0.25, 0.35]})
     out = mr.classify(ev, radar_wet=np.array([True, True, False]))
     assert out.tolist() == [6, 2, 2]
+
+
+def test_radar_trough_rescues_a_paddy_whose_optical_trough_was_hidden():
+    """A field hidden by cloud around transplanting: the fit never falls below 0.40, but the radar
+    saw the flood; with the radar trough it is rice, without it not rice (issue 4)."""
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import monsoon_rule as mr
+
+    windows = pd.date_range("2026-05-01", "2026-09-21", freq="5D")
+    n = len(windows)
+    # pixel 0: straight rise 0.30 -> 0.85 (gap interpolated; above 0.40 inside the 110-day window); pixel 1: same, but no radar flood;
+    # pixel 2: a real optical trough (ordinary rice); pixel 3: flood then no climb (not rice)
+    ndvi = np.stack([np.linspace(0.30, 0.85, n)] * 2 + [np.r_[np.full(10, 0.1), np.linspace(0.1, 0.8, n - 10)]]
+                    + [np.full(n, 0.45)], axis=1)
+    ev = mr.pixel_events(ndvi, ndvi * 0, windows)
+    ev["flood_date"] = pd.to_datetime(["2026-05-25", "NaT", "2026-05-25", "2026-05-25"])
+    ev["flood_ok"] = [True, False, True, True]
+    ev = pd.concat([ev, mr.radar_trough_events(ev, ndvi, windows)], axis=1)
+    wet = ev["flood_ok"].to_numpy()
+    assert mr.classify(ev, radar_wet=wet).tolist() == [0, 0, 1, 0]
+    out = mr.classify(ev, radar_wet=wet, radar_trough=True)
+    assert out.tolist() == [1, 0, 1, 0]
+    assert ev.loc[0, "rise_from_flood"] > 0.3 and np.isnan(ev.loc[1, "rise_from_flood"])
+    # harvested after a radar trough: the canopy fell away at the end
+    ndvi2 = ndvi.copy()
+    ndvi2[-4:, 0] = 0.2
+    ev2 = mr.pixel_events(ndvi2, ndvi2 * 0, windows)
+    ev2["flood_date"], ev2["flood_ok"] = ev["flood_date"], ev["flood_ok"]
+    ev2 = pd.concat([ev2, mr.radar_trough_events(ev2, ndvi2, windows)], axis=1)
+    assert mr.classify(ev2, radar_wet=wet, radar_trough=True)[0] == 4

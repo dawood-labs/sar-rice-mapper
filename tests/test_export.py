@@ -1354,3 +1354,13 @@ def test_clock_skew_tolerance_matches_download():
     from sar_pipeline import download
 
     assert float(export.CREATE_TIME_SKEW_SECONDS) == float(download.STALE_BLOB_TOLERANCE_S)
+
+
+def test_qa60_cloud_can_ignore_the_cirrus_bit():
+    import numpy as np
+
+    from sar_pipeline.optical_export import qa60_cloud
+
+    qa = np.array([0, 1 << 10, 1 << 11, (1 << 10) | (1 << 11)])
+    assert qa60_cloud(qa).tolist() == [False, True, True, True]
+    assert qa60_cloud(qa, 1 << 10).tolist() == [False, True, False, True]

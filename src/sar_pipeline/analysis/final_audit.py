@@ -121,9 +121,16 @@ def main(argv=None) -> int:
     import argparse
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.final_audit")
-    p.add_argument("step", choices=["acquisition", "bad-passes", "missed-rice"])
-    p.add_argument("--ids", nargs="+", type=int, required=True)
+    p.add_argument("step", choices=["acquisition", "bad-passes", "screen", "missed-rice"])
+    p.add_argument("--ids", nargs="*", type=int, default=[])
     args = p.parse_args(argv)
+    if args.step == "screen":
+        t = screen_all()
+        b = t[t["bad"]]
+        print(f"{len(t)} AOI-track-pol-passes, {len(b)} bad: " + ", ".join(
+            f"{r} {n}" for r, n in b["reason"].value_counts().items()))
+        print(b.groupby(["track", "pol", "date"])["aoi"].nunique().sort_values(ascending=False).head(15).to_string())
+        return 0
     for a in args.ids:
         if args.step == "acquisition":
             print(acquisition(a))
@@ -178,6 +185,57 @@ def date_on_stable_ground(aoi_id: int, track: str, dates_to_check, window: int =
 
 
 BAD_PASS_DB = 3.0     # a jump this large on ground that does not change marks the pass as unusable
+#: Screening v2 (fix plan, issues 15 and 21). A pass can be broken in one polarisation only and
+#: only partly: on 11 Jun 2026 one descending pass read VH 2.5 dB low on stable ground in aoi114 while
+#: VV was flat, and 5-20 dB low on bare fields, which the water tests took for transplanting. Such a
+#: pass is caught by ``ONE_POL_DB`` (a drop in one polarisation while the other moves less than
+#: ``FLAT_DB``), and a pass found bad in ``CROSS_AOI_MIN`` AOIs of the same track is dropped on that
+#: track everywhere, which also covers AOIs without stable ground.
+ONE_POL_DB = 2.0
+FLAT_DB = 1.0
+CROSS_AOI_MIN = 3
+
+
+def screen_passes(table: pd.DataFrame, limit: float = BAD_PASS_DB, one_pol_db: float = ONE_POL_DB,
+                  flat_db: float = FLAT_DB, cross_aoi_min: int = CROSS_AOI_MIN) -> pd.DataFrame:
+    """Re-decide ``bad`` for every row of the per-AOI ``bad_passes`` tables, with a ``reason``.
+
+    Reasons, in order: ``jump`` (|jump| >= ``limit`` in that polarisation), ``one_pol`` (this
+    polarisation <= -``one_pol_db`` while the other polarisation of the same pass is within
+    ``flat_db``), ``track_wide`` (the same track / date / polarisation is bad for one of the first
+    two reasons in >= ``cross_aoi_min`` AOIs). Rows with no stable-ground value can only be
+    ``track_wide``.
+    """
+    t = table.copy()
+    t["date"] = pd.to_datetime(t["date"]).dt.strftime("%Y-%m-%d")
+    j = pd.to_numeric(t["stable_jump_db"], errors="coerce")
+    t["reason"] = np.where(j.abs() >= limit, "jump", "")
+    key = pd.MultiIndex.from_frame(t[["aoi", "track", "date"]])
+    piv = t.assign(j=j).pivot_table(index=["aoi", "track", "date"], columns="pol", values="j")
+    if {"VV", "VH"} <= set(piv.columns):
+        for pol, other in (("VH", "VV"), ("VV", "VH")):
+            hit = piv[(piv[pol] <= -one_pol_db) & (piv[other].abs() < flat_db)].index
+            m = key.isin(hit) & (t["pol"] == pol).to_numpy() & (t["reason"] == "").to_numpy()
+            t.loc[m, "reason"] = "one_pol"
+    n = t[t["reason"] != ""].groupby(["track", "pol", "date"])["aoi"].nunique()
+    spread = n[n >= cross_aoi_min].index
+    m = pd.MultiIndex.from_frame(t[["track", "pol", "date"]]).isin(spread) & (t["reason"] == "").to_numpy()
+    t.loc[m, "reason"] = "track_wide"
+    t["bad"] = t["reason"] != ""
+    return t
+
+
+def screen_all(audit_dir=f"{SRC}/report/final_audit", out_name: str = "bad_passes_all.csv") -> pd.DataFrame:
+    """Concatenate every ``aoi<N>_bad_passes.csv``, screen, write ``bad_passes_all.csv`` (the file
+    ``sar_curve.read_track`` reads); the previous table is kept as ``bad_passes_all_prev.csv``."""
+    audit = Path(audit_dir)
+    parts = [pd.read_csv(p) for p in sorted(audit.glob("aoi*_bad_passes.csv")) if p.stat().st_size > 1]
+    t = screen_passes(pd.concat(parts, ignore_index=True))
+    out = audit / out_name
+    if out.exists():
+        out.replace(audit / out_name.replace(".csv", "_prev.csv"))
+    t.to_csv(out, index=False)
+    return t
 
 
 def stable_pixels(aoi_id: int, min_px: int = 20) -> np.ndarray:
@@ -211,12 +269,13 @@ def bad_passes(aoi_id: int, window: int = 5, limit: float = BAD_PASS_DB) -> pd.D
     for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
         dates, cubes = sar_curve.read_track(loc, track, window)
         for pol in ("VV", "VH"):
-            if not len(pix):
-                continue
-            s = pd.Series(np.nanmedian(cubes[pol].reshape(len(dates), -1)[:, pix], axis=1), index=dates)
-            ref = pd.concat([s.shift(k) for k in (-2, -1, 1, 2)], axis=1).median(axis=1)
+            if len(pix):
+                s = pd.Series(np.nanmedian(cubes[pol].reshape(len(dates), -1)[:, pix], axis=1), index=dates)
+                ref = pd.concat([s.shift(k) for k in (-2, -1, 1, 2)], axis=1).median(axis=1)
             for dte in dates:
-                j = s[dte] - ref[dte]
+                # no stable ground (11 AOIs): the row is still written, so the cross-AOI screen in
+                # screen_passes can mark the pass from the neighbours' verdicts
+                j = s[dte] - ref[dte] if len(pix) else np.nan
                 rows.append({"aoi": f"aoi{aoi_id}", "track": track, "pol": pol, "date": dte.date(),
                              "stable_pixels": len(pix), "stable_jump_db": round(float(j), 2) if np.isfinite(j) else None,
                              "bad": bool(np.isfinite(j) and abs(j) >= limit)})

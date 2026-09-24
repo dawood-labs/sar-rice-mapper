@@ -59,19 +59,60 @@ ENVELOPE_ITERATIONS = 3
 #: 0.0432 at 2 and 0.0451 at 5, rising to 0.061 at 50. The curve is flat between 0.5 and 2, so the
 #: choice matters little there; re-run the check on a new region rather than trusting this value.
 LMBD = 1.0
+#: The fit may not fall further than this below the pixel's lowest observation. Why (fix plan,
+#: issue 9): across a long gap the second-difference smoother overshoots, and on one field the
+#: fitted NDVI dived to -0.4 between a May and a September observation (impossible for land),
+#: which made a trough out of nothing. A value below every observation is never evidence.
+FIT_FLOOR_MARGIN = 0.05
 
 
-def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None, cs_min: float | None = None):
+#: Which QA60 bits the mask removes: ``both`` (opaque cloud and cirrus, the mask of the delivered
+#: map) or ``opaque`` only. Why the choice exists (fix plan, issue 11): the cirrus bit flagged whole
+#: clear scenes (34 AOI-dates in 22 AOIs, e.g. the only clear view of a transplanting flood), while
+#: hazy scenes passed both bits; with Cloud Score+ doing the haze work, the cirrus bit only costs data.
+QA60_MODE = "both"
+#: A dark observation is kept even when Cloud Score+ calls it cloudy (``keep_dark``). Why: Cloud
+#: Score+ marks a flooded paddy as not clear (it is as dark as a cloud shadow), and on the plot AOI
+#: aoi25 a plain Cloud Score+ mask removed every transplanting-water observation, so the trough
+#: vanished and 77 acres of surveyed rice became "not rice". Clouds and haze are bright in the NIR
+#: (B8 well above 1,500 on the collection's 0-10,000 scale), open water and wet soil are not, so a
+#: dark, low-NDVI observation cannot be the haze this mask is there to remove.
+DARK_NIR_MAX = 1500
+DARK_NDVI_MAX = 0.30
+
+
+def clear_mask(data, qa60, cs, b8, ndvi, cs_min: float | None, bits: int, keep_dark: bool = False):
+    """The observations the series keeps: data present, QA60 bits clear, and (when ``cs_min`` is
+    set) Cloud Score+ ``clear`` at or above it, unless ``keep_dark`` and the pixel is dark
+    (see :data:`DARK_NIR_MAX`)."""
+    from ..optical_export import qa60_cloud
+
+    ok = data & ~qa60_cloud(qa60, bits)
+    if cs_min is None:
+        return ok
+    clear = cs >= cs_min
+    if keep_dark:
+        with np.errstate(invalid="ignore"):
+            clear |= (b8 < DARK_NIR_MAX) & (ndvi < DARK_NDVI_MAX)
+    return ok & clear
+
+
+def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None, cs_min: float | None = None,
+               qa60_mode: str = QA60_MODE, keep_dark: bool = False):
     """NDVI, NDWI, LSWI, QA60 cloud and SCL cloud for every exported date, shaped (dates, rows, cols).
 
-    ``ok`` is True where the pixel has data and QA60 does not flag cloud or cirrus. With ``cs_min``
-    the Cloud Score+ ``clear`` band (0-100, per 10 m pixel) must also reach that value: the stricter
-    mask used to test how much haze the light one lets through. ``scl_cloud`` is returned for
-    comparison only.
+    ``ok`` is True where the pixel has data and QA60 does not flag cloud (``qa60_mode``: cloud and
+    cirrus, or opaque cloud only). With ``cs_min`` the Cloud Score+ ``clear`` band (0-100, per 10 m
+    pixel) must also reach that value: the stricter mask used to test how much haze the light one
+    lets through. ``scl_cloud`` is returned for comparison only.
     """
     import rasterio
 
-    from ..optical_export import SCL_CLOUD_CLASSES, band_index, qa60_cloud
+    from ..optical_export import SCL_CLOUD_CLASSES, band_index
+
+    if qa60_mode not in ("both", "opaque"):
+        raise ValueError(f"qa60_mode must be 'both' or 'opaque', not {qa60_mode!r}")
+    bits = (1 << 10) | (1 << 11) if qa60_mode == "both" else (1 << 10)
 
     loc = pr.locate(aoi_id, 0)
     paths = sorted(pr.sync_s2(loc, cache_root or f"data/{folder}", folder).glob("*.tif"))
@@ -89,7 +130,7 @@ def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None,
             ndvi.append(np.where(data, (b8 - b4) / (b8 + b4), np.nan))
             ndwi.append(np.where(data & (b3 + b8 > 0), (b3 - b8) / (b3 + b8), np.nan))
             lswi.append(np.where(data & (b8 + b11 > 0), (b8 - b11) / (b8 + b11), np.nan))
-        ok.append(data & ~qa60_cloud(qa) & (cs >= cs_min if cs is not None else True))
+        ok.append(clear_mask(data, qa, cs, b8, ndvi[-1], cs_min, bits, keep_dark))
         scl.append(data & np.isin(sc.astype("int64"), SCL_CLOUD_CLASSES))
     order = np.argsort(dates)
     pick = lambda xs: np.stack(xs)[order]  # noqa: E731
@@ -163,6 +204,7 @@ def upper_envelope(y, lmbd: float = LMBD, iterations: int = ENVELOPE_ITERATIONS,
             break
         weights = np.where(seen, np.where(below > 0, 1.0 - below / worst, 1.0), 0.0)
         fit = op.whittaker(y, lmbd, dtd=dtd, weights=weights)
+    fit = np.maximum(fit, np.nanmin(y) - FIT_FLOOR_MARGIN)
     return hold_edges(fit, seen), weights
 
 
@@ -220,14 +262,17 @@ def gap_days(observed, step: int = STEP_DAYS):
 
 
 def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd: float = LMBD,
-          out_root="processed/_batch/s2_2026", folder: str = FOLDER, log=print, cs_min: float | None = None) -> dict:
+          out_root="processed/_batch/s2_2026", folder: str = FOLDER, log=print, cs_min: float | None = None,
+          qa60_mode: str = QA60_MODE, keep_dark: bool = False) -> dict:
     """Read, composite, fit and write the 5-day series of one AOI. Returns a summary dict.
 
-    ``cs_min`` adds the Cloud Score+ requirement to the mask (see :func:`read_dates`); write such a
-    series to its own ``out_root`` so it is never confused with the light-mask one.
+    ``cs_min`` adds the Cloud Score+ requirement to the mask and ``qa60_mode`` picks the QA60 bits
+    (see :func:`read_dates`); write such a series to its own ``out_root`` so it is never confused
+    with the light-mask one.
     """
     t0 = time.time()
-    dates, ndvi, ndwi, lswi, ok, scl, loc = read_dates(aoi_id, folder, cs_min=cs_min)
+    dates, ndvi, ndwi, lswi, ok, scl, loc = read_dates(aoi_id, folder, cs_min=cs_min, qa60_mode=qa60_mode,
+                                                        keep_dark=keep_dark)
     h, w = ndvi.shape[1:]
     starts = window_starts(start, end)
     keep = (dates >= starts[0]) & (dates < pd.Timestamp(end))
@@ -260,6 +305,7 @@ def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd:
         # share of all pixel-windows whose value is more than 15 days from any real observation
         "gap_over_15d_pct": round(100 * float((gaps > 15).mean()), 1),
         "max_gap_days": int(gaps.max()),
+        "mask": f"qa60_{qa60_mode}" + (f"_cs{cs_min:g}" if cs_min is not None else "") + ("_keepdark" if keep_dark else ""),
         "qa60_clear_pct": round(100 * float(flat(ok).mean()), 1),
         "scl_cloud_pct_of_qa60_clear": round(100 * float((flat(scl) & flat(ok)).sum()
                                                          / max(flat(ok).sum(), 1)), 1),

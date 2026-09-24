@@ -1,0 +1,270 @@
+"""Optical mask experiment: which cloud mask gives the rule the best map? (fix plan, stage 1.4)
+
+Why
+---
+The delivered map used QA60 (opaque + cirrus bits) as its only cloud mask. The review (issue 11)
+showed the cirrus bit throwing away whole clear scenes, including the only clear view of a
+transplanting flood, while hazy scenes passed and turned standing rice into "harvested" at the
+series end. Every exported Sentinel-2 file also carries the Cloud Score+ ``clear`` band, so the
+mask can be changed here without a new export. This module builds the 5-day series under several
+masks into separate folders, runs the rule on each, and scores every variant on the same
+references: the surveyed plots and negatives (``validation.reference_sets``, always from the
+baseline series so the references do not move with the mask) and the reviewers' field verdicts
+(``review_verdicts``). The variant with the best scores becomes the mask of the re-run.
+
+Variants (``VARIANTS``): ``qa60`` is the delivered mask rebuilt with the current code (the control:
+any difference between it and the baseline comes from the radar fixes, not the mask); ``cs60``
+is a plain Cloud Score+ mask (QA60 opaque only plus ``clear`` >= 60), kept for the record because it
+removes the flooded-field observations; ``hyb50`` / ``hyb60`` / ``hyb70`` are the hybrid: QA60
+opaque only, Cloud Score+ at that threshold for bright observations, dark observations always kept
+(``ndvi_5day.clear_mask``).
+
+Use::
+
+    python -m sar_pipeline.analysis.mask_experiment build --ids ... [--variants cs60 cs70] [--jobs 3]
+    python -m sar_pipeline.analysis.mask_experiment rule  --ids ... [--variants ...] [--jobs 3]
+    python -m sar_pipeline.analysis.mask_experiment score --ids ... [--variants ...]
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+BASE = "processed/_batch/s2_2026"
+VARIANTS = {
+    "qa60": {"qa60_mode": "both", "cs_min": None, "keep_dark": False},
+    # plain Cloud Score+: kept for the record only; it removes flooded fields (see ndvi_5day.DARK_NIR_MAX)
+    "cs60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": False},
+    # hybrid: QA60 opaque cloud, Cloud Score+ for bright observations (cloud, haze), dark ones kept
+    "hyb50": {"qa60_mode": "opaque", "cs_min": 50, "keep_dark": True},
+    "hyb60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": True},
+    "hyb70": {"qa60_mode": "opaque", "cs_min": 70, "keep_dark": True},
+}
+OUT = f"{BASE}/report/mask_experiment"
+
+
+def root(variant: str) -> str:
+    return f"{BASE}_{variant}"
+
+
+def build_one(args) -> dict:
+    aoi_id, variant = args
+    from . import ndvi_5day as nd
+
+    if (Path(root(variant)) / f"aoi{aoi_id}" / f"aoi{aoi_id}_ndvi5d.tif").exists():
+        return {"aoi": f"aoi{aoi_id}", "variant": variant, "skipped": True}
+    s = nd.build(aoi_id, out_root=root(variant), log=lambda *_: None, **VARIANTS[variant])
+    nd.forget()
+    return {"aoi": f"aoi{aoi_id}", "variant": variant, **{k: v for k, v in s.items() if not k.startswith("path_")}}
+
+
+def rule_one(args) -> dict:
+    aoi_id, variant = args
+    from . import monsoon_rule as mr
+    from . import ndvi_5day as nd
+
+    r = mr.run_aoi(aoi_id, out_root=root(variant))
+    nd.forget()
+    return {"variant": variant, **{k: v for k, v in r.items() if k != "path"}}
+
+
+def run_many(func, ids, variants, jobs: int = 3) -> pd.DataFrame:
+    """``func`` over every (aoi, variant) pair, ``jobs`` processes; failures are recorded, not raised."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    tasks = [(a, v) for v in variants for a in ids]
+    rows = []
+
+    def safe(t):
+        try:
+            return func(t)
+        except Exception as exc:  # keep the batch going
+            return {"aoi": f"aoi{t[0]}", "variant": t[1], "error": f"{type(exc).__name__}: {exc}"}
+
+    if jobs <= 1:
+        rows = [safe(t) for t in tasks]
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            rows = list(ex.map(_safe_call, [(func, t) for t in tasks]))
+    return pd.DataFrame(rows)
+
+
+def _safe_call(pair):
+    func, t = pair
+    try:
+        return func(t)
+    except Exception as exc:  # noqa: BLE001
+        return {"aoi": f"aoi{t[0]}", "variant": t[1], "error": f"{type(exc).__name__}: {exc}"}
+
+
+def score(ids, variants, plots=None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Per variant: delivered-rice share of the reference sets (baseline references, variant map),
+    and agreement with the reviewers' verdicts (field majority label from the variant map)."""
+    from . import compare_runs as cr
+    from . import field_rice
+    from . import monsoon_rule as mr
+    from . import ndvi_5day as nd
+    from . import review_verdicts as rv
+    from . import validation as va
+
+    import rasterio
+
+    plots = cr.load_plots() if plots is None else plots
+    verdicts = pd.read_csv(rv.OUT) if Path(rv.OUT).exists() else None
+    ref_rows, verdict_rows = [], []
+    for aoi_id in ids:
+        refs = va.reference_sets(aoi_id, plots[plots["aoi"] == f"aoi{aoi_id}"], out_root=BASE)
+        nd.forget()
+        for v in variants:
+            path = Path(root(v)) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026.tif"
+            if not path.exists():
+                continue
+            with rasterio.open(path) as ds:
+                classes = ds.read(1).ravel()
+            c = classes[refs["pixel"].to_numpy()]
+            for (s, region), g in refs.assign(cls=c).groupby(["set", "region"]):
+                ref_rows.append({"variant": v, "aoi": f"aoi{aoi_id}", "set": s, "region": region, "pixels": len(g),
+                                 "delivered_pct": round(100 * float(np.isin(g["cls"], (1, 6)).mean()), 2),
+                                 "harvested_pct": round(100 * float((g["cls"] == 4).mean()), 2),
+                                 "young_pct": round(100 * float((g["cls"] == 2).mean()), 2),
+                                 "class3_pct": round(100 * float((g["cls"] == 3).mean()), 2)})
+            if verdicts is not None and (verdicts["aoi"] == f"aoi{aoi_id}").any():
+                fields, _, _ = field_rice.label_aoi(aoi_id, map_suffix="", src_root=root(v))
+                labels = fields[["field_id", "label"]]
+                for _, r in rv.score(labels, verdicts[verdicts["aoi"] == f"aoi{aoi_id}"]).iterrows():
+                    verdict_rows.append({"variant": v, "aoi": f"aoi{aoi_id}", **r.to_dict()})
+    return pd.DataFrame(ref_rows), pd.DataFrame(verdict_rows)
+
+
+def diagnose(aoi_id: int, variant: str, control: str = "qa60") -> pd.DataFrame:
+    """Where two masks disagree: per date, the share of the AOI each mask keeps, and for the
+    pixels whose class changed, the rule's events under both masks.
+
+    Why: a mask that removes the wrong observations (e.g. a stricter mask that takes a dark flooded
+    field for a cloud shadow) breaks the rule silently; this shows which dates it removes and which
+    condition (trough, bare run, rise, standing) then fails.
+    """
+    import rasterio
+
+    from . import monsoon_rule as mr
+    from . import ndvi_5day as nd
+
+    dates, ndvi, _, _, ok_c, _, _ = nd.read_dates(aoi_id, **VARIANTS[control])
+    _, _, _, _, ok_v, _, _ = nd.read_dates(aoi_id, **VARIANTS[variant])
+    inside = nd.inside_aoi(aoi_id)
+    n = inside.sum()
+    per_date = pd.DataFrame({"date": dates,
+                             f"{control}_clear_pct": [round(100 * float(o.ravel()[inside].mean()), 1) for o in ok_c],
+                             f"{variant}_clear_pct": [round(100 * float(o.ravel()[inside].mean()), 1) for o in ok_v]})
+    with np.errstate(invalid="ignore"):
+        per_date["median_ndvi_kept_by_control_only"] = [
+            round(float(np.nanmedian(v.ravel()[inside & c.ravel() & ~w.ravel()])), 2)
+            if (inside & c.ravel() & ~w.ravel()).sum() > 50 else np.nan for v, c, w in zip(ndvi, ok_c, ok_v)]
+    maps = {}
+    for v in (control, variant):
+        r = root(v) if v != control or Path(root(v)).exists() else BASE
+        with rasterio.open(Path(r) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026.tif") as ds:
+            maps[v] = ds.read(1).ravel()
+    changed = (maps[control] != maps[variant]) & (maps[control] != 255)
+    print(f"aoi{aoi_id}: {round(mr.acres(int(changed.sum())), 1)} ac changed class between {control} and {variant}")
+    print(pd.crosstab(maps[control][changed], maps[variant][changed]).rename(index=mr.CLASSES, columns=mr.CLASSES))
+    ev = {}
+    for v in (control, variant):
+        r = root(v) if v != control or Path(root(v)).exists() else BASE
+        _, e, _ = mr.aoi_events(aoi_id, out_root=r)
+        ev[v] = e.loc[changed, ["trough_ndvi", "low_windows", "rise", "peak_after", "standing", "last_ndvi", "radar_wet"]]
+        nd.forget()
+    print("events of the changed pixels, medians / shares:")
+    print(pd.DataFrame({v: ev[v].median(numeric_only=True) for v in ev}).round(2).to_string())
+    return per_date
+
+
+def bright_profile(aoi_id: int, dates, variant: str, control: str = "qa60") -> pd.DataFrame:
+    """For each date, the reflectances and Cloud Score+ of the pixels the control mask keeps and
+    the variant mask removes: quartiles of B2 (blue), B4, B8, NDVI and ``clear``.
+
+    Why: to set the "dark observation" rule (``ndvi_5day.DARK_NIR_MAX``) from what the removed
+    flooded fields actually look like, rather than from a guess.
+    """
+    import rasterio
+
+    from ..optical_export import band_index
+    from . import ndvi_5day as nd
+    from . import pixel_report as pr
+
+    loc = pr.locate(aoi_id, 0)
+    inside = nd.inside_aoi(aoi_id).reshape(loc["grid"]["height"], loc["grid"]["width"])
+    rows = []
+    for path in sorted(pr.sync_s2(loc, f"data/{nd.FOLDER}", nd.FOLDER).glob("*.tif")):
+        d = path.stem.rsplit("_S2_", 1)[1]
+        if d not in set(dates):
+            continue
+        with rasterio.open(path) as ds:
+            b = {n: ds.read(band_index(ds, n)).astype("float32") for n in ("B2", "B4", "B8", "QA60", "clear")}
+        data = (b["B4"] > 0) & (b["B8"] > 0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ndvi = (b["B8"] - b["B4"]) / (b["B8"] + b["B4"])
+        keep = {}
+        for name in (control, variant):
+            v = VARIANTS[name]
+            bits = (1 << 10) | (1 << 11) if v["qa60_mode"] == "both" else (1 << 10)
+            keep[name] = nd.clear_mask(data, b["QA60"], b["clear"], b["B8"], ndvi, v["cs_min"], bits, v["keep_dark"])
+        sel = inside & keep[control] & ~keep[variant]
+        if sel.sum() < 20:
+            continue
+        for q in (0.1, 0.5, 0.9):
+            rows.append({"date": d, "pixels": int(sel.sum()), "quantile": q,
+                         **{k: round(float(np.quantile(b[k][sel], q)), 0) for k in ("B2", "B4", "B8", "clear")},
+                         "ndvi": round(float(np.quantile(ndvi[sel], q)), 2)})
+    return pd.DataFrame(rows)
+
+
+def summarise(refs: pd.DataFrame, verdicts: pd.DataFrame) -> str:
+    lines = []
+    if len(refs):
+        w = refs.assign(wt=refs["pixels"] * refs["delivered_pct"])
+        t = (w.groupby(["variant", "set", "region"]).agg(pixels=("pixels", "sum"), wt=("wt", "sum")))
+        t["delivered_pct"] = (t["wt"] / t["pixels"]).round(1)
+        lines += ["Delivered-rice share (%) of the reference sets, per mask variant:",
+                  t.reset_index().pivot_table(index=["set", "region"], columns="variant", values="delivered_pct").to_string(), ""]
+    if len(verdicts):
+        g = verdicts.groupby(["variant", "verdict"])[["decidable", "agree_now", "disagree_now", "agreed_before"]].sum()
+        lines += ["Reviewed fields per variant (agree_now should rise for 'wrong', stay for 'right'):", g.to_string()]
+    return "\n".join(lines)
+
+
+def main(argv=None) -> int:
+    import argparse
+
+    p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.mask_experiment", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("step", choices=["build", "rule", "score", "diagnose"])
+    p.add_argument("--ids", nargs="+", type=int, required=True)
+    p.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS))
+    p.add_argument("--jobs", type=int, default=3)
+    args = p.parse_args(argv)
+    Path(OUT).mkdir(parents=True, exist_ok=True)
+    if args.step == "diagnose":
+        for a in args.ids:
+            t = diagnose(a, args.variants[0])
+            print(t[(t["date"] >= "2026-05-01")].to_string(index=False))
+        return 0
+    if args.step in ("build", "rule"):
+        t = run_many(build_one if args.step == "build" else rule_one, args.ids, args.variants, args.jobs)
+        t.to_csv(Path(OUT) / f"{args.step}_log.csv", mode="a", header=not (Path(OUT) / f"{args.step}_log.csv").exists(), index=False)
+        bad = t[t.get("error", pd.Series(dtype=str)).notna()] if "error" in t else t.iloc[0:0]
+        print(f"{args.step}: {len(t)} AOI-variants, {len(bad)} failed")
+        if len(bad):
+            print(bad[["aoi", "variant", "error"]].to_string(index=False))
+    else:
+        refs, verdicts = score(args.ids, args.variants)
+        refs.to_csv(Path(OUT) / "reference_scores.csv", index=False)
+        verdicts.to_csv(Path(OUT) / "verdict_scores.csv", index=False)
+        print(summarise(refs, verdicts))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

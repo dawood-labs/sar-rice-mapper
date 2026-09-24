@@ -99,6 +99,37 @@ YOUNG_VISIBLE = 0.30
 #: searched over the whole bare period, plus class 5 for "rice-like" curves on ground the radar
 #: shows was never bare (trees, houses: the optical trough there is haze).
 WATER_DEFAULT = "v2"
+#: Radar-defined trough (fix plan, stage 2.3, issues 4, 16, 3/6). Why: where cloud hid the field
+#: for the weeks around transplanting, the fitted curve runs straight across the gap and never
+#: falls below ``TROUGH_MAX``, so a textbook paddy (deep two-track flood, then canopy) was "not
+#: rice"; and a paddy whose fallow after the summer crop was shorter than 40 days failed the
+#: ``LOW_WINDOWS_MIN`` test. A confirmed radar flood (``radar_water.water_evidence``: >= 4 dB below
+#: the field's own level, VH <= -19 dB, no canopy that day, seen on a second pass) is bare, wet
+#: ground by definition, so it can stand in for the optical trough: the climb is then measured
+#: from the fitted NDVI on the flood date. Haze dips on trees never come with such a flood, which
+#: is why the 40-day bare criterion is not needed on this path.
+RADAR_TROUGH_DEFAULT = True
+
+
+def radar_trough_events(events: pd.DataFrame, ndvi, windows) -> pd.DataFrame:
+    """Per pixel, the climb measured from the radar flood: ``peak_after_flood``, ``rise_from_flood``,
+    ``standing_after_flood``; NaN / False where there is no confirmed flood (``flood_ok``)."""
+    windows = pd.DatetimeIndex(windows)
+    win = windows.to_numpy().astype("datetime64[D]")
+    n = ndvi.shape[1]
+    flood = pd.to_datetime(events["flood_date"]).to_numpy().astype("datetime64[D]")
+    ok = events["flood_ok"].to_numpy(dtype=bool) & ~np.isnat(flood)
+    idx = np.clip(np.searchsorted(win, np.where(ok, flood, win[0])), 0, len(win) - 1)
+    step = np.arange(len(win))[:, None]
+    after = np.where(step >= idx[None, :], ndvi, -np.inf)
+    with np.errstate(invalid="ignore"):
+        peak = np.where(ok, after.max(axis=0), np.nan)
+        at = np.where(ok, ndvi[idx, np.arange(n)], np.nan)
+        rise = peak - at
+        last = ndvi[-1]
+        standing = ok & (last >= CANOPY_MIN) & (last >= peak - STANDING_FALL_MAX)
+    return pd.DataFrame({"ndvi_at_flood_fit": at, "peak_after_flood": peak, "rise_from_flood": rise,
+                         "standing_after_flood": standing})
 
 
 def pixel_events(ndvi, lswi, windows, season=SEASON, lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
@@ -173,7 +204,7 @@ def low_run(ndvi, trough_idx, level: float, reach: int = 8) -> np.ndarray:
 
 def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, young_min=YOUNG_MIN,
              canopy_min=CANOPY_MIN, young_canopy_min=YOUNG_CANOPY_MIN, radar_wet=None,
-             low_windows_min: int = LOW_WINDOWS_MIN, never_bare=None):
+             low_windows_min: int = LOW_WINDOWS_MIN, never_bare=None, radar_trough: bool = False):
     """0 not rice, 1 rice standing, 2 young, 3 standing with water unconfirmed, 4 harvested,
     5 rice-like curve on ground that was never bare (radar), 6 young rice (young, water confirmed,
     canopy visible: last NDVI >= ``YOUNG_VISIBLE``), 255 no data.
@@ -181,7 +212,9 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     ``radar_wet`` (bool per pixel) splits the standing phenology-rice pixels into confirmed (1) and
     unconfirmed (3). Without it every such pixel is unconfirmed. ``never_bare`` (bool per pixel,
     ``radar_water.water_evidence``) moves unconfirmed pixels whose radar shows a canopy or buildings
-    all season to class 5.
+    all season to class 5. With ``radar_trough`` (see ``RADAR_TROUGH_DEFAULT``) a pixel whose
+    optical trough failed (hidden by cloud, or a short fallow) is still rice / young rice when its
+    confirmed radar flood is followed by the same climb (``radar_trough_events`` columns).
     """
     out = np.zeros(len(events), dtype="uint8")
     low = events["trough_ndvi"] <= trough_max
@@ -189,9 +222,20 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
         low &= events["low_windows"] >= low_windows_min
     grown = (low & (events["rise"] >= rise_min) & (events["peak_after"] >= canopy_min)).to_numpy()
     standing = events["standing"].to_numpy() if "standing" in events else np.ones(len(events), dtype=bool)
-    rice = grown & standing
     young = (low & ~grown & (events["rise"] >= young_min) & (events["peak_after"] >= young_canopy_min)).to_numpy()
     wet = np.zeros(len(events), dtype=bool) if radar_wet is None else np.asarray(radar_wet, dtype=bool)
+    if radar_trough and "rise_from_flood" in events:
+        with np.errstate(invalid="ignore"):
+            r_grown = ((events["rise_from_flood"] >= rise_min) & (events["peak_after_flood"] >= canopy_min)).to_numpy()
+            r_young = (~r_grown & (events["rise_from_flood"] >= young_min)
+                       & (events["peak_after_flood"] >= young_canopy_min)).to_numpy()
+        r_standing = events["standing_after_flood"].to_numpy(dtype=bool)
+        # the radar path only adds: a pixel the optical path already decided keeps that decision
+        add = r_grown & ~grown & ~young
+        standing = np.where(add, r_standing, standing)
+        grown = grown | add
+        young = young | (r_young & ~grown & ~young)
+    rice = grown & standing
     out[rice & wet] = 1
     out[rice & ~wet] = 3
     if never_bare is not None:
@@ -236,11 +280,13 @@ def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
             events = pd.concat([events, v2], axis=1)
             events["radar_wet_v1"] = events["radar_wet"]
             events["radar_wet"] = events["radar_wet"] | events["flood_ok"]
+            events = pd.concat([events, radar_trough_events(events, ndvi, d["windows"])], axis=1)
     return d, events, radar
 
 
 def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, inside_only: bool = True,
-            radar_season: str | None = "monsoon2026", water: str = WATER_DEFAULT, suffix: str = "") -> dict:
+            radar_season: str | None = "monsoon2026", water: str = WATER_DEFAULT, suffix: str = "",
+            radar_trough: bool = RADAR_TROUGH_DEFAULT) -> dict:
     """Classify one AOI, write ``<aoi>_monsoon2026.tif``, return the acres per class.
 
     ``radar_season`` names the Sentinel-1 season run used to confirm the water; when that run does
@@ -252,7 +298,8 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, ins
     d, events, radar = aoi_events(aoi_id, out_root, season, radar_season, water)
     shape = d["ndvi5d"].shape[1:]
     classes = classify(events, radar_wet=events["radar_wet"] if radar else None,
-                       never_bare=events["never_bare"] if radar and "never_bare" in events else None)
+                       never_bare=events["never_bare"] if radar and "never_bare" in events else None,
+                       radar_trough=radar_trough and radar)
     if inside_only:
         classes[~nd.inside_aoi(aoi_id)] = 255
     grid = d["loc"]["grid"]

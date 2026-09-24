@@ -72,7 +72,12 @@ def pixel_dips(aoi_id: int, trough, grid: dict, season_key: str = "monsoon2026",
             best[pol] = np.fmax(best[pol], dip)
             checkable |= np.isfinite(dip)
     out = pd.DataFrame({"VV_dip": best["VV"], "VH_dip": best["VH"], "radar_checkable": checkable})
-    out["radar_wet"] = checkable & ((out["VV_dip"] >= DIP_MIN_DB) | (out["VH_dip"] >= DIP_MIN_DB))
+    with np.errstate(invalid="ignore"):
+        # the same VV/VH consistency as water_evidence: the other polarisation must not have risen
+        # by more than -OTHER_POL_DROP_MIN over the flood window (unknown is not held against it)
+        vv_ok = (out["VV_dip"] >= DIP_MIN_DB) & ~(out["VH_dip"] < OTHER_POL_DROP_MIN)
+        vh_ok = (out["VH_dip"] >= DIP_MIN_DB) & ~(out["VV_dip"] < OTHER_POL_DROP_MIN)
+    out["radar_wet"] = checkable & (vv_ok | vh_ok)
     return out
 
 
@@ -183,6 +188,10 @@ SUPPORT_MIN = 2              # passes (any track) within 14 days that also show 
 VEG_VH_MIN = -15.0           # VH around the trough above this: a canopy or buildings, not a bare field
 VEG_FLOOD_VH_MIN = -17.0     # ... and never darker than this in the whole radar season
 FLOOD_EARLIEST = "2026-05-15"  # monsoon water only: the plots' floods all came after this (99 %+)
+#: On the flood pass the other polarisation may not sit more than this above its own earlier level
+#: (a drop of -1 dB = a rise of 1 dB). Why (fix plan, issue 15): on 11 Jun 2026 one pass read VH
+#: 5-20 dB low on dry fields while VV was at its brightest; water never does that.
+OTHER_POL_DROP_MIN = -1.0
 
 
 def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = "monsoon2026",
@@ -231,6 +240,7 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
     vh_low2 = np.full((2, n), np.inf)      # the two darkest VH passes in the span, over all tracks
     vh_trough = np.full(n, -np.inf)
     vh_at_flood = np.full(n, np.nan)
+    other_drop = np.full(n, np.nan)        # the other polarisation's drop on the flood pass
     earliest = np.datetime64(FLOOD_EARLIEST)
     tracks = []
     for dates, flat in series:
@@ -253,7 +263,7 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
             # the flood itself: monsoon passes only. A dry-season pass on a freshly harvested,
             # drying field is also a VH drop to about -22 dB (seen on a field in April).
             monsoon = span & (day >= earliest)[:, None]
-            for p in ("VV", "VH"):
+            for p, q in (("VV", "VH"), ("VH", "VV")):
                 m = np.where(monsoon, drops[p], np.nan)
                 b = np.nanmax(m, axis=0)
                 arg = np.nanargmax(np.where(np.isfinite(m), m, -np.inf), axis=0)
@@ -262,6 +272,7 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
                 when = np.where(better, day[arg], when)
                 pol_of = np.where(better, p, pol_of)
                 vh_at_flood = np.where(better, flat["VH"][arg, np.arange(n)], vh_at_flood)
+                other_drop = np.where(better, drops[q][arg, np.arange(n)], other_drop)
     support = np.zeros(n, dtype=int)
     for day, drops in tracks:
         near = np.abs((day[:, None] - when[None, :]) / np.timedelta64(1, "D")) <= 14
@@ -281,10 +292,15 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
         "ndvi_at_flood": ndvi_at, "support": support,
         "vh_at_trough": np.where(np.isfinite(vh_trough), vh_trough, np.nan),
         "flood_vh_2nd": np.where(np.isfinite(vh_low2[1]), vh_low2[1], np.nan),
+        "flood_other_drop": other_drop,
     })
     with np.errstate(invalid="ignore"):
+        # water lowers VV and VH together; a pass where one polarisation falls while the other
+        # rises is a broken pass (issue 15), not a flood. Unknown (no reference) is not held against it.
+        consistent = ~(out["flood_other_drop"] < OTHER_POL_DROP_MIN)
         out["flood_ok"] = ((out["flood_drop"] >= FLOOD_DROP_MIN) & (out["flood_vh"] <= FLOOD_VH_MAX)
-                           & (out["ndvi_at_flood"] <= FLOOD_NDVI_MAX) & (out["support"] >= SUPPORT_MIN))
+                           & (out["ndvi_at_flood"] <= FLOOD_NDVI_MAX) & (out["support"] >= SUPPORT_MIN)
+                           & consistent)
         # the second-darkest pass, not the darkest: one speckled or mis-registered pass must not
         # decide that a village or a tree line was once a bare, wet field
         out["never_bare"] = (out["vh_at_trough"] > VEG_VH_MIN) & (out["flood_vh_2nd"] > VEG_FLOOD_VH_MIN)
