@@ -53,8 +53,13 @@ def _nanmed(a, axis=0):
         return np.nanmedian(a, axis=axis)
 
 
-def field_evidence(aoi_id: int) -> pd.DataFrame:
-    """One row per field with >= 4 pixels inside the AOI: label, field_id and the evidence columns."""
+def field_evidence(aoi_id: int, drop_passes=()) -> pd.DataFrame:
+    """One row per field with >= 4 pixels inside the AOI: label, field_id and the evidence columns.
+
+    `drop_passes` (dates like "2026-06-11") removes those radar passes before the water evidence is
+    computed. Why: a pass can be partly broken (one polarisation dark, the other normal) yet stay
+    under the bad-pass cut; comparing the evidence with and without it shows which fields rely on it.
+    """
     import pyogrio
 
     from .analysis import ndvi_5day as nd
@@ -100,6 +105,9 @@ def field_evidence(aoi_id: int) -> pd.DataFrame:
     for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
         rd, cubes = sar_curve.read_track(loc, track, 1)
         rdi = pd.DatetimeIndex(rd)
+        if len(drop_passes):
+            k = ~rdi.normalize().isin(pd.DatetimeIndex(drop_passes))
+            rd, rdi, cubes = rd[k], rdi[k], {b: c[k] for b, c in cubes.items()}
         vh = to_db(field_means(to_power(cubes["VH"].reshape(len(rd), -1)), owner, n_f))[:, keep]
         vh_all.append(vh)
         days_all.append(rdi)
@@ -142,6 +150,59 @@ def field_evidence(aoi_id: int) -> pd.DataFrame:
     out["aoi"] = f"aoi{aoi_id}"
     nd.forget()
     return out
+
+
+def pass_dependence(aoi_id: int, date: str) -> pd.DataFrame:
+    """Fields whose flood evidence disappears when the radar pass on `date` is removed.
+
+    Why: a review claim like "this rice is only water on one suspicious pass" must be measured, not
+    eyeballed. Returns every field with its label, acres and flood passes with / without the pass,
+    plus `relies_on_pass` (had a flood pass, has none without it).
+    """
+    a = field_evidence(aoi_id)
+    b = field_evidence(aoi_id, drop_passes=[date])
+    out = a[["field_id", "area_acres", "pixels", "label", "flood_passes", "dark_monsoon_passes"]].copy()
+    out["flood_passes_without"] = b["flood_passes"].to_numpy()
+    out["dark_passes_without"] = b["dark_monsoon_passes"].to_numpy()
+    out["relies_on_pass"] = (out["flood_passes"] >= 1) & (out["flood_passes_without"] == 0)
+    out["dropped_pass"] = date
+    return out
+
+
+def nan_spread(aoi_id: int, window: int = 5, pol: str = "VH") -> pd.DataFrame:
+    """Per radar pass: pixels with no data, and pixels lost after the 5x5 box mean of ``read_track``.
+
+    Why: ``scipy.ndimage.uniform_filter`` keeps a running sum along each row and column, so one NaN
+    pixel turns every later pixel of that line into NaN. A pass with a small no-data strip (issue 14)
+    can then vanish over most of the AOI for the rule, the field curves and the radar composite.
+    ``expected_lost_pct`` is what a NaN-aware box mean would lose (the no-data pixels grown by the
+    window), ``lost_pct`` is what ``read_track`` loses now.
+    """
+    import rasterio
+    from scipy.ndimage import binary_dilation, uniform_filter
+
+    from .analysis import pixel_report as pr
+
+    loc = pr.locate(aoi_id, 0, season_key="monsoon2026")
+    rows = []
+    for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
+        with rasterio.open(Path(loc["run"]) / "stack" / f"track_{track}" / f"stack_{pol}.vrt") as ds:
+            cube = ds.read().astype("float32")
+            nodata, names = ds.nodata, ds.descriptions
+        for i, name in enumerate(names):
+            a = cube[i]
+            bad = ~np.isfinite(a) | ((a == nodata) if nodata is not None else False)
+            if bad.any():
+                power = np.where(bad, np.nan, 10 ** (a / 10))
+                lost = np.isnan(uniform_filter(power, size=window, mode="nearest"))
+                grown = binary_dilation(bad, np.ones((window, window), bool))
+            else:
+                lost = grown = bad
+            rows.append({"aoi": f"aoi{aoi_id}", "track": track, "date": name.rsplit("_", 1)[1],
+                         "nodata_pct": round(100 * bad.mean(), 2),
+                         "expected_lost_pct": round(100 * grown.mean(), 2),
+                         "lost_pct": round(100 * lost.mean(), 2)})
+    return pd.DataFrame(rows)
 
 
 def suspects(ev: pd.DataFrame) -> pd.DataFrame:
@@ -453,6 +514,10 @@ def main(argv=None) -> int:
                    help="only draw curve + chip sheets for these fields (same AOI loaded once)")
     p.add_argument("--out", default=None, help="folder for --render (default: review/<aoi>/fields_extra)")
     p.add_argument("--masks", action="store_true", help="only the QA60 vs Cloud Score+ table per date for --ids")
+    p.add_argument("--without-pass", default=None, metavar="DATE",
+                   help="only the per-field flood evidence with / without the radar pass on DATE for --ids")
+    p.add_argument("--nan-spread", action="store_true",
+                   help="only the per-pass no-data / lost-after-5x5 table for --ids (all AOIs if none)")
     args = p.parse_args(argv)
     if args.render:
         import matplotlib.pyplot as plt
@@ -475,6 +540,26 @@ def main(argv=None) -> int:
     import resource
     import time
 
+    if args.nan_spread:
+        from .prep import batch
+
+        ids = args.ids or sorted(int(str(a).replace("aoi", "")) for a in batch.aoi_index()["aoi"])
+        t = pd.concat([nan_spread(a) for a in ids], ignore_index=True)
+        out = Path(SRC) / "report" / "final_audit" / "nan_spread.csv"
+        t.to_csv(out, index=False)
+        hit = t[t["lost_pct"] > t["expected_lost_pct"] + 1]
+        print(f"{len(t)} passes; {len(hit)} lose more than expected, in {hit['aoi'].nunique()} AOIs -> {out}")
+        return 0
+    if args.without_pass:
+        for a in args.ids:
+            t = pass_dependence(a, args.without_pass)
+            out = Path(OUT) / f"aoi{a}"
+            out.mkdir(parents=True, exist_ok=True)
+            t.to_csv(out / f"aoi{a}_without_{args.without_pass}.csv", index=False)
+            s = t[t["relies_on_pass"]].groupby("label")["area_acres"].agg(["size", "sum"]).round(1)
+            print(f"aoi{a}: fields whose only flood pass is {args.without_pass} (polygon acres, ~9 % high):")
+            print(s.to_string())
+        return 0
     if args.masks:
         for a in args.ids:
             t = mask_disagreement(a)
