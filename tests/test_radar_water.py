@@ -134,3 +134,23 @@ def test_bare_near_flood_needs_one_clear_view_without_canopy():
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
     assert ev.loc[0, "bare_near_flood"] and not ev.loc[1, "bare_near_flood"]
     assert ev.loc[2, "bare_near_flood"]                          # never observed: unknown, not a canopy
+
+
+def test_shallow_water_counts_with_a_larger_drop_and_more_passes():
+    dates = pd.DatetimeIndex(np.arange(np.datetime64("2026-04-01"), np.datetime64("2026-09-20"), 6))
+    day = dates.to_numpy().astype("datetime64[D]")
+    vv = np.full((len(dates), 2), -9.0)
+    vh = np.full((len(dates), 2), -12.5)
+    flood = (day >= np.datetime64("2026-06-06")) & (day <= np.datetime64("2026-06-30"))   # five passes
+    vh[flood, 0], vv[flood, 0] = -18.2, -13.0          # shallow: VH short of -19 but a 5.7 dB drop, 5 passes
+    one = day == np.datetime64("2026-06-06")
+    vh[one, 1], vv[one, 1] = -18.2, -13.0              # the same level on one pass per track only: not enough
+    # a second track three days behind sees the same ground: two tracks, as every AOI has
+    series = [(dates, {"VV": vv, "VH": vh}), (dates + pd.Timedelta(days=3), {"VV": vv, "VH": vh})]
+    windows = pd.date_range("2026-03-01", "2026-09-21", freq="5D")
+    ndvi = np.full((len(windows), 2), 0.2)
+    trough = np.array(["2026-06-15"] * 2, dtype="datetime64[D]")
+    climb = np.array(["2026-07-25"] * 2, dtype="datetime64[D]")
+    ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series)
+    assert ev.loc[0, "support"] >= 4 and ev.loc[0, "flood_ok"]
+    assert not ev.loc[1, "flood_ok"]

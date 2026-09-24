@@ -328,6 +328,75 @@ def field_obs(aoi_id: int, field_id: str, variant: str, since: str = "2026-08-01
     return pd.DataFrame(rows)
 
 
+def grey_rule_effect(aoi_id: int, variant: str = "hyb40", since: str = "2026-05-01") -> pd.DataFrame:
+    """Per date: share of the AOI kept with and without the grey-haze rule (blue >= 0.9 x red), and
+    what the observations removed by that rule alone look like (median B2/B4, NDVI, Cloud Score+).
+    Why: the rule targets haze; pale dry soils are also grey-ish, and a rule that removes the bare
+    observations of a dry-zone AOI would cost the troughs there."""
+    import rasterio
+
+    from ..optical_export import band_index
+    from . import ndvi_5day as nd
+    from . import pixel_report as pr
+
+    loc = pr.locate(aoi_id, 0)
+    inside = nd.inside_aoi(aoi_id).reshape(loc["grid"]["height"], loc["grid"]["width"])
+    v = VARIANTS[variant]
+    bits = (1 << 10) | (1 << 11) if v["qa60_mode"] == "both" else (1 << 10)
+    rows = []
+    for path in sorted(pr.sync_s2(loc, f"data/{nd.FOLDER}", nd.FOLDER).glob("*.tif")):
+        d = path.stem.rsplit("_S2_", 1)[1]
+        if d < since:
+            continue
+        with rasterio.open(path) as ds:
+            b = {n: ds.read(band_index(ds, n)).astype("float32") for n in ("B2", "B4", "B8", "QA60", "clear")}
+        data = (b["B4"] > 0) & (b["B8"] > 0) & inside
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ndvi = (b["B8"] - b["B4"]) / (b["B8"] + b["B4"])
+            ratio = b["B2"] / b["B4"]
+        without = nd.clear_mask(data, b["QA60"], b["clear"], b["B8"], ndvi, v["cs_min"], bits, v["keep_dark"], v["drop_haze"], b["B2"])
+        with_ = nd.clear_mask(data, b["QA60"], b["clear"], b["B8"], ndvi, v["cs_min"], bits, v["keep_dark"], v["drop_haze"], b["B2"], b["B4"])
+        gone = without & ~with_
+        n = data.sum()
+        if n == 0 or without.sum() == 0:
+            continue
+        rows.append({"date": d, "kept_without_pct": round(100 * without.sum() / n, 1), "kept_with_pct": round(100 * with_.sum() / n, 1),
+                     "removed_by_grey_pct": round(100 * gone.sum() / n, 1),
+                     "gone_B2_B4": round(float(np.median(ratio[gone])), 2) if gone.any() else np.nan,
+                     "gone_ndvi": round(float(np.median(ndvi[gone])), 2) if gone.any() else np.nan,
+                     "gone_cs": round(float(np.median(b["clear"][gone]))) if gone.any() else np.nan,
+                     "gone_B2": round(float(np.median(b["B2"][gone]))) if gone.any() else np.nan})
+    return pd.DataFrame(rows)
+
+
+EVENT_COLS = ("trough_ndvi", "low_windows", "rise", "peak_after", "standing", "last_ndvi", "radar_wet", "radar_wet_v1",
+              "flood_ok", "flood_drop", "flood_vh", "ndvi_at_flood", "support", "bare_near_flood", "peak_after_flood",
+              "standing_after_flood", "radar_canopy_rise", "vh_end", "never_bare")
+
+
+def pixel_events_table(aoi_id: int, variant: str, pixels, classes=None) -> pd.DataFrame:
+    """The rule's events (medians; shares for booleans) for a set of pixels under ``variant``, split by
+    the class they got. Why: to read why a group of known pixels (plot interiors, one field) ended
+    up in a class."""
+    import rasterio
+
+    from . import monsoon_rule as mr
+    from . import ndvi_5day as nd
+
+    r = root(variant)
+    if classes is None:
+        with rasterio.open(Path(r) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026.tif") as ds:
+            classes = ds.read(1).ravel()
+    _, e, _ = mr.aoi_events(aoi_id, out_root=r)
+    nd.forget()
+    pixels = np.asarray(pixels)
+    sub = e.iloc[pixels][[c for c in EVENT_COLS if c in e]].astype(float)
+    sub["cls"] = classes[pixels]
+    out = sub.groupby("cls").median().T
+    out.columns = [f"{mr.CLASSES.get(int(c), c)} (n={int((sub['cls'] == c).sum())})" for c in out.columns]
+    return out.round(2)
+
+
 def summarise(refs: pd.DataFrame, verdicts: pd.DataFrame) -> str:
     lines = []
     if len(refs):

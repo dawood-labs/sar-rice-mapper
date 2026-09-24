@@ -107,6 +107,7 @@ FLOODED_NDVI_MAX = 0.20
 #: while their radar showed the canopy rising 5-8 dB from the water.
 RADAR_YOUNG_RISE_DB = 4.0
 RADAR_VISIBLE_RISE_DB = 5.0
+from .radar_water import RADAR_CANOPY_VH_MIN  # noqa: E402  (the radar canopy must reach this VH)
 #: A ripening (yellowing) crop is still standing: its NDVI falls from ~0.75 to ~0.45 before the
 #: cut. The standing test therefore accepts a last value at or above ``STANDING_MIN`` that has not
 #: fallen more than ``STANDING_FALL_MAX`` from the peak; a harvested field reads 0.15-0.30.
@@ -258,7 +259,9 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
             r_young = ~r_grown & ok & (events["peak_after_flood"] >= young_canopy_min).to_numpy()
             if "radar_canopy_rise" in events:          # the canopy seen by the radar alone
                 rise_db = np.array(events["radar_canopy_rise"], dtype=float)
-                r_young |= ~r_grown & ok & (rise_db >= RADAR_YOUNG_RISE_DB)
+                canopy_level = np.array(events["vh_end"], dtype=float) >= RADAR_CANOPY_VH_MIN if "vh_end" in events \
+                    else np.ones(len(events), dtype=bool)
+                r_young |= ~r_grown & ok & (rise_db >= RADAR_YOUNG_RISE_DB) & canopy_level
         r_standing = events["standing_after_flood"].to_numpy(dtype=bool)
         # the radar path only adds: a pixel the optical path already decided keeps that decision
         add = r_grown & ~grown & ~young
@@ -272,7 +275,9 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     visible = last >= YOUNG_VISIBLE
     if radar_trough and "radar_canopy_rise" in events:
         with np.errstate(invalid="ignore"):
-            visible |= np.array(events["radar_canopy_rise"], dtype=float) >= RADAR_VISIBLE_RISE_DB
+            at_canopy = np.array(events["vh_end"], dtype=float) >= RADAR_CANOPY_VH_MIN if "vh_end" in events \
+                else np.ones(len(events), dtype=bool)
+            visible |= (np.array(events["radar_canopy_rise"], dtype=float) >= RADAR_VISIBLE_RISE_DB) & at_canopy
     young_rice = young & wet & visible
     out[grown & ~standing & wet] = 4
     out[grown & ~standing & ~wet] = 8

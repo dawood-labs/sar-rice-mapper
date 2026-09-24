@@ -32,6 +32,7 @@ from . import sar_curve
 DRY_WINDOW = (-40, -15)
 FLOOD_WINDOW = (-10, 15)
 DIP_MIN_DB = 3.0
+V1_VH_MAX = -18.0      # the flood-window VH the v1 dip must reach (see pixel_dips)
 
 
 def dips_for_track(dates, cube, trough, dry=DRY_WINDOW, flood=FLOOD_WINDOW):
@@ -64,20 +65,27 @@ def pixel_dips(aoi_id: int, trough, grid: dict, season_key: str = "monsoon2026",
             raise ValueError(f"radar grid differs from the optical grid in {key}")
     n_pix = int(grid["width"]) * int(grid["height"])
     best = {pol: np.full(n_pix, np.nan) for pol in ("VV", "VH")}
+    vh_flood = np.full(n_pix, np.nan)
     checkable = np.zeros(n_pix, dtype=bool)
     for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
         dates, cubes = sar_curve.read_track(loc, track, window)
         for pol in ("VV", "VH"):
-            _, _, dip = dips_for_track(dates, cubes[pol].reshape(len(dates), -1), trough)
+            _, flood_level, dip = dips_for_track(dates, cubes[pol].reshape(len(dates), -1), trough)
             best[pol] = np.fmax(best[pol], dip)
+            if pol == "VH":
+                vh_flood = np.fmin(vh_flood, flood_level)
             checkable |= np.isfinite(dip)
-    out = pd.DataFrame({"VV_dip": best["VV"], "VH_dip": best["VH"], "radar_checkable": checkable})
+    out = pd.DataFrame({"VV_dip": best["VV"], "VH_dip": best["VH"], "VH_flood_level": vh_flood,
+                        "radar_checkable": checkable})
     with np.errstate(invalid="ignore"):
         # the same VV/VH consistency as water_evidence: the other polarisation must not have risen
         # by more than -OTHER_POL_DROP_MIN over the flood window (unknown is not held against it)
         vv_ok = (out["VV_dip"] >= DIP_MIN_DB) & ~(out["VH_dip"] < OTHER_POL_DROP_MIN)
         vh_ok = (out["VH_dip"] >= DIP_MIN_DB) & ~(out["VV_dip"] < OTHER_POL_DROP_MIN)
-    out["radar_wet"] = checkable & (vv_ok | vh_ok)
+        # the dip must end on dark ground (fix plan, issue 9): a 3 dB fall from a bright canopy or
+        # garden (-13 -> -16 dB) is a harvest or rain, not transplanting water
+        dark = ~(out["VH_flood_level"] > V1_VH_MAX)
+    out["radar_wet"] = checkable & (vv_ok | vh_ok) & dark
     return out
 
 
@@ -188,6 +196,16 @@ SUPPORT_MIN = 2              # passes (any track) within 14 days that also show 
 VEG_VH_MIN = -15.0           # VH around the trough above this: a canopy or buildings, not a bare field
 VEG_FLOOD_VH_MIN = -17.0     # ... and never darker than this in the whole radar season
 FLOOD_EARLIEST = "2026-05-15"  # monsoon water only: the plots' floods all came after this (99 %+)
+#: Shallow water (fix plan, issue 6): a pass 1 dB short of ``FLOOD_VH_MAX`` still counts when the
+#: drop is larger (>= ``SHALLOW_DROP_MIN``) and the flood is seen on more passes (>= ``SHALLOW_SUPPORT_MIN``).
+#: Why: in the dry-zone plot AOI 11 % of the surveyed rice sat in class 3 with a 5.5 dB drop to
+#: VH -18.1 seen on five passes; dark dry soil never shows such a drop from a brighter level.
+SHALLOW_VH_MAX = -18.0
+SHALLOW_DROP_MIN = 5.0
+SHALLOW_SUPPORT_MIN = 4
+#: The radar canopy after a flood must reach this VH: still-dark ground (VH below it) is water or
+#: mud, not a crop (a pond's VH went from -32 to -24 dB and looked like a "rise").
+RADAR_CANOPY_VH_MIN = -18.0
 #: On the flood pass the other polarisation may not sit more than this above its own earlier level
 #: (a drop of -1 dB = a rise of 1 dB). Why (fix plan, issue 15): on 11 Jun 2026 one pass read VH
 #: 5-20 dB low on dry fields while VV was at its brightest; water never does that.
@@ -214,7 +232,7 @@ RAW_AFTER_WINDOWS = 2
 #: before the radar alone may call it rice (the radar-trough path). No observation at all in that
 #: span counts as unknown, not as a canopy.
 BARE_SEEN_NDVI = 0.40
-BARE_SEEN_BEFORE_WINDOWS = 12
+BARE_SEEN_BEFORE_WINDOWS = 18      # 90 days: the last dry-season view of a field can be that old under monsoon cloud
 BARE_SEEN_AFTER_WINDOWS = 6
 #: ``vh_end``: median VH of the passes in the last ``END_DAYS`` before the series end (any track);
 #: ``radar_canopy_rise`` = vh_end - flood_vh. Why: a young crop transplanted in August is often
@@ -361,7 +379,10 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
         consistent = ~(out["flood_other_drop"] < OTHER_POL_DROP_MIN)
         deep = (out["flood_vh"] <= DEEP_FLOOD_VH_MAX) & (out["flood_drop"] >= DEEP_FLOOD_DROP_MIN)
         no_canopy = ~(out["ndvi_at_flood"] > FLOOD_NDVI_MAX)        # unknown (no observation) passes
-        out["flood_ok"] = ((out["flood_drop"] >= FLOOD_DROP_MIN) & (out["flood_vh"] <= FLOOD_VH_MAX)
+        dark_enough = (out["flood_vh"] <= FLOOD_VH_MAX) | ((out["flood_vh"] <= SHALLOW_VH_MAX)
+                                                          & (out["flood_drop"] >= SHALLOW_DROP_MIN)
+                                                          & (out["support"] >= SHALLOW_SUPPORT_MIN))
+        out["flood_ok"] = ((out["flood_drop"] >= FLOOD_DROP_MIN) & dark_enough
                            & no_canopy & ((out["support"] >= SUPPORT_MIN) | deep)
                            & consistent)
         # the second-darkest pass, not the darkest: one speckled or mis-registered pass must not
