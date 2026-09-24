@@ -34,13 +34,14 @@ import pandas as pd
 
 BASE = "processed/_batch/s2_2026"
 VARIANTS = {
-    "qa60": {"qa60_mode": "both", "cs_min": None, "keep_dark": False},
+    "qa60": {"qa60_mode": "both", "cs_min": None, "keep_dark": False, "drop_haze": False},
     # plain Cloud Score+: kept for the record only; it removes flooded fields (see ndvi_5day.DARK_NIR_MAX)
-    "cs60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": False},
+    "cs60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": False, "drop_haze": False},
     # hybrid: QA60 opaque cloud, Cloud Score+ for bright observations (cloud, haze), dark ones kept
-    "hyb50": {"qa60_mode": "opaque", "cs_min": 50, "keep_dark": True},
-    "hyb60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": True},
-    "hyb70": {"qa60_mode": "opaque", "cs_min": 70, "keep_dark": True},
+    # ... and a blue-bright canopy removed as haze (ndvi_5day.HAZE_B2_MIN)
+    "hyb50": {"qa60_mode": "opaque", "cs_min": 50, "keep_dark": True, "drop_haze": True},
+    "hyb60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": True, "drop_haze": True},
+    "hyb70": {"qa60_mode": "opaque", "cs_min": 70, "keep_dark": True, "drop_haze": True},
 }
 OUT = f"{BASE}/report/mask_experiment"
 
@@ -115,7 +116,8 @@ def score(ids, variants, plots=None) -> tuple[pd.DataFrame, pd.DataFrame]:
     verdicts = pd.read_csv(rv.OUT) if Path(rv.OUT).exists() else None
     ref_rows, verdict_rows = [], []
     for aoi_id in ids:
-        refs = va.reference_sets(aoi_id, plots[plots["aoi"] == f"aoi{aoi_id}"], out_root=BASE)
+        p = plots[plots["aoi"] == f"aoi{aoi_id}"]
+        refs_base = va.reference_sets(aoi_id, p, out_root=BASE)
         nd.forget()
         for v in variants:
             path = Path(root(v)) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026.tif"
@@ -123,13 +125,21 @@ def score(ids, variants, plots=None) -> tuple[pd.DataFrame, pd.DataFrame]:
                 continue
             with rasterio.open(path) as ds:
                 classes = ds.read(1).ravel()
-            c = classes[refs["pixel"].to_numpy()]
-            for (s, region), g in refs.assign(cls=c).groupby(["set", "region"]):
-                ref_rows.append({"variant": v, "aoi": f"aoi{aoi_id}", "set": s, "region": region, "pixels": len(g),
-                                 "delivered_pct": round(100 * float(np.isin(g["cls"], (1, 6)).mean()), 2),
-                                 "harvested_pct": round(100 * float((g["cls"] == 4).mean()), 2),
-                                 "young_pct": round(100 * float((g["cls"] == 2).mean()), 2),
-                                 "class3_pct": round(100 * float((g["cls"] == 3).mean()), 2)})
+            # the negatives are defined from a series: under the baseline mask a hazy end makes
+            # false "cut" negatives, so each variant is also judged on negatives from its own series
+            refs_own = va.reference_sets(aoi_id, p, out_root=root(v))
+            nd.forget()
+            for refs, origin in ((refs_base, "baseline"), (refs_own, "own")):
+                c = classes[refs["pixel"].to_numpy()]
+                for (s, region), g in refs.assign(cls=c).groupby(["set", "region"]):
+                    if origin == "own" and s.startswith("rice_plot"):
+                        continue                              # the plots do not move with the mask
+                    ref_rows.append({"variant": v, "refs": origin, "aoi": f"aoi{aoi_id}", "set": s, "region": region,
+                                     "pixels": len(g),
+                                     "delivered_pct": round(100 * float(np.isin(g["cls"], (1, 6)).mean()), 2),
+                                     "harvested_pct": round(100 * float((g["cls"] == 4).mean()), 2),
+                                     "young_pct": round(100 * float((g["cls"] == 2).mean()), 2),
+                                     "class3_pct": round(100 * float((g["cls"] == 3).mean()), 2)})
             if verdicts is not None and (verdicts["aoi"] == f"aoi{aoi_id}").any():
                 fields, _, _ = field_rice.label_aoi(aoi_id, map_suffix="", src_root=root(v))
                 labels = fields[["field_id", "label"]]
@@ -210,7 +220,8 @@ def bright_profile(aoi_id: int, dates, variant: str, control: str = "qa60") -> p
         for name in (control, variant):
             v = VARIANTS[name]
             bits = (1 << 10) | (1 << 11) if v["qa60_mode"] == "both" else (1 << 10)
-            keep[name] = nd.clear_mask(data, b["QA60"], b["clear"], b["B8"], ndvi, v["cs_min"], bits, v["keep_dark"])
+            keep[name] = nd.clear_mask(data, b["QA60"], b["clear"], b["B8"], ndvi, v["cs_min"], bits, v["keep_dark"],
+                                       v["drop_haze"], b["B2"])
         sel = inside & keep[control] & ~keep[variant]
         if sel.sum() < 20:
             continue
@@ -224,11 +235,15 @@ def bright_profile(aoi_id: int, dates, variant: str, control: str = "qa60") -> p
 def summarise(refs: pd.DataFrame, verdicts: pd.DataFrame) -> str:
     lines = []
     if len(refs):
+        if "refs" not in refs:
+            refs = refs.assign(refs="baseline")
         w = refs.assign(wt=refs["pixels"] * refs["delivered_pct"])
-        t = (w.groupby(["variant", "set", "region"]).agg(pixels=("pixels", "sum"), wt=("wt", "sum")))
+        t = (w.groupby(["refs", "variant", "set", "region"]).agg(pixels=("pixels", "sum"), wt=("wt", "sum")))
         t["delivered_pct"] = (t["wt"] / t["pixels"]).round(1)
-        lines += ["Delivered-rice share (%) of the reference sets, per mask variant:",
-                  t.reset_index().pivot_table(index=["set", "region"], columns="variant", values="delivered_pct").to_string(), ""]
+        lines += ["Delivered-rice share (%) of the reference sets, per mask variant (refs: negatives from the "
+                  "baseline series or the variant's own):",
+                  t.reset_index().pivot_table(index=["set", "region", "refs"], columns="variant",
+                                              values="delivered_pct").to_string(), ""]
     if len(verdicts):
         g = verdicts.groupby(["variant", "verdict"])[["decidable", "agree_now", "disagree_now", "agreed_before"]].sum()
         lines += ["Reviewed fields per variant (agree_now should rise for 'wrong', stay for 'right'):", g.to_string()]

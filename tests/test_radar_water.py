@@ -74,3 +74,27 @@ def test_water_evidence_rejects_a_pass_where_only_one_polarisation_fell():
     assert ev.loc[1, "flood_drop"] >= 4 and ev.loc[1, "flood_vh"] <= -19       # looks like water in VH...
     assert ev.loc[1, "flood_other_drop"] < rw.OTHER_POL_DROP_MIN and not ev.loc[1, "flood_ok"]
     assert not ev.loc[2, "flood_ok"]
+
+
+def test_flood_support_counts_either_polarisation_and_a_deep_single_pass_needs_none():
+    dates = pd.DatetimeIndex(np.arange(np.datetime64("2026-04-01"), np.datetime64("2026-09-20"), 6))
+    day = dates.to_numpy().astype("datetime64[D]")
+    vv = np.full((len(dates), 3), -9.0)
+    vh = np.full((len(dates), 3), -16.0)
+    d1, d2 = day == np.datetime64("2026-06-12"), day == np.datetime64("2026-06-18")
+    # pixel 0: VH flood on one pass, the next pass drops in VV only (3 dB) -> supported by VV
+    vh[d1, 0], vv[d1, 0] = -23.0, -14.0
+    vv[d2, 0] = -12.0
+    # pixel 1: one very dark, very deep pass, nothing else -> deep flood, no support needed
+    vh[d1, 1], vv[d1, 1] = -26.0, -17.0
+    # pixel 2: one moderate pass only -> not enough
+    vh[d1, 2], vv[d1, 2] = -21.0, -13.0
+    series = [(dates, {"VV": vv, "VH": vh})]
+    windows = pd.date_range("2026-03-01", "2026-09-21", freq="5D")
+    ndvi = np.full((len(windows), 3), 0.2)
+    trough = np.array(["2026-06-15"] * 3, dtype="datetime64[D]")
+    climb = np.array(["2026-07-25"] * 3, dtype="datetime64[D]")
+    ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series)
+    assert ev.loc[0, "support"] >= 2 and ev.loc[0, "flood_ok"]
+    assert ev.loc[1, "support"] == 1 and ev.loc[1, "flood_ok"]
+    assert ev.loc[2, "support"] == 1 and not ev.loc[2, "flood_ok"]

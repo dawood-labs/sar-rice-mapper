@@ -194,31 +194,44 @@ BAD_PASS_DB = 3.0     # a jump this large on ground that does not change marks t
 ONE_POL_DB = 2.0
 FLAT_DB = 1.0
 CROSS_AOI_MIN = 3
+#: The per-AOI rules need this many stable pixels: with 20-80 pixels the median jumps by 3-5 dB on
+#: a rainy day (three tiny neighbouring AOIs did so on the same two dates), which is weather, not
+#: an artefact.
+MIN_STABLE_PX = 100
+#: A pass is dropped track-wide only when the drop is really widespread: this share of the track's
+#: AOIs must read >= 1 dB low. Measured: the broken 11 Jun 2026 pass had 34 % of its AOIs at
+#: -1 dB or lower (21 % at -1.5); ordinary passes have 3-7 %, including the two rainy dates above.
+TRACK_WIDE_SHARE = 0.20
 
 
 def screen_passes(table: pd.DataFrame, limit: float = BAD_PASS_DB, one_pol_db: float = ONE_POL_DB,
-                  flat_db: float = FLAT_DB, cross_aoi_min: int = CROSS_AOI_MIN) -> pd.DataFrame:
+                  flat_db: float = FLAT_DB, cross_aoi_min: int = CROSS_AOI_MIN, min_stable_px: int = MIN_STABLE_PX,
+                  track_wide_share: float = TRACK_WIDE_SHARE) -> pd.DataFrame:
     """Re-decide ``bad`` for every row of the per-AOI ``bad_passes`` tables, with a ``reason``.
 
     Reasons, in order: ``jump`` (|jump| >= ``limit`` in that polarisation), ``one_pol`` (this
     polarisation <= -``one_pol_db`` while the other polarisation of the same pass is within
-    ``flat_db``), ``track_wide`` (the same track / date / polarisation is bad for one of the first
-    two reasons in >= ``cross_aoi_min`` AOIs). Rows with no stable-ground value can only be
-    ``track_wide``.
+    ``flat_db``), both only with >= ``min_stable_px`` stable pixels; ``track_wide`` (the same track /
+    date / polarisation is bad for one of the first two reasons in >= ``cross_aoi_min`` AOIs AND at
+    least ``track_wide_share`` of the track's AOIs read 1 dB or more low). Rows with no stable-ground
+    value can only be ``track_wide``.
     """
     t = table.copy()
     t["date"] = pd.to_datetime(t["date"]).dt.strftime("%Y-%m-%d")
     j = pd.to_numeric(t["stable_jump_db"], errors="coerce")
-    t["reason"] = np.where(j.abs() >= limit, "jump", "")
+    enough = pd.to_numeric(t["stable_pixels"], errors="coerce").fillna(0) >= min_stable_px
+    t["reason"] = np.where((j.abs() >= limit) & enough, "jump", "")
     key = pd.MultiIndex.from_frame(t[["aoi", "track", "date"]])
     piv = t.assign(j=j).pivot_table(index=["aoi", "track", "date"], columns="pol", values="j")
     if {"VV", "VH"} <= set(piv.columns):
         for pol, other in (("VH", "VV"), ("VV", "VH")):
             hit = piv[(piv[pol] <= -one_pol_db) & (piv[other].abs() < flat_db)].index
-            m = key.isin(hit) & (t["pol"] == pol).to_numpy() & (t["reason"] == "").to_numpy()
+            m = key.isin(hit) & (t["pol"] == pol).to_numpy() & (t["reason"] == "").to_numpy() & enough.to_numpy()
             t.loc[m, "reason"] = "one_pol"
-    n = t[t["reason"] != ""].groupby(["track", "pol", "date"])["aoi"].nunique()
-    spread = n[n >= cross_aoi_min].index
+    by_pass = t.assign(j=j).groupby(["track", "pol", "date"])
+    n_flag = by_pass["reason"].agg(lambda r: int((r != "").sum()))
+    low_share = by_pass["j"].agg(lambda x: float((x <= -1.0).mean()) if x.notna().any() else 0.0)
+    spread = n_flag[(n_flag >= cross_aoi_min) & (low_share >= track_wide_share)].index
     m = pd.MultiIndex.from_frame(t[["track", "pol", "date"]]).isin(spread) & (t["reason"] == "").to_numpy()
     t.loc[m, "reason"] = "track_wide"
     t["bad"] = t["reason"] != ""
@@ -267,7 +280,7 @@ def bad_passes(aoi_id: int, window: int = 5, limit: float = BAD_PASS_DB) -> pd.D
     loc = pr.locate(aoi_id, 0, season_key=SEASON_KEY)
     rows = []
     for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
-        dates, cubes = sar_curve.read_track(loc, track, window)
+        dates, cubes = sar_curve.read_track(loc, track, window, drop_bad=False)   # judge every pass afresh
         for pol in ("VV", "VH"):
             if len(pix):
                 s = pd.Series(np.nanmedian(cubes[pol].reshape(len(dates), -1)[:, pix], axis=1), index=dates)

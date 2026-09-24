@@ -68,8 +68,9 @@ def test_classify_sends_never_bare_unconfirmed_pixels_to_class_5_only():
     wet = np.array([True, False, False])
     never = np.array([True, True, False])
     out = mr.classify(ev, radar_wet=wet, never_bare=never)
-    # water confirmed wins over never-bare; never-bare only relabels the unconfirmed
-    assert out.tolist() == [1, 5, 3]
+    # never-bare ground cannot have been a flooded field: a v1 dip there is rain on a garden, so
+    # class 1 falls to 5 as well (fix plan, issues 2/5/9); only a confirmed flood (flood_ok) wins
+    assert out.tolist() == [5, 5, 3]
 
 
 def test_young_with_water_and_visible_canopy_is_young_rice():
@@ -116,3 +117,25 @@ def test_radar_trough_rescues_a_paddy_whose_optical_trough_was_hidden():
     ev2["flood_date"], ev2["flood_ok"] = ev["flood_date"], ev["flood_ok"]
     ev2 = pd.concat([ev2, mr.radar_trough_events(ev2, ndvi2, windows)], axis=1)
     assert mr.classify(ev2, radar_wet=wet, radar_trough=True)[0] == 4
+
+
+def test_never_bare_removes_every_rice_like_class_unless_a_flood_was_confirmed():
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import monsoon_rule as mr
+
+    windows = pd.date_range("2026-05-01", "2026-09-21", freq="5D")
+    n = len(windows)
+    rice = np.r_[np.full(10, 0.1), np.linspace(0.1, 0.8, n - 10)]               # standing rice curve
+    cut = rice.copy(); cut[-5:] = 0.2                                              # harvested curve
+    young = np.r_[np.full(n - 6, 0.1), np.linspace(0.1, 0.35, 6)]                 # young curve
+    ndvi = np.stack([rice, rice, cut, young, young], axis=1)
+    ev = mr.pixel_events(ndvi, ndvi * 0, windows)
+    ev["flood_ok"] = [False, True, False, False, False]
+    wet = np.array([True, True, False, True, False])
+    nb = np.array([True, True, True, True, True])
+    out = mr.classify(ev, radar_wet=wet, never_bare=nb)
+    # class 1 (v1 water only), 4, 6 and 2 all fall to 5; the confirmed flood keeps its class 1
+    assert out.tolist() == [5, 1, 5, 5, 5]
+    assert mr.classify(ev, radar_wet=wet, never_bare=~nb).tolist() == [1, 1, 4, 6, 2]

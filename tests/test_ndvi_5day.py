@@ -103,3 +103,17 @@ def test_upper_envelope_never_dives_below_the_observations_in_a_gap():
     y[30:] = np.linspace(0.6, 0.85, 10)            # ... and a new canopy in autumn; nothing between
     fit, _ = nd.upper_envelope(y, 1.0)
     assert np.nanmin(fit) >= 0.2 - nd.FIT_FLOOR_MARGIN - 1e-9
+
+
+def test_clear_mask_drops_a_blue_bright_canopy_as_haze():
+    import numpy as np
+
+    from sar_pipeline.analysis import ndvi_5day as nd
+
+    data = np.array([True, True, True])
+    qa = np.zeros(3, dtype=int)
+    cs = np.array([95, 95, 95])                          # Cloud Score+ calls all three clear
+    b8 = np.array([3500, 3500, 2500])
+    b2 = np.array([400, 1200, 1300])                     # clear canopy, hazy canopy, bright bare soil
+    ndvi = np.array([0.7, 0.5, 0.15])
+    assert nd.clear_mask(data, qa, cs, b8, ndvi, 60, 1 << 10, True, True, b2).tolist() == [True, False, True]

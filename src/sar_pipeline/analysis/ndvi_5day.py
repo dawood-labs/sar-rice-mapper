@@ -79,26 +79,43 @@ QA60_MODE = "both"
 #: dark, low-NDVI observation cannot be the haze this mask is there to remove.
 DARK_NIR_MAX = 1500
 DARK_NDVI_MAX = 0.30
+#: A vegetated observation (NDVI >= ``HAZE_NDVI_MIN``) whose blue reflectance is above
+#: ``HAZE_B2_MIN`` is haze, whatever Cloud Score+ says (``drop_haze``). Why: haze scatters blue
+#: light most, so a canopy under haze is blue-bright while a clear canopy is blue-dark. Measured
+#: on three AOIs (Aug-Sep 2026): clear canopies (Cloud Score+ >= 80) had B2 150-770 (90th
+#: percentile), hazy ones (Cloud Score+ < 60) 1,100-2,700, and the one hazy scene Cloud Score+
+#: called clear (99.7 % clear, visibly hazy: it turned a whole AOI's standing rice into
+#: "harvested", issue 11) sat at 1,115-1,266. Bare soil and water can be blue-bright for other
+#: reasons, so the test is restricted to vegetated pixels.
+HAZE_B2_MIN = 900
+HAZE_NDVI_MIN = 0.30
 
 
-def clear_mask(data, qa60, cs, b8, ndvi, cs_min: float | None, bits: int, keep_dark: bool = False):
+def clear_mask(data, qa60, cs, b8, ndvi, cs_min: float | None, bits: int, keep_dark: bool = False,
+               drop_haze: bool = False, b2=None):
     """The observations the series keeps: data present, QA60 bits clear, and (when ``cs_min`` is
     set) Cloud Score+ ``clear`` at or above it, unless ``keep_dark`` and the pixel is dark
-    (see :data:`DARK_NIR_MAX`)."""
+    (see :data:`DARK_NIR_MAX`); with ``drop_haze`` a blue-bright canopy is removed as haze
+    (see :data:`HAZE_B2_MIN`; needs ``b2``)."""
     from ..optical_export import qa60_cloud
 
     ok = data & ~qa60_cloud(qa60, bits)
-    if cs_min is None:
-        return ok
-    clear = cs >= cs_min
-    if keep_dark:
+    if cs_min is not None:
+        clear = cs >= cs_min
+        if keep_dark:
+            with np.errstate(invalid="ignore"):
+                clear |= (b8 < DARK_NIR_MAX) & (ndvi < DARK_NDVI_MAX)
+        ok = ok & clear
+    if drop_haze:
+        if b2 is None:
+            raise ValueError("drop_haze needs the blue band b2")
         with np.errstate(invalid="ignore"):
-            clear |= (b8 < DARK_NIR_MAX) & (ndvi < DARK_NDVI_MAX)
-    return ok & clear
+            ok = ok & ~((ndvi >= HAZE_NDVI_MIN) & (b2 > HAZE_B2_MIN))
+    return ok
 
 
 def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None, cs_min: float | None = None,
-               qa60_mode: str = QA60_MODE, keep_dark: bool = False):
+               qa60_mode: str = QA60_MODE, keep_dark: bool = False, drop_haze: bool = False):
     """NDVI, NDWI, LSWI, QA60 cloud and SCL cloud for every exported date, shaped (dates, rows, cols).
 
     ``ok`` is True where the pixel has data and QA60 does not flag cloud (``qa60_mode``: cloud and
@@ -125,12 +142,13 @@ def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None,
             read = lambda n: ds.read(band_index(ds, n)).astype("float32")  # noqa: E731
             b3, b4, b8, b11, qa, sc = (read(n) for n in ("B3", "B4", "B8", "B11", "QA60", "SCL"))
             cs = read("clear") if cs_min is not None else None
+            b2 = read("B2") if drop_haze else None
         data = (b4 > 0) & (b8 > 0)
         with np.errstate(invalid="ignore", divide="ignore"):
             ndvi.append(np.where(data, (b8 - b4) / (b8 + b4), np.nan))
             ndwi.append(np.where(data & (b3 + b8 > 0), (b3 - b8) / (b3 + b8), np.nan))
             lswi.append(np.where(data & (b8 + b11 > 0), (b8 - b11) / (b8 + b11), np.nan))
-        ok.append(clear_mask(data, qa, cs, b8, ndvi[-1], cs_min, bits, keep_dark))
+        ok.append(clear_mask(data, qa, cs, b8, ndvi[-1], cs_min, bits, keep_dark, drop_haze, b2))
         scl.append(data & np.isin(sc.astype("int64"), SCL_CLOUD_CLASSES))
     order = np.argsort(dates)
     pick = lambda xs: np.stack(xs)[order]  # noqa: E731
@@ -263,7 +281,7 @@ def gap_days(observed, step: int = STEP_DAYS):
 
 def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd: float = LMBD,
           out_root="processed/_batch/s2_2026", folder: str = FOLDER, log=print, cs_min: float | None = None,
-          qa60_mode: str = QA60_MODE, keep_dark: bool = False) -> dict:
+          qa60_mode: str = QA60_MODE, keep_dark: bool = False, drop_haze: bool = False) -> dict:
     """Read, composite, fit and write the 5-day series of one AOI. Returns a summary dict.
 
     ``cs_min`` adds the Cloud Score+ requirement to the mask and ``qa60_mode`` picks the QA60 bits
@@ -272,7 +290,7 @@ def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd:
     """
     t0 = time.time()
     dates, ndvi, ndwi, lswi, ok, scl, loc = read_dates(aoi_id, folder, cs_min=cs_min, qa60_mode=qa60_mode,
-                                                        keep_dark=keep_dark)
+                                                        keep_dark=keep_dark, drop_haze=drop_haze)
     h, w = ndvi.shape[1:]
     starts = window_starts(start, end)
     keep = (dates >= starts[0]) & (dates < pd.Timestamp(end))
@@ -305,7 +323,8 @@ def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd:
         # share of all pixel-windows whose value is more than 15 days from any real observation
         "gap_over_15d_pct": round(100 * float((gaps > 15).mean()), 1),
         "max_gap_days": int(gaps.max()),
-        "mask": f"qa60_{qa60_mode}" + (f"_cs{cs_min:g}" if cs_min is not None else "") + ("_keepdark" if keep_dark else ""),
+        "mask": f"qa60_{qa60_mode}" + (f"_cs{cs_min:g}" if cs_min is not None else "") + ("_keepdark" if keep_dark else "")
+                + ("_nohaze" if drop_haze else ""),
         "qa60_clear_pct": round(100 * float(flat(ok).mean()), 1),
         "scl_cloud_pct_of_qa60_clear": round(100 * float((flat(scl) & flat(ok)).sum()
                                                          / max(flat(ok).sum(), 1)), 1),

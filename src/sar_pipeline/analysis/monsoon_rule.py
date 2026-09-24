@@ -238,13 +238,19 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     rice = grown & standing
     out[rice & wet] = 1
     out[rice & ~wet] = 3
-    if never_bare is not None:
-        out[rice & ~wet & np.asarray(never_bare, dtype=bool)] = 5
     last = events["last_ndvi"].to_numpy() if "last_ndvi" in events else np.zeros(len(events))
     young_rice = young & wet & (last >= YOUNG_VISIBLE)
     out[grown & ~standing] = 4
     out[young] = 2
     out[young_rice] = 6
+    if never_bare is not None:
+        # trees, gardens and houses: the radar never saw bare ground, so the optical "cycle" is
+        # haze. Applied to every rice-like class (fix plan, issues 2 and 5; before only class 3),
+        # except where a confirmed flood says the ground was bare and wet after all.
+        nb = np.asarray(never_bare, dtype=bool)
+        if "flood_ok" in events:
+            nb &= ~events["flood_ok"].to_numpy(dtype=bool)
+        out[np.isin(out, (1, 2, 3, 4, 6)) & nb] = 5
     out[~events["valid"].to_numpy()] = 255
     return out
 

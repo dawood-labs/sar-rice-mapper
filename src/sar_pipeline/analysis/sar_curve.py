@@ -44,12 +44,13 @@ PAIR_DAYS = 3
 LAMBDA_GRID = (0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0)
 
 
-def read_track(loc: dict, track: str, window: int = 5):
+def read_track(loc: dict, track: str, window: int = 5, drop_bad: bool = True):
     """One track's VH and VV over the whole AOI, in dB, as ``window`` x ``window`` power means.
 
     The spatial mean is taken in linear power over the same 5x5 box the classifier uses, which cuts
     speckle from about 2 dB on a single pixel to about 1 dB and is what makes a per-pixel curve
-    readable at all.
+    readable at all. ``drop_bad`` blanks the recorded artefact passes; the pass audit itself reads
+    with ``drop_bad=False``, otherwise a pass once marked bad could never be re-judged.
     """
     import rasterio
 
@@ -61,7 +62,7 @@ def read_track(loc: dict, track: str, window: int = 5):
             if ds.nodata is not None:
                 cube[cube == ds.nodata] = np.nan
             dates = [dt.datetime.strptime(d.rsplit("_", 1)[1], "%Y%m%d").date() for d in ds.descriptions]
-        for i in bad_pass_indices(loc, track, pol, dates):
+        for i in (bad_pass_indices(loc, track, pol, dates) if drop_bad else []):
             cube[i] = np.nan                  # an artefact pass (docs/15): unusable, not a field event
         power = ss.to_linear(cube)
         smoothed = np.stack([box_mean(p, window) for p in power])
