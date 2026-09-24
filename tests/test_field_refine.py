@@ -19,7 +19,9 @@ def test_geometry_stage_cuts_monsters_flags_strips_and_recomputes_areas():
     monster = box(500000 - 5, 4000000 - 5, 500000 + 60 * 3 + 55, 4000055)                       # one outline around them
     strip = box(500400, 4000000, 500410, 4000300)                                                # 10 m x 300 m road
     normal = box(500500, 4000000, 500580, 4000080)
-    g = _fields(small + [monster, strip, normal])
+    # a field with a 4 m tail running 120 m along a road: the tail goes, the field stays
+    tailed = box(500700, 4000000, 500780, 4000080).union(box(500780, 4000038, 500900, 4000042))
+    g = _fields(small + [monster, strip, normal, tailed])
     out = fr.geometry_stage(g, aoi_id=7)
     assert out["field_id"].tolist()[0] == "aoi7_000000"
     flags = out["refine_flag"].tolist()
@@ -28,6 +30,13 @@ def test_geometry_stage_cuts_monsters_flags_strips_and_recomputes_areas():
     assert flags[4] in ("monster_cut", "monster_dropped") and out.loc[4, "overlap_lost_share"] > 0.6
     assert flags[5] == "strip" and not out.loc[5, "is_field"]
     assert flags[6] == "" and out.loc[6, "is_field"]
+    assert flags[7] == "" and out.loc[7, "is_field"] and out.loc[7, "tail_removed_share"] > 0.05
+    assert abs(out.loc[7, "area_acres"] - 6400 / fr.SQM_PER_ACRE) < 1e-3
+    # an irregular but wide field (a 95 x 98 m outline with a wavy edge) is not a strip
+    import shapely
+    wavy = shapely.Polygon([(0, 0), (95, 0), (95, 98)] + [(x, 98 + (3 if i % 2 else -3)) for i, x in enumerate(range(90, 0, -5))] + [(0, 98)])
+    assert not fr.strip_like(gpd.GeoSeries([wavy, box(0, 0, 8, 400)], crs=UTM)).tolist()[0]
+    assert fr.strip_like(gpd.GeoSeries([wavy, box(0, 0, 8, 400)], crs=UTM)).tolist()[1]
     # areas: UTM, the delivered attribute was 9 % high
     assert abs(out.loc[6, "area_acres"] - 6400 / fr.SQM_PER_ACRE) < 1e-3
     assert out.loc[6, "area_acres_delivered"] > out.loc[6, "area_acres"]

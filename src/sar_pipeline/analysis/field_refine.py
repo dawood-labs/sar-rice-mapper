@@ -43,11 +43,19 @@ PIXEL_M2 = 100.0
 MONSTER_COVER = 0.5
 #: What is left of a cut monster must be at least this many pixels, and not a strip, to stay.
 MIN_REMAINDER_PX = 4
-#: A strip: mean width (2 x area / perimeter) under this, and longer than ``STRIP_MIN_LENGTH_M``.
-#: Why 15 m: the fields here are 20-100 m wide; roads, canals and tree lines are 5-15 m. Real
-#: narrow terraces exist (one AOI in the south-west); their length is usually under 150 m.
+#: A strip: nothing of the polygon survives an erosion of half ``STRIP_MAX_WIDTH_M`` (no part is
+#: wider than 15 m) and its longest extent is over ``STRIP_MIN_LENGTH_M``. Why erosion and not
+#: 2 x area / perimeter: the traced outlines are so irregular that a 95 x 98 m field had a
+#: perimeter of 560 m and a "mean width" of 17 m. Why 15 m: fields here are 20-100 m wide; roads,
+#: canals and tree lines are 5-15 m. Real narrow terraces exist (one AOI in the south-west);
+#: their length is usually under 150 m.
 STRIP_MAX_WIDTH_M = 15.0
 STRIP_MIN_LENGTH_M = 150.0
+#: Tails: parts of a polygon narrower than twice this are removed by a morphological opening
+#: (erode then dilate). The delineation runs field outlines out along roads and canals; 3 m
+#: removes those 6 m tails and the bund networks left when a monster outline is cut, and leaves
+#: every real field (>= 20 m wide) as it was.
+TAIL_RADIUS_M = 3.0
 #: Simplification tolerance for the traced outlines (far below the 10 m pixel).
 SIMPLIFY_M = 0.5
 #: A polygon under this many pixels inside same-label neighbours is merged into the largest one.
@@ -90,13 +98,37 @@ def cut_overlaps(g):
 
 
 def strip_like(geom_series) -> np.ndarray:
-    """True for long thin polygons (mean width under ``STRIP_MAX_WIDTH_M``, length over ``STRIP_MIN_LENGTH_M``)."""
-    area = geom_series.area.to_numpy()
-    per = geom_series.length.to_numpy()
+    """True for long thin polygons: no part wider than ``STRIP_MAX_WIDTH_M`` (erosion by half of it
+    leaves nothing) and a longest extent over ``STRIP_MIN_LENGTH_M``."""
+    import shapely
+
+    geoms = geom_series.to_numpy()
+    area = shapely.area(geoms)
+    core = shapely.buffer(geoms, -STRIP_MAX_WIDTH_M / 2, quad_segs=2, join_style="mitre")
+    thin = shapely.is_empty(core) | (shapely.area(core) <= 0)
+    mrr = shapely.minimum_rotated_rectangle(geoms)
+    # the longest side of the minimum rotated rectangle, from its corner coordinates
+    length = np.zeros(len(geoms))
+    for i, r in enumerate(mrr):
+        if r.is_empty or r.geom_type != "Polygon":
+            continue
+        c = np.asarray(r.exterior.coords)[:3]
+        length[i] = max(np.hypot(*(c[1] - c[0])), np.hypot(*(c[2] - c[1])))
+    return thin & (length > STRIP_MIN_LENGTH_M) & (area > 0)
+
+
+def remove_tails(geom_series, radius: float = TAIL_RADIUS_M):
+    """Morphological opening: parts narrower than ``2 * radius`` disappear. Returns (geometries,
+    share of area removed); an empty result means the polygon was nothing but tails."""
+    import shapely
+
+    geoms = geom_series.to_numpy()
+    opened = shapely.buffer(shapely.buffer(geoms, -radius, quad_segs=2, join_style="mitre"), radius,
+                            quad_segs=2, join_style="mitre")
+    a0 = shapely.area(geoms)
     with np.errstate(divide="ignore", invalid="ignore"):
-        width = np.where(per > 0, 2 * area / per, 0)
-        length = np.where(width > 0, area / width, 0)
-    return (width < STRIP_MAX_WIDTH_M) & (length > STRIP_MIN_LENGTH_M) & (area > 0)
+        removed = np.where(a0 > 0, 1 - shapely.area(opened) / a0, 0.0)
+    return opened, np.clip(removed, 0, 1)
 
 
 def geometry_stage(fields, aoi_id: int | None = None):
@@ -117,19 +149,29 @@ def geometry_stage(fields, aoi_id: int | None = None):
     m["geometry"] = m.geometry.make_valid().simplify(SIMPLIFY_M, preserve_topology=True).make_valid()
     a0 = m.geometry.area.to_numpy()
     geoms, lost = cut_overlaps(m)
-    m["geometry"] = geoms
+    strip_before = strip_like(geoms)                 # judged before the opening: a 6 m canal is a strip, not "nothing"
+    opened, tail_share = remove_tails(geoms)
+    # polygons under 4 pixels are slivers for the label stage (merge_tiny), not fields with tails:
+    # the opening would erase them and lose the merge
+    tiny = geoms.area.to_numpy() < TINY_PX * PIXEL_M2
+    opened[tiny], tail_share[tiny] = geoms.to_numpy()[tiny], 0.0
+    m["geometry"] = gpd.GeoSeries(opened, index=m.index, crs=m.crs)
     a1 = m.geometry.area.to_numpy()
     flag = np.full(len(m), "", dtype=object)
     monster = lost >= MONSTER_COVER
-    remainder_strip = strip_like(m.geometry)
-    drop = monster & ((a1 < MIN_REMAINDER_PX * PIXEL_M2) | remainder_strip)
+    thin = strip_before | (a1 <= 0)
+    drop = monster & ((a1 < MIN_REMAINDER_PX * PIXEL_M2) | thin)
     flag[monster & ~drop] = "monster_cut"
     flag[drop] = "monster_dropped"
-    strip = strip_like(m.geometry) & ~monster
+    strip = thin & ~monster
     flag[strip] = "strip"
     m["refine_flag"] = flag
     m["overlap_lost_share"] = np.round(lost, 3)
+    m["tail_removed_share"] = np.round(tail_share, 3)
     m["is_field"] = ~(drop | strip)
+    # a polygon that is nothing but tails has no geometry left: keep the raw outline for the record
+    empty = m.geometry.is_empty.to_numpy()
+    m.loc[empty, "geometry"] = geoms[empty]
     m["area_acres"] = np.round(a1 / SQM_PER_ACRE, 4)
     m["area_acres_original"] = np.round(a0 / SQM_PER_ACRE, 4)
     out = m.to_crs(4326)
@@ -208,6 +250,58 @@ def summary(g) -> dict:
     return out
 
 
+def examples(aoi_id: int, n: int = 2, half_m: float = 150, out_dir=OUT) -> list:
+    """Before / after crops on the latest clear true-colour image for the largest polygon of each
+    refine flag: raw outlines (yellow, the flagged one magenta) beside the refined outlines (cyan).
+    Why: the refinement must be checked by eye before it is trusted, like every other step."""
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    import rasterio
+    from rasterio.windows import from_bounds
+    from shapely.geometry import box
+
+    from ..optical_export import band_index
+    from ..review import _stretch, latest_clear
+    from . import field_rice
+
+    raw = field_rice.load_fields(aoi_id, refined_dir=None)
+    ref = gpd.read_file(field_rice.refined_path(aoi_id, out_dir))
+    path, date, _ = latest_clear(aoi_id)
+    made = []
+    with rasterio.open(path) as ds:
+        raw_m, ref_m = raw.to_crs(ds.crs), ref.to_crs(ds.crs)
+        raw_m["field_id"] = ref_m["field_id"].to_numpy()
+        for flag in [f for f in ref_m["refine_flag"].unique() if f]:
+            pick = ref_m[ref_m["refine_flag"] == flag].sort_values("area_acres_original", ascending=False).head(n)
+            for _, row in pick.iterrows():
+                geom = raw_m.loc[raw_m["field_id"] == row["field_id"]].geometry.iloc[0]
+                c = geom.centroid
+                minx, miny, maxx, maxy = geom.bounds
+                r = max(half_m, (maxx - minx) / 2 + 30, (maxy - miny) / 2 + 30)
+                bx = (c.x - r, c.y - r, c.x + r, c.y + r)
+                win = from_bounds(*bx, transform=ds.transform)
+                img = np.dstack([_stretch(ds.read(band_index(ds, b), window=win, boundless=True, fill_value=0)
+                                          .astype("float32")) for b in ("B4", "B3", "B2")])
+                fig, axes = plt.subplots(1, 2, figsize=(11, 5.5))
+                for ax, frame, title in ((axes[0], raw_m, "raw delineation"), (axes[1], ref_m[ref_m["is_field"]], "refined (fields only)")):
+                    ax.imshow(img, extent=(bx[0], bx[2], bx[1], bx[3]))
+                    near = frame[frame.intersects(box(*bx))]
+                    near.boundary.plot(ax=ax, color="yellow" if title.startswith("raw") else "cyan", linewidth=0.7)
+                    if title.startswith("raw"):
+                        gpd.GeoSeries([geom], crs=ds.crs).boundary.plot(ax=ax, color="magenta", linewidth=1.8)
+                    ax.set_xlim(bx[0], bx[2]), ax.set_ylim(bx[1], bx[3]), ax.set_xticks([]), ax.set_yticks([])
+                    ax.set_title(title, fontsize=9)
+                fig.suptitle(f"{flag}: {row['field_id']} ({row['area_acres_original']:.2f} ac raw -> "
+                             f"{row['area_acres']:.2f} ac, is_field={row['is_field']}); S2 {date.date()}", fontsize=9)
+                out = Path(out_dir) / "examples"
+                out.mkdir(parents=True, exist_ok=True)
+                f = out / f"aoi{aoi_id}_{flag}_{row['field_id']}.png"
+                fig.savefig(f, dpi=90, bbox_inches="tight")
+                plt.close(fig)
+                made.append(f)
+    return made
+
+
 def run_geometry(aoi_ids, out_dir=OUT) -> pd.DataFrame:
     from . import field_rice
 
@@ -240,9 +334,13 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.field_refine", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["geometry"])
+    p.add_argument("step", choices=["geometry", "examples"])
     p.add_argument("--ids", nargs="+", type=int, required=True)
     args = p.parse_args(argv)
+    if args.step == "examples":
+        for a in args.ids:
+            print("\n".join(str(f) for f in examples(a)))
+        return 0
     print(run_geometry(args.ids).to_string(index=False))
     return 0
 

@@ -107,7 +107,7 @@ def label_aoi(aoi_id: int, map_suffix: str = "_final", src_root=SRC, path=DELINE
     fallback[inside] = classes[rows[inside], cols[inside]]
     lab = label_from_counts(counts, fallback)
     keep = [c for c in ("uid", "area_acres", "Confidence", "is_field", "refine_flag", "area_acres_delivered",
-                        "overlap_lost_share") if c in fields]
+                        "overlap_lost_share", "tail_removed_share") if c in fields]
     out = gpd.GeoDataFrame(pd.concat([fields[keep].reset_index(drop=True), lab], axis=1),
                            geometry=fields.geometry.reset_index(drop=True), crs=fields.crs)
     out["class_name"] = out["label"].map({k: v for k, v in mr.CLASSES.items()})
