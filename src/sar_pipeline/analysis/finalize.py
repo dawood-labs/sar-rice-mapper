@@ -58,8 +58,8 @@ def finalize_aoi(aoi_id: int, overrides: dict | None = None, sieve_px: int = SIE
         dst.write(f, 1)
     row = {"aoi": f"aoi{aoi_id}", "overrides": len(overrides.get(f"aoi{aoi_id}") or []), "sieve_px": sieve_px}
     for tag, arr in (("rule", c), ("final", f)):
-        counts = np.bincount(arr[arr != NODATA], minlength=6)
-        for k in range(6):
+        counts = np.bincount(arr[arr != NODATA], minlength=mr.N_CLASSES)
+        for k in range(mr.N_CLASSES):
             row[f"{mr.CLASSES[k]}_acres_{tag}"] = round(mr.acres(int(counts[k])), 1)
     return row
 

@@ -7,14 +7,15 @@ map date (the last five-day window of the series, written in the file name and i
 | code | class | meaning |
 |---|---|---|
 | 1 | rice, standing, water confirmed | a rice-like crop cycle standing on the map date, whose transplanting water was confirmed by radar |
+| 6 | rice, standing, young | a young rice crop: transplanting water confirmed by radar and canopy already visible (NDVI at least 0.30); delivered as rice |
 | 3 | rice-like, water not confirmed | a rice-like cycle standing on the map date, but the radar saw no transplanting water |
-| 2 | young | a crop has started but has no full canopy yet on the map date |
+| 2 | young | a crop has started but is not yet visible as a canopy, or its water is not confirmed |
 | 4 | harvested | a rice-like cycle already cut before the map date |
 | 5 | rice-like curve, never bare | the optical curve looks like rice but the radar shows trees or buildings all season: not rice |
 | 0 | not rice | no rice-like cycle this monsoon (water, trees, settlements, bare ground, other crops) |
 | 255 | no data | outside the AOI or never observed |
 
-The delivered rice is class **1**. Class 3 is reported separately: it has the optical shape of rice
+The delivered rice is classes **1** and **6**. Class 3 is reported separately: it has the optical shape of rice
 but no radar evidence of the water rice is transplanted into; a field check is needed to name it.
 Classes 2 and 4 are reported so that a later map, with newer images, can pick up the young crop.
 
@@ -42,10 +43,14 @@ the same crop as its confirmed rice, that class is relabelled (recorded with its
 patches smaller than 4 pixels (about 0.1 acre, smaller than 90 % of the surveyed fields) take the
 class that surrounds them.
 
+**Radar quality.** Passes that moved ground which cannot change within a week (trees, buildings) by
+3 dB or more are treated as artefacts and not used (0.2 % of passes).
+
 **Fields.** Every delineated field polygon (traced on high-resolution imagery) carries one label:
 the class holding most of its pixels (`label`, `class_name`), with `rice_share` and
 `unconfirmed_share` so another threshold can be applied, and `pixels` (0 for fields smaller than one
-pixel, labelled from the pixel under them). One GeoPackage per AOI in `fields/`;
+pixel, labelled from the pixel under them), and `label_confidence`: `high` where the same rule
+re-run on the field's mean curves gives the same class, `mixed` where it does not. One GeoPackage per AOI in `fields/`;
 `field_acres_by_class.csv` gives, per AOI, the acres of each class on the pixel map and on the
 field-labelled map inside the AOI (field polygons can extend past the AOI edge; their full area is
 in `area_acres`).

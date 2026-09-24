@@ -43,7 +43,7 @@ def load_fields(aoi_id: int, path=DELINEATION):
     return pyogrio.read_dataframe(path, where=f"source_aoi LIKE '%\\_{aoi_id:03d}\\_delineation'")
 
 
-def counts_per_field(field_index, classes, n_fields: int, n_classes: int = 6) -> np.ndarray:
+def counts_per_field(field_index, classes, n_fields: int, n_classes: int = 7) -> np.ndarray:
     """(n_fields, n_classes) pixel counts from a raster of field indices (-1 = no field) and classes."""
     f = np.asarray(field_index).ravel()
     c = np.asarray(classes).ravel()
@@ -150,14 +150,32 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final") -> pd
         if fields.empty:
             rows.append({"aoi": f"aoi{aoi_id}", "fields": 0})
             continue
-        fields.to_file(Path(out_dir) / f"aoi{aoi_id}_fields_monsoon2026.gpkg", layer="fields", driver="GPKG")
+        # second opinion (analysis/field_level): the rule re-run on the field's mean curves
+        fl_path = Path(SRC) / "report" / "field_level" / f"aoi{aoi_id}.parquet"
+        if fl_path.exists():
+            # positional: field_level kept this AOI's fields with >= MIN_PX pixels inside the AOI, in
+            # label_aoi's order (a uid is only unique within a tile, so no join on it)
+            from .field_level import MIN_PX
+
+            fl = pd.read_parquet(fl_path)
+            owner = np.where(classes.ravel() != NODATA, idx.ravel(), -1)
+            keep = np.bincount(owner[owner >= 0], minlength=len(fields)) >= MIN_PX
+            rule = np.full(len(fields), -1)
+            if int(keep.sum()) == len(fl) and (fl["label"].to_numpy() == fields["label"].to_numpy()[keep]).all():
+                rule[keep] = fl["field_rule_label"].to_numpy()
+            fields["field_rule_label"] = rule
+            fields["label_confidence"] = np.where(fields["field_rule_label"] < 0, "not checked (small field)",
+                                            np.where(fields["field_rule_label"] == fields["label"], "high", "mixed"))
+        out_file = Path(out_dir) / f"aoi{aoi_id}_fields_monsoon2026.gpkg"
+        out_file.unlink(missing_ok=True)         # a fresh file: new columns cannot be added to an old layer
+        fields.to_file(out_file, layer="fields", driver="GPKG")
         # the same pixels as the pixel map, each with its field's label: acres inside the AOI,
         # directly comparable with the pixel map (field polygons reach beyond the AOI edge)
         fmap = field_label_raster(idx, fields["label"].to_numpy(), classes)
         inside = {}
         for tag, arr in (("pixelmap", classes), ("fieldmap", fmap)):
-            counts = np.bincount(arr[arr != NODATA], minlength=6)
-            for k in range(6):
+            counts = np.bincount(arr[arr != NODATA], minlength=mr.N_CLASSES)
+            for k in range(mr.N_CLASSES):
                 inside[f"{mr.CLASSES[k]}_acres_{tag}"] = round(mr.acres(int(counts[k])), 1)
         rows.append({"aoi": f"aoi{aoi_id}", "fields": len(fields),
                      "fields_without_pixel_centre": int((fields["pixels"] == 0).sum()),
@@ -183,3 +201,63 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def purity_by_shift(aoi_id: int, shifts_m=(0, 10, 20, 30), map_suffix: str = "_final", min_px: int = 9,
+                    directions=((1, 0), (0, 1))) -> pd.DataFrame:
+    """Registration check: mean label purity of the fields at their traced position and shifted.
+
+    If the tracing sits on the fields of the class map, moving it by 10-30 m must lower the share of
+    each field's pixels that agree with its majority; a maximum away from zero means an offset
+    between the delineation and the 10 m grid. Shifts east and north, averaged.
+    """
+    import rasterio
+    from rasterio.features import rasterize
+
+    fields = load_fields(aoi_id)
+    with rasterio.open(Path(SRC) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026{map_suffix}.tif") as ds:
+        classes = ds.read(1)
+        transform, crs = ds.transform, ds.crs
+    g = fields.to_crs(crs)
+    g["geometry"] = g.geometry.make_valid()
+    rows = []
+    for s in shifts_m:
+        vals = []
+        for dx, dy in ([(s * a, s * b) for a, b in directions] if s else [(0, 0)]):
+            geoms = g.geometry.translate(dx, dy)
+            order = np.argsort(-geoms.area.to_numpy())
+            idx = rasterize(((geom, int(i)) for i, geom in zip(order, geoms.to_numpy()[order])),
+                            out_shape=classes.shape, transform=transform, fill=-1, dtype="int32")
+            counts = counts_per_field(idx, classes, len(g))
+            n = counts.sum(axis=1)
+            ok = n >= min_px
+            vals.append(float((counts[ok].max(axis=1) / n[ok]).mean()))
+        rows.append({"aoi": f"aoi{aoi_id}", "shift_m": s, "mean_purity": round(float(np.mean(vals)), 4)})
+    return pd.DataFrame(rows)
+
+
+def label_change_by_shift(aoi_id: int, dx: float, dy: float, map_suffix: str = "_final") -> dict:
+    """Share of field acres whose plurality label changes when the tracing is moved by (dx, dy) m."""
+    import rasterio
+    from rasterio.features import rasterize
+
+    fields = load_fields(aoi_id)
+    with rasterio.open(Path(SRC) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026{map_suffix}.tif") as ds:
+        classes = ds.read(1)
+        transform, crs = ds.transform, ds.crs
+    g = fields.to_crs(crs)
+    g["geometry"] = g.geometry.make_valid()
+    labels = []
+    for geoms in (g.geometry, g.geometry.translate(dx, dy)):
+        order = np.argsort(-geoms.area.to_numpy())
+        idx = rasterize(((geom, int(i)) for i, geom in zip(order, geoms.to_numpy()[order])),
+                        out_shape=classes.shape, transform=transform, fill=-1, dtype="int32")
+        counts = counts_per_field(idx, classes, len(g))
+        labels.append(np.where(counts.sum(axis=1) > 0, counts.argmax(axis=1), -1))
+    ok = (labels[0] >= 0) & (labels[1] >= 0)
+    a = fields["area_acres"].to_numpy()
+    changed = ok & (labels[0] != labels[1])
+    rice_before = float(a[ok & (labels[0] == 1)].sum())
+    rice_after = float(a[ok & (labels[1] == 1)].sum())
+    return {"aoi": f"aoi{aoi_id}", "dx": dx, "dy": dy, "changed_acres_pct": round(100 * float(a[changed].sum() / a[ok].sum()), 2),
+            "rice_acres_change_pct": round(100 * (rice_after - rice_before) / max(rice_before, 1e-9), 2)}

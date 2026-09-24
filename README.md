@@ -247,6 +247,11 @@ writing `<aoi>_monsoon2026_final.tif` and `monsoon2026_final_acres.csv`.
 field polygon (`../data/delineation/`, from the field-delineation run) from the final map: one
 GeoPackage per AOI in `processed/_batch/s2_2026/fields/` and `field_acres_by_class.csv` (docs/14).
 
+**Final audit.** `python -m sar_pipeline.analysis.final_audit acquisition|bad-passes|missed-rice --ids <ids>`
+and `python -m sar_pipeline.analysis.field_level --ids <ids>` (docs/15). The artefact passes found by
+`bad-passes` are listed in `processed/_batch/s2_2026/report/final_audit/bad_passes_all.csv` and are
+dropped whenever the radar is read.
+
 **Delivery package.** `python -m sar_pipeline.delivery` copies every AOI's map to
 `processed/_batch/s2_2026/delivery/` as `<aoi>_standing_rice_<map date>.tif` with a colour table and
 class names, and writes `acres_by_class.csv` (every class per AOI, plus totals), `legend.csv` and
@@ -446,6 +451,7 @@ factor is the same named constant `SQM_PER_ACRE` everywhere it is needed
 | [12 Class 3, second look](docs/12_class3_second_look.md) | every no-field-data check on the rice-like fields without water: radar window, darkness, optical water, rainfall, L-band, galleries of 20 fields per AOI |
 | [13 Final map: relabels and sieve](docs/13_sieve_and_final_map.md) | the user's relabels, the minimum mapping unit chosen from the plot sizes, and the delivered acres |
 | [14 One label per field](docs/14_field_labels.md) | the delineated field polygons labelled from the final map, validation and acres |
+| [15 Final audit](docs/15_final_audit.md) | acquisition, artefact passes, field registration, the rule re-run per field, every class, young rice, final numbers |
 | [Glossary](docs/glossary.md) | a term is unclear |
 | [Developer: interfaces](docs/developer/interfaces.md) | changing code |
 | [Developer: testing](docs/developer/testing.md) | writing or running tests |

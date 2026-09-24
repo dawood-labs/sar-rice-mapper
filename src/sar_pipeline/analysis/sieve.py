@@ -60,10 +60,10 @@ def evaluate(aoi_ids, plots, sizes=(1, 2, 3, 4, 6, 10, 21, 40), src_root=SRC) ->
                     if code != NODATA:
                         row[f"{label}_pct"] = round(100 * float((g["cls"] == code).mean()), 2)
                 rows.append(row)
-            counts = np.bincount(s[s != NODATA], minlength=6)
+            counts = np.bincount(s[s != NODATA], minlength=mr.N_CLASSES)
             rows.append({"aoi": f"aoi{aoi_id}", "size": size, "set": "_acres", "region": "",
                          "pixels": int((s != NODATA).sum()),
-                         **{f"{mr.CLASSES[k]}_acres": round(mr.acres(int(counts[k])), 1) for k in range(6)}})
+                         **{f"{mr.CLASSES[k]}_acres": round(mr.acres(int(counts[k])), 1) for k in range(mr.N_CLASSES)}})
         nd.forget()
     return pd.DataFrame(rows)
 
@@ -80,5 +80,5 @@ def apply(aoi_id: int, size: int, src_root=SRC, suffix_in: str = "", suffix_out:
     out = src.with_name(f"aoi{aoi_id}_monsoon2026{suffix_out}.tif")
     with rasterio.open(out, "w", **profile) as dst:
         dst.write(s, 1)
-    counts = np.bincount(s[s != NODATA], minlength=6)
-    return {"aoi": f"aoi{aoi_id}", **{f"{mr.CLASSES[k]}_acres": round(mr.acres(int(counts[k])), 1) for k in range(6)}}
+    counts = np.bincount(s[s != NODATA], minlength=mr.N_CLASSES)
+    return {"aoi": f"aoi{aoi_id}", **{f"{mr.CLASSES[k]}_acres": round(mr.acres(int(counts[k])), 1) for k in range(mr.N_CLASSES)}}

@@ -28,6 +28,7 @@ LEGEND = {
     2: ("young", "a crop has started but has no full canopy yet on the map date", (170, 220, 120, 255)),
     3: ("rice-like, water not confirmed", "rice-like cycle standing on the map date, but no transplanting water in the radar", (245, 160, 40, 255)),
     4: ("harvested", "a rice-like cycle that was already cut before the map date", (150, 100, 60, 255)),
+    6: ("rice, standing, young", "a young rice crop on the map date: transplanting water confirmed by Sentinel-1 and canopy already visible (NDVI >= 0.30)", (110, 200, 60, 255)),
     5: ("rice-like curve, never bare", "the optical curve looks like rice but the radar shows trees or buildings all season (cloud/haze artefact); not rice", (140, 90, 190, 255)),
 }
 NODATA = 255

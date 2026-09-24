@@ -62,10 +62,33 @@ def read_track(loc: dict, track: str, window: int = 5):
             if ds.nodata is not None:
                 cube[cube == ds.nodata] = np.nan
             dates = [dt.datetime.strptime(d.rsplit("_", 1)[1], "%Y%m%d").date() for d in ds.descriptions]
+        for i in bad_pass_indices(loc, track, pol, dates):
+            cube[i] = np.nan                  # an artefact pass (docs/15): unusable, not a field event
         power = ss.to_linear(cube)
         smoothed = np.stack([uniform_filter(p, size=window, mode="nearest") for p in power])
         out[pol] = ss.to_db(smoothed)
     return pd.DatetimeIndex(pd.to_datetime(dates)), out
+
+
+#: Passes found to be artefacts (``final_audit.bad_passes``: a jump of 3 dB or more on ground that
+#: cannot change within a week). Local file, gitignored with everything under processed/.
+BAD_PASSES = "processed/_batch/s2_2026/report/final_audit/bad_passes_all.csv"
+_BAD_CACHE: dict = {}
+
+
+def bad_pass_indices(loc: dict, track: str, pol: str, dates) -> list[int]:
+    """Indices of ``dates`` that are recorded as artefact passes for this AOI, track and polarisation."""
+    from .. import config as config_mod
+
+    path = config_mod.repo_root() / BAD_PASSES
+    if "table" not in _BAD_CACHE:
+        _BAD_CACHE["table"] = pd.read_csv(path) if path.exists() else pd.DataFrame(columns=["aoi", "track", "pol", "date", "bad"])
+    b = _BAD_CACHE["table"]
+    if b.empty:
+        return []
+    sel = b[(b["bad"]) & (b["aoi"] == loc.get("aoi")) & (b["track"] == track) & (b["pol"] == pol)]
+    bad = set(pd.to_datetime(sel["date"]).dt.date)
+    return [i for i, d in enumerate(dates) if d in bad]
 
 
 def pair_offsets(dates_a, cube_a, dates_b, cube_b, pair_days: int = PAIR_DAYS):

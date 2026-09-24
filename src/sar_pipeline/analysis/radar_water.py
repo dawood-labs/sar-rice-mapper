@@ -186,7 +186,7 @@ FLOOD_EARLIEST = "2026-05-15"  # monsoon water only: the plots' floods all came 
 
 
 def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = "monsoon2026",
-                   window: int = 5) -> pd.DataFrame:
+                   window: int = 5, series=None) -> pd.DataFrame:
     """Per pixel: the flood searched over the whole bare period, and whether the field was ever bare.
 
     Why (docs/11): the first rule looked for the water only 10 days before to 15 days after the
@@ -210,10 +210,17 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
       the ground carried a canopy or buildings throughout, so a low optical trough there is haze.
 
     ``trough``/``climb`` datetime64 per pixel (NaT allowed); ``ndvi`` (windows, pixels) fitted NDVI.
+    ``series`` (optional): ``[(dates, {"VV": (dates, n), "VH": (dates, n)}), ...]`` per track, already
+    read, e.g. field means (``analysis/field_level``); then the AOI's stacks are not read.
     """
     import warnings
 
-    loc = pr.locate(aoi_id, 0, season_key=season_key)
+    if series is None:
+        loc = pr.locate(aoi_id, 0, season_key=season_key)
+        series = []
+        for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
+            dates, cubes = sar_curve.read_track(loc, track, window)
+            series.append((dates, {p: cubes[p].reshape(len(dates), -1) for p in ("VV", "VH")}))
     n = ndvi.shape[1]
     trough = np.asarray(trough).astype("datetime64[D]")
     climb = np.asarray(climb).astype("datetime64[D]")
@@ -226,10 +233,8 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
     vh_at_flood = np.full(n, np.nan)
     earliest = np.datetime64(FLOOD_EARLIEST)
     tracks = []
-    for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
-        dates, cubes = sar_curve.read_track(loc, track, window)
+    for dates, flat in series:
         day = pd.DatetimeIndex(dates).to_numpy().astype("datetime64[D]")
-        flat = {p: cubes[p].reshape(len(dates), -1) for p in ("VV", "VH")}
         drops = {p: local_drops(dates, flat[p]) for p in ("VV", "VH")}
         tracks.append((day, drops))
         rel = (day[:, None] - climb[None, :]) / np.timedelta64(1, "D")

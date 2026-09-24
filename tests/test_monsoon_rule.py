@@ -43,7 +43,7 @@ def test_classes_follow_trough_and_rise():
     ndvi, lswi, windows = _series()
     ev = mr.pixel_events(ndvi, lswi, windows)
     assert mr.classify(ev).tolist() == [3, 2, 0, 0, 0, 4, 0]   # no radar: standing rice unconfirmed; water->soil is no canopy; cut crop is 4; haze dip on a canopy is nothing
-    assert mr.classify(ev, radar_wet=[True] * 7).tolist() == [1, 2, 0, 0, 0, 4, 0]
+    assert mr.classify(ev, radar_wet=[True] * 7).tolist() == [1, 6, 0, 0, 0, 4, 0]   # the young crop with water is young rice
     assert ev.loc[0, "low_windows"] >= mr.LOW_WINDOWS_MIN and ev.loc[6, "low_windows"] < mr.LOW_WINDOWS_MIN
     assert ev.loc[0, "standing"] and not ev.loc[5, "standing"]
     assert ev.loc[0, "wet_open"] and ev.loc[0, "trough_ndvi"] < 0.1
@@ -70,3 +70,17 @@ def test_classify_sends_never_bare_unconfirmed_pixels_to_class_5_only():
     out = mr.classify(ev, radar_wet=wet, never_bare=never)
     # water confirmed wins over never-bare; never-bare only relabels the unconfirmed
     assert out.tolist() == [1, 5, 3]
+
+
+def test_young_with_water_and_visible_canopy_is_young_rice():
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import monsoon_rule as mr
+
+    # three young pixels (rise 0.2, peak 0.4): wet & visible, wet & too low, dry & visible
+    ev = pd.DataFrame({"valid": [True] * 3, "trough_ndvi": [0.1] * 3, "rise": [0.2] * 3,
+                       "peak_after": [0.4] * 3, "standing": [False] * 3, "low_windows": [10] * 3,
+                       "last_ndvi": [0.35, 0.25, 0.35]})
+    out = mr.classify(ev, radar_wet=np.array([True, True, False]))
+    assert out.tolist() == [6, 2, 2]

@@ -89,7 +89,12 @@ LOW_WINDOWS_MIN = 8
 WET_RISE_MIN = 0.15
 WET_LOOKBACK_DAYS, WET_LOOKAHEAD_DAYS = 60, 25
 CLASSES = {0: "not rice", 1: "rice", 2: "young", 3: "rice_unconfirmed", 4: "harvested",
-           5: "never_bare", 255: "no data"}
+           5: "never_bare", 6: "young_rice", 255: "no data"}
+N_CLASSES = 7
+#: A young crop is delivered as young rice (class 6) when its water is confirmed and its canopy is
+#: already visible on the map date: 95 % of the field plots' pixels that sat in "young" were at or
+#: above 0.30 (bare soil 0.15-0.25, open water 0-0.1). docs/15.
+YOUNG_VISIBLE = 0.30
 #: Water test versions: "v1" = dip at the optical trough only; "v2" (docs/11) = v1 OR the flood
 #: searched over the whole bare period, plus class 5 for "rice-like" curves on ground the radar
 #: shows was never bare (trees, houses: the optical trough there is haze).
@@ -170,7 +175,8 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
              canopy_min=CANOPY_MIN, young_canopy_min=YOUNG_CANOPY_MIN, radar_wet=None,
              low_windows_min: int = LOW_WINDOWS_MIN, never_bare=None):
     """0 not rice, 1 rice standing, 2 young, 3 standing with water unconfirmed, 4 harvested,
-    5 rice-like curve on ground that was never bare (radar), 255 no data.
+    5 rice-like curve on ground that was never bare (radar), 6 young rice (young, water confirmed,
+    canopy visible: last NDVI >= ``YOUNG_VISIBLE``), 255 no data.
 
     ``radar_wet`` (bool per pixel) splits the standing phenology-rice pixels into confirmed (1) and
     unconfirmed (3). Without it every such pixel is unconfirmed. ``never_bare`` (bool per pixel,
@@ -190,8 +196,11 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     out[rice & ~wet] = 3
     if never_bare is not None:
         out[rice & ~wet & np.asarray(never_bare, dtype=bool)] = 5
+    last = events["last_ndvi"].to_numpy() if "last_ndvi" in events else np.zeros(len(events))
+    young_rice = young & wet & (last >= YOUNG_VISIBLE)
     out[grown & ~standing] = 4
     out[young] = 2
+    out[young_rice] = 6
     out[~events["valid"].to_numpy()] = 255
     return out
 
@@ -219,6 +228,9 @@ def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
         events = pd.concat([events, dips], axis=1)
         if water == "v2":
             climb = pd.to_datetime(events["climb_date"]).to_numpy().astype("datetime64[D]")
+            # a young crop has not climbed yet: its flood is searched up to the map date instead
+            last = np.datetime64(pd.DatetimeIndex(d["windows"])[-1].date())
+            climb = np.where(np.isnat(climb), last, climb)
             climb = np.where(events["valid"].to_numpy(), climb, np.datetime64("NaT"))
             v2 = radar_water.water_evidence(aoi_id, trough, climb, ndvi, d["windows"], radar_season)
             events = pd.concat([events, v2], axis=1)
