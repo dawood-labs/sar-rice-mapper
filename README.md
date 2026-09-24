@@ -270,6 +270,13 @@ yellow / orange, trees and villages white, water black) and a 12-band monthly VH
 `... preview --ids <id>` saves a PNG of one AOI next to its final map. Values are dB x 100 (int16).
 How to load and read them in QGIS: docs/16.
 
+**Systematic review before fixing.** `scripts/review_batch.sh <ids>` runs `python -m sar_pipeline.review`
+for each AOI (two at a time, waiting for free RAM): a panel (latest clear S2, radar rice composite,
+field labels), per-field evidence and automatic suspect categories, delineation boundary checks with
+example crops, and curve + chip sheets for the largest suspects, under
+`processed/_batch/s2_2026/review/<aoi>/`. `scripts/review_render.sh <field_id> ...` draws more sheets
+(one at a time, behind a lock).
+
 **Delivery package.** `python -m sar_pipeline.delivery` copies every AOI's map to
 `processed/_batch/s2_2026/delivery/` as `<aoi>_standing_rice_<map date>.tif` with a colour table and
 class names, and writes `acres_by_class.csv` (every class per AOI, plus totals), `legend.csv` and

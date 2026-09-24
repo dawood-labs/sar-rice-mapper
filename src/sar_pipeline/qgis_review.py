@@ -264,7 +264,7 @@ def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect
     return info
 
 
-def inspect_field(field_id: str, out_dir=f"{OUT}/inspect") -> dict:
+def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = False) -> dict:
     """Curves (averaged over all the field's pixels) and chips with the field outline, by ``field_id``."""
     import numpy as np
 
@@ -296,7 +296,8 @@ def inspect_field(field_id: str, out_dir=f"{OUT}/inspect") -> dict:
                                                       label=f"field {field_id} ({len(fpids)} px)",
                                                       pids=fpids, outline=(ox, oy))
     info["events"] = {k: str(ev[k]) for k in ("trough_date", "climb_date", "trough_ndvi", "peak_after", "last_ndvi")}
-    nd.forget()
+    if not keep_cache:
+        nd.forget()
     info["figures"] = figs
     return info
 
