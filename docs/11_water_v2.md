@@ -56,8 +56,10 @@ kept. v2 adds a second way to confirm the water and a new class:
   - be **supported by a second pass** (any track) within 14 days that is also 2 dB below its own
     earlier level (`SUPPORT_MIN`): standing water lasts; one speckled pass does not.
 * **Class 5, never bare** — a rice-like optical curve whose radar shows a canopy or buildings all
-  season: VH within 20 days of the trough above -15 dB, and the second-darkest VH pass before the
-  climb above -17 dB (the second, so one outlier pass cannot decide). The optical trough there is
+  season: VH within 20 days of the trough above -15 dB, and the second-darkest VH pass of the whole
+  radar season, dry season included, above -17 dB (the second, so one outlier pass cannot decide; the
+  whole season, because a field that was bare and dry in April is a field, whatever grew on it later —
+  such dry-land crops stay in class 3). The optical trough there is
   haze. Class 5 is not rice.
 
 Class 1 = rice-like, standing, and water confirmed by v1 **or** v2. Class 3 = rice-like, standing,
@@ -72,21 +74,21 @@ no water by either test, and not class 5.
 | capital area | 87.9 % | 92.6 % |
 | region Y (late transplanting, crop still young) | 12.7 % | 13.9 % |
 
-* Class 3 on the plots fell from 4.6-6.6 % to 1.1-2.0 %.
-* Class 5 took 0.1-0.6 % of plot interiors and 0.5-2.1 % of plot edges.
+* Class 3 on the plots fell from 4.6-6.6 % to 1.2-2.2 %.
+* Class 5 took 0.0-0.2 % of plot interiors and 0.2-1.8 % of plot edges.
 * Evergreen, bare, water and cut-before-map-date negatives: **0 %** rice under both versions; the
   control AOI stays at 0 acres.
 * **Limit:** the negatives rarely pass the optical rule at all, so they test the water test only
   weakly. That is why every change above was also checked by eye on field-interior blocks, and why
   the flood test carries four independent conditions instead of one threshold.
 
-## Effect over the first 89 AOIs
+## Effect over all 132 AOIs
 
 | acres | v1 | v2 |
 |---|---|---|
-| rice, water confirmed | 33,258 | 38,038 |
-| standing rice-like, water unconfirmed | 18,906 | 8,937 |
-| never bare (trees, houses; not rice) | — | 5,189 |
+| rice, water confirmed | 36,477 | 41,798 |
+| standing rice-like, water unconfirmed | 21,438 | 12,082 |
+| never bare (trees, houses; not rice) | — | 4,036 |
 
 Young, harvested and not-rice acres do not change (the water test only splits standing rice-like
 pixels). What remains in class 3 is concentrated in a few northern AOIs whose blocks look like

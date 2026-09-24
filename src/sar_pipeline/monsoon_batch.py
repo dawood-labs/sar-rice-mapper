@@ -121,10 +121,12 @@ def wait_for_s2(aoi_id: int, log=print, status_of=None, sleep=None) -> list[str]
     return manifest.loc[manifest["task_id"].astype(str).isin(bad), "date"].astype(str).tolist()
 
 
-def rule(ids, out_csv=None, log=print) -> pd.DataFrame:
+def rule(ids, out_csv=None, log=print, water: str | None = None, suffix: str = "") -> pd.DataFrame:
     """Build the 5-day series (if missing) and run the rule for each AOI; acres per class in one table.
 
-    A failing AOI is recorded with its error and the others carry on.
+    A failing AOI is recorded with its error and the others carry on. ``water`` picks the water test
+    version (default ``monsoon_rule.WATER_DEFAULT``); ``suffix`` writes ``<aoi>_monsoon2026<suffix>.tif``
+    so another version can sit next to the delivered map for comparison.
     """
     from .analysis import monsoon_rule as mr
     from .analysis import ndvi_5day as nd
@@ -139,7 +141,7 @@ def rule(ids, out_csv=None, log=print) -> pd.DataFrame:
                 if failed:
                     log(f"aoi{aoi_id}: {len(failed)} Sentinel-2 dates failed; run s2-export again to retry them")
                 nd.build(aoi_id, log=log)
-            rows.append(mr.run_aoi(aoi_id))
+            rows.append(mr.run_aoi(aoi_id, water=water or mr.WATER_DEFAULT, suffix=suffix))
         except Exception as exc:  # keep the batch going; the table says which AOI failed
             log(f"aoi{aoi_id}: {type(exc).__name__}: {exc}")
             rows.append({"aoi": f"aoi{aoi_id}", "error": f"{type(exc).__name__}: {exc}"})
@@ -172,6 +174,8 @@ def main(argv=None) -> int:
     r = sub.add_parser("rule", help="5-day series + standing-rice rule, acres per class")
     r.add_argument("--ids", nargs="+", type=int, required=True)
     r.add_argument("--out", default=f"{OUT_ROOT}/monsoon2026_rule_acres_final.csv")
+    r.add_argument("--water", choices=("v1", "v2"), default=None, help="water test version (default: v2)")
+    r.add_argument("--suffix", default="", help="map file suffix, e.g. _v1 for a comparison map")
     args = p.parse_args(argv)
     if args.step == "s2-export":
         if not args.yes:
@@ -180,7 +184,7 @@ def main(argv=None) -> int:
         rows = s2_export(args.ids, limit=args.limit)
         print(f"submitted {len(rows)} dates for {len(args.ids)} AOIs")
     else:
-        print(rule(args.ids, out_csv=args.out).to_string(index=False))
+        print(rule(args.ids, out_csv=args.out, water=args.water, suffix=args.suffix).to_string(index=False))
     return 0
 
 

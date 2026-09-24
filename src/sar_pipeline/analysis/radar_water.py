@@ -181,7 +181,7 @@ FLOOD_VH_MAX = -19.0         # VH on the flood pass; plots: 90 % at or below -19
 FLOOD_NDVI_MAX = 0.5         # no canopy on the field at the flood date (a harvest is also a drop)
 SUPPORT_MIN = 2              # passes (any track) within 14 days that also show the drop
 VEG_VH_MIN = -15.0           # VH around the trough above this: a canopy or buildings, not a bare field
-VEG_FLOOD_VH_MIN = -17.0     # ... and never darker than this before the climb
+VEG_FLOOD_VH_MIN = -17.0     # ... and never darker than this in the whole radar season
 FLOOD_EARLIEST = "2026-05-15"  # monsoon water only: the plots' floods all came after this (99 %+)
 
 
@@ -205,7 +205,8 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
     * ``support``: passes (any track) within 14 days of it that also sit 2 dB below their earlier level;
     * ``flood_ok``: all four agree;
     * ``vh_at_trough`` and ``never_bare``: VH stayed high around the trough and its second-darkest
-      pass before the climb never went dark (one outlier pass is ignored):
+      pass of the whole radar season (dry season included) never went dark (one outlier pass is
+      ignored):
       the ground carried a canopy or buildings throughout, so a low optical trough there is haze.
 
     ``trough``/``climb`` datetime64 per pixel (NaT allowed); ``ndvi`` (windows, pixels) fitted NDVI.
@@ -238,7 +239,10 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
         with np.errstate(all="ignore"), warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             vh_min = np.fmin(vh_min, np.nanmin(np.where(span, flat["VH"], np.nan), axis=0))
-            cand = np.where(span & np.isfinite(flat["VH"]), flat["VH"], np.inf)
+            # over the WHOLE radar season, dry season included: a field that was bare and dry in
+            # April (VH -18 or darker) was a field, whatever grew on it later; only ground that never
+            # went dark (tree lines, gardens, houses) is "never bare"
+            cand = np.where(np.isfinite(flat["VH"]), flat["VH"], np.inf)
             vh_low2 = np.sort(np.concatenate([vh_low2, cand]), axis=0)[:2]
             vh_trough = np.fmax(vh_trough, np.nanmedian(np.where(near_t, flat["VH"], np.nan), axis=0))
             # the flood itself: monsoon passes only. A dry-season pass on a freshly harvested,
