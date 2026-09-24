@@ -39,6 +39,8 @@ VARIANTS = {
     "cs60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": False, "drop_haze": False},
     # hybrid: QA60 opaque cloud, Cloud Score+ for bright observations (cloud, haze), dark ones kept
     # ... and a blue-bright canopy removed as haze (ndvi_5day.HAZE_B2_MIN)
+    "hyb20": {"qa60_mode": "opaque", "cs_min": 20, "keep_dark": True, "drop_haze": True},
+    "hyb30": {"qa60_mode": "opaque", "cs_min": 30, "keep_dark": True, "drop_haze": True},
     "hyb40": {"qa60_mode": "opaque", "cs_min": 40, "keep_dark": True, "drop_haze": True},
     "hyb50": {"qa60_mode": "opaque", "cs_min": 50, "keep_dark": True, "drop_haze": True},
     "hyb60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": True, "drop_haze": True},
