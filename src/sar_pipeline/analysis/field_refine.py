@@ -41,8 +41,12 @@ SQM_PER_ACRE = 4046.8564224
 PIXEL_M2 = 100.0
 #: A polygon covered by smaller polygons over at least this share is a "monster" outline.
 MONSTER_COVER = 0.5
-#: What is left of a cut monster must be at least this many pixels, and not a strip, to stay.
+#: What is left of a cut monster must be at least this many pixels, not a strip, and in at most
+#: ``MAX_REMAINDER_PARTS`` pieces to stay: a remainder scattered in many small patches between the
+#: fields is the bund network and the unsegmented gaps, not a field (a 49-ac outline around dozens
+#: of fields left 6 ac in such patches).
 MIN_REMAINDER_PX = 4
+MAX_REMAINDER_PARTS = 3
 #: A strip: nothing of the polygon survives an erosion of half ``STRIP_MAX_WIDTH_M`` (no part is
 #: wider than 15 m) and its longest extent is over ``STRIP_MIN_LENGTH_M``. Why erosion and not
 #: 2 x area / perimeter: the traced outlines are so irregular that a 95 x 98 m field had a
@@ -139,6 +143,7 @@ def geometry_stage(fields, aoi_id: int | None = None):
     non-overlapping) and ``area_acres_delivered`` (the delineation's own value, for the record).
     """
     import geopandas as gpd
+    import shapely
 
     g = fields.reset_index(drop=True).copy()
     if "field_id" not in g:
@@ -160,7 +165,8 @@ def geometry_stage(fields, aoi_id: int | None = None):
     flag = np.full(len(m), "", dtype=object)
     monster = lost >= MONSTER_COVER
     thin = strip_before | (a1 <= 0)
-    drop = monster & ((a1 < MIN_REMAINDER_PX * PIXEL_M2) | thin)
+    parts = shapely.get_num_geometries(m.geometry.to_numpy())
+    drop = monster & ((a1 < MIN_REMAINDER_PX * PIXEL_M2) | thin | (parts > MAX_REMAINDER_PARTS))
     flag[monster & ~drop] = "monster_cut"
     flag[drop] = "monster_dropped"
     strip = thin & ~monster

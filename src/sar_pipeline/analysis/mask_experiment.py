@@ -39,9 +39,12 @@ VARIANTS = {
     "cs60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": False, "drop_haze": False},
     # hybrid: QA60 opaque cloud, Cloud Score+ for bright observations (cloud, haze), dark ones kept
     # ... and a blue-bright canopy removed as haze (ndvi_5day.HAZE_B2_MIN)
+    "hyb40": {"qa60_mode": "opaque", "cs_min": 40, "keep_dark": True, "drop_haze": True},
     "hyb50": {"qa60_mode": "opaque", "cs_min": 50, "keep_dark": True, "drop_haze": True},
     "hyb60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": True, "drop_haze": True},
     "hyb70": {"qa60_mode": "opaque", "cs_min": 70, "keep_dark": True, "drop_haze": True},
+    # QA60 opaque cloud + the blue-band haze test only, no Cloud Score+: does the haze test do the work?
+    "hazeonly": {"qa60_mode": "opaque", "cs_min": None, "keep_dark": False, "drop_haze": True},
 }
 OUT = f"{BASE}/report/mask_experiment"
 
