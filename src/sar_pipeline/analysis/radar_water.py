@@ -32,7 +32,11 @@ from . import sar_curve
 DRY_WINDOW = (-40, -15)
 FLOOD_WINDOW = (-10, 15)
 DIP_MIN_DB = 3.0
-V1_VH_MAX = -18.0      # the flood-window VH the v1 dip must reach (see pixel_dips)
+#: The flood-window VH the v1 dip must reach (see ``pixel_dips``). -17 and not -18: in the dry-zone
+#: plot AOI 10 % of the surveyed rice floods to only -17.5 dB (shallow water on light soils), while
+#: the harvest dips this guard is for (a canopy at -13 dB cut to -16) stay above it; the optical
+#: trough (bare for 40 days) and the fit floor already rule out the deeper harvest-drop cases.
+V1_VH_MAX = -17.0
 
 
 def dips_for_track(dates, cube, trough, dry=DRY_WINDOW, flood=FLOOD_WINDOW):
