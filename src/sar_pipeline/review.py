@@ -401,6 +401,47 @@ def delineation_examples(aoi_id: int, g, n: int = 2, half_m: float = 150, out_di
     return made
 
 
+# ---------------------------------------------------------------- cloud masks
+def mask_disagreement(aoi_id: int, start: str = "2026-05-15", end: str = "2026-09-24") -> pd.DataFrame:
+    """Per Sentinel-2 date: share of the AOI flagged by QA60 (opaque, cirrus) and share Cloud Score+ clear.
+
+    Why: the series uses QA60 (bits 10 and 11) as its only cloud mask. A reviewer found a monsoon date
+    that Cloud Score+ called 100 % clear while QA60 flagged every pixel as cirrus, i.e. the one clear
+    view of the transplanting water was thrown away. This table shows how often that happens. One file
+    is read at a time (light on memory).
+    """
+    import rasterio
+
+    from .analysis import ndvi_5day as nd
+    from .analysis import pixel_report as pr
+    from .optical_export import band_index
+
+    loc = pr.locate(aoi_id, 0)
+    inside = nd.inside_aoi(aoi_id)
+    nd.forget()
+    rows = []
+    for p in sorted(pr.sync_s2(loc, f"data/{nd.FOLDER}", nd.FOLDER).glob("*.tif")):
+        d = pd.Timestamp(p.stem.rsplit("_S2_", 1)[1])
+        if not (pd.Timestamp(start) <= d < pd.Timestamp(end)):
+            continue
+        with rasterio.open(p) as ds:
+            qa = ds.read(band_index(ds, "QA60")).ravel()[inside].astype("int64")
+            cs = ds.read(band_index(ds, "clear")).ravel()[inside]
+            b4 = ds.read(band_index(ds, "B4")).ravel()[inside]
+        v = b4 > 0
+        n = max(int(v.sum()), 1)
+        opaque = ((qa >> 10) & 1).astype(bool) & v
+        cirrus = ((qa >> 11) & 1).astype(bool) & v
+        clear_cs = (cs >= CLEAR_CS) & v
+        rows.append({"aoi": f"aoi{aoi_id}", "date": d.date(), "data_pct": round(100 * float(v.mean()), 1),
+                     "qa60_opaque_pct": round(100 * opaque.sum() / n, 1),
+                     "qa60_cirrus_pct": round(100 * cirrus.sum() / n, 1),
+                     "cs_clear_pct": round(100 * clear_cs.sum() / n, 1),
+                     "cs_clear_but_qa60_flagged_pct": round(100 * (clear_cs & (opaque | cirrus)).sum() / n, 1),
+                     "qa60_clear_but_cs_cloudy_pct": round(100 * (~clear_cs & ~(opaque | cirrus) & v).sum() / n, 1)})
+    return pd.DataFrame(rows)
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -411,6 +452,7 @@ def main(argv=None) -> int:
     p.add_argument("--render", nargs="+", default=[], metavar="FIELD_ID",
                    help="only draw curve + chip sheets for these fields (same AOI loaded once)")
     p.add_argument("--out", default=None, help="folder for --render (default: review/<aoi>/fields_extra)")
+    p.add_argument("--masks", action="store_true", help="only the QA60 vs Cloud Score+ table per date for --ids")
     args = p.parse_args(argv)
     if args.render:
         import matplotlib.pyplot as plt
@@ -433,6 +475,15 @@ def main(argv=None) -> int:
     import resource
     import time
 
+    if args.masks:
+        for a in args.ids:
+            t = mask_disagreement(a)
+            out = Path(OUT) / f"aoi{a}"
+            out.mkdir(parents=True, exist_ok=True)
+            t.to_csv(out / f"aoi{a}_mask_disagreement.csv", index=False)
+            print(f"aoi{a}: {len(t)} dates, {int((t['cs_clear_but_qa60_flagged_pct'] >= 50).sum())} dates where "
+                  f">= 50 % of the AOI is Cloud Score+ clear but QA60-flagged")
+        return 0
     for a in args.ids:
         t0 = time.time()
         r = review_aoi(a, args.per_category)
