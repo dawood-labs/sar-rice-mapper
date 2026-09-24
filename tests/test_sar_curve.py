@@ -95,3 +95,25 @@ def test_a_fit_that_overshoots_below_zero_power_returns_nan_not_a_floor():
     fitted = sc.whittaker_db(values, lmbd=0.001)
     assert not np.any(fitted < -60)
     assert np.isfinite(fitted).any()
+
+
+def test_box_mean_does_not_spread_one_missing_pixel():
+    """One NaN used to blank its whole row and column (issue 20); now the window just skips it."""
+    from sar_pipeline.analysis.sar_curve import box_mean
+
+    rng = np.random.default_rng(0)
+    img = rng.uniform(0.01, 0.1, size=(30, 30)).astype("float32")
+    plain = box_mean(img, 5)
+    img[10, 12] = np.nan
+    out = box_mean(img, 5)
+    assert np.isfinite(out).all()
+    # far from the hole the mean is the plain filter; around it, the mean of the 24 valid neighbours
+    assert np.allclose(out[0:5, 0:5], plain[0:5, 0:5])
+    assert abs(out[10, 12] - np.nanmean(img[8:13, 10:15])) < 1e-6
+    # a 3-column strip of missing data: every column inside it (at most 2 of 5 valid) stays
+    # missing, the columns beside it (3 of 5 valid) keep a value from their valid neighbours
+    img[:, 20:23] = np.nan
+    out = box_mean(img, 5)
+    assert np.isnan(out[:, 20:23]).all()
+    assert np.isfinite(out[:, [19, 23]]).all()
+    assert abs(out[5, 19] - np.nanmean(img[3:8, 17:22])) < 1e-6

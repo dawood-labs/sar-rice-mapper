@@ -175,13 +175,15 @@ def nan_spread(aoi_id: int, window: int = 5, pol: str = "VH") -> pd.DataFrame:
     Why: ``scipy.ndimage.uniform_filter`` keeps a running sum along each row and column, so one NaN
     pixel turns every later pixel of that line into NaN. A pass with a small no-data strip (issue 14)
     can then vanish over most of the AOI for the rule, the field curves and the radar composite.
-    ``expected_lost_pct`` is what a NaN-aware box mean would lose (the no-data pixels grown by the
-    window), ``lost_pct`` is what ``read_track`` loses now.
+    ``expected_lost_pct`` is the no-data grown by the window (an upper bound for a NaN-aware mean),
+    ``lost_pct`` is what ``read_track`` loses now. Before the fix (issue 20) the two differed by up
+    to 90 points; after it ``lost_pct`` must be at or below ``expected_lost_pct``.
     """
     import rasterio
-    from scipy.ndimage import binary_dilation, uniform_filter
+    from scipy.ndimage import binary_dilation
 
     from .analysis import pixel_report as pr
+    from .analysis import sar_curve
 
     loc = pr.locate(aoi_id, 0, season_key="monsoon2026")
     rows = []
@@ -194,7 +196,7 @@ def nan_spread(aoi_id: int, window: int = 5, pol: str = "VH") -> pd.DataFrame:
             bad = ~np.isfinite(a) | ((a == nodata) if nodata is not None else False)
             if bad.any():
                 power = np.where(bad, np.nan, 10 ** (a / 10))
-                lost = np.isnan(uniform_filter(power, size=window, mode="nearest"))
+                lost = np.isnan(sar_curve.box_mean(power, window))     # what read_track does now
                 grown = binary_dilation(bad, np.ones((window, window), bool))
             else:
                 lost = grown = bad

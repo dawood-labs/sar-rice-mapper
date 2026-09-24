@@ -52,7 +52,6 @@ def read_track(loc: dict, track: str, window: int = 5):
     readable at all.
     """
     import rasterio
-    from scipy.ndimage import uniform_filter
 
     stack = Path(loc["run"]) / "stack" / f"track_{track}"
     out, dates = {}, None
@@ -65,9 +64,38 @@ def read_track(loc: dict, track: str, window: int = 5):
         for i in bad_pass_indices(loc, track, pol, dates):
             cube[i] = np.nan                  # an artefact pass (docs/15): unusable, not a field event
         power = ss.to_linear(cube)
-        smoothed = np.stack([uniform_filter(p, size=window, mode="nearest") for p in power])
+        smoothed = np.stack([box_mean(p, window) for p in power])
         out[pol] = ss.to_db(smoothed)
     return pd.DatetimeIndex(pd.to_datetime(dates)), out
+
+
+#: A box mean keeps its value while at least this share of the window has data. Half: a pixel next
+#: to a no-data strip still has 10-15 of its 25 neighbours, enough to cut speckle; a pixel inside
+#: the strip has none and stays missing.
+MIN_VALID_SHARE = 0.5
+
+
+def box_mean(img: np.ndarray, window: int, min_valid_share: float = MIN_VALID_SHARE) -> np.ndarray:
+    """``window`` x ``window`` mean of the finite values only (NaN-aware).
+
+    Why: ``scipy.ndimage.uniform_filter`` propagates NaN along its running sums, so one no-data
+    pixel used to blank every later pixel of its row and column and a 2 % no-data strip removed a
+    pass over most of an AOI (fix plan, issue 20). Here the sum and the count of valid pixels are
+    filtered separately and divided; where fewer than ``min_valid_share`` of the window has data
+    the result is NaN. With no NaN in the image this equals the plain uniform filter.
+    """
+    from scipy.ndimage import uniform_filter
+
+    if window == 1:
+        return img
+    valid = np.isfinite(img)
+    if valid.all():
+        return uniform_filter(img, size=window, mode="nearest")
+    total = uniform_filter(np.where(valid, img, 0).astype("float32"), size=window, mode="nearest")
+    share = uniform_filter(valid.astype("float32"), size=window, mode="nearest")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(share >= min_valid_share, total / share, np.nan)
+    return out.astype("float32")
 
 
 #: Passes found to be artefacts (``final_audit.bad_passes``: a jump of 3 dB or more on ground that
