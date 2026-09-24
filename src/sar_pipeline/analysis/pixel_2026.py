@@ -276,7 +276,8 @@ def plot_curve(p: dict, found: pd.DataFrame, chip_dates=(), width: float = 16, h
 
 
 def plot_chips(picked: pd.DataFrame, chips, clear, dates, found: pd.DataFrame, half: int = HALF,
-               stretch: str = "chip", cols: int = 7, size: float = 2.7, gamma: float = GAMMA, box: int = 3):
+               stretch: str = "chip", cols: int = 7, size: float = 2.7, gamma: float = GAMMA, box: int = 3,
+               outline=None):
     """The picked chips in date order, pixel marked, crop-date chips framed in the date's colour."""
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
@@ -297,7 +298,10 @@ def plot_chips(picked: pd.DataFrame, chips, clear, dates, found: pd.DataFrame, h
     for ax, i, (_, row) in zip(axes.ravel(), idx, picked.iterrows()):
         lim = stretch_limits(chips[i:i + 1], clear[i:i + 1]) if stretch == "chip" else limits
         ax.imshow(to_display(chips[i], lim) ** gamma, interpolation="nearest")
-        ax.add_patch(Rectangle((half - box / 2, half - box / 2), box, box, fill=False, ec="#ff00ff", lw=1.4))
+        if outline is not None:                       # (xs, ys) in chip pixel coordinates, e.g. a field
+            ax.plot(outline[0], outline[1], color="#ff00ff", lw=1.2)
+        else:
+            ax.add_patch(Rectangle((half - box / 2, half - box / 2), box, box, fill=False, ec="#ff00ff", lw=1.4))
         label = f"{row['date']:%d %b %Y}\nclear {row['chip_clear_pct']:.0f}%"
         near = [v for k, v in crop_dates.items() if abs((k - row["date"]).days) <= 7]
         if near:

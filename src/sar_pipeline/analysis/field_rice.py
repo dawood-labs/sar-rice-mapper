@@ -94,6 +94,8 @@ def label_aoi(aoi_id: int, map_suffix: str = "_final", src_root=SRC, path=DELINE
                            geometry=fields.geometry.reset_index(drop=True), crs=fields.crs)
     out["class_name"] = out["label"].map({k: v for k, v in mr.CLASSES.items()})
     out["aoi"] = f"aoi{aoi_id}"
+    # the delineation's uid repeats across tiles and AOIs: a unique id per field of this delivery
+    out.insert(0, "field_id", [f"aoi{aoi_id}_{i:06d}" for i in range(len(out))])
     return out, idx, classes
 
 

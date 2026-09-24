@@ -373,7 +373,7 @@ def block_pids(center: int, width: int, height: int, block: int = 5) -> np.ndarr
 
 
 def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: str = "",
-                season=("2026-03-15", "2026-09-24")):
+                season=("2026-03-15", "2026-09-24"), pids=None, outline=None, file_stem: str | None = None):
     """A block of pixels from the middle of a field, optical and radar on one time axis, plus chips.
 
     Top: per date the median raw NDVI of the block's QA60-clear pixels (filled when most of the
@@ -392,7 +392,9 @@ def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: s
 
     d = nd.load(aoi_id)
     g = d["loc"]["grid"]
-    pids = block_pids(center, int(g["width"]), int(g["height"]), block)
+    if pids is None:
+        pids = block_pids(center, int(g["width"]), int(g["height"]), block)
+    pids = np.asarray(pids)
     dates = pd.DatetimeIndex(d["dates"])
     ndvi = d["ndvi"].reshape(len(dates), -1)[:, pids]
     ok = d["ok"].reshape(len(dates), -1)[:, pids]
@@ -403,7 +405,11 @@ def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: s
             raw = np.nanmedian(np.where(ok, ndvi, np.nan), axis=1)
     table, chips, clear = p26.chip_stack(aoi_id, int(center))
     h, b = p26.HALF, block // 2
-    cs_share = (clear[:, h - b:h + b + 1, h - b:h + b + 1] >= p26.CLEAR_MIN).mean(axis=(1, 2))
+    r0, c0 = divmod(int(center), int(g["width"]))
+    rr, cc = np.divmod(pids, int(g["width"]))
+    rr, cc = rr - r0 + h, cc - c0 + h
+    inchip = (rr >= 0) & (rr < clear.shape[1]) & (cc >= 0) & (cc < clear.shape[2])
+    cs_share = (clear[:, rr[inchip], cc[inchip]] >= p26.CLEAR_MIN).mean(axis=1)
     cs = pd.Series(cs_share, index=pd.DatetimeIndex(table["date"]))
     windows = pd.DatetimeIndex(d["windows"])
     fit = np.nanmedian(d["ndvi5d"].reshape(len(windows), -1)[:, pids], axis=1)
@@ -431,7 +437,7 @@ def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: s
     a1.set_ylim(-0.3, 1.05)
     a1.set_ylabel("NDVI / LSWI (block median)")
     a1.legend(frameon=False, fontsize=8, ncol=2, loc="lower left")
-    a1.set_title(f"aoi{aoi_id} block of {len(pids)} px around {center} {label}", loc="left", fontsize=11, color=INK)
+    a1.set_title(f"aoi{aoi_id} {len(pids)} px around {center} {label}", loc="left", fontsize=11, color=INK)
     loc = pr.locate(aoi_id, int(center), season_key="monsoon2026")
     colours = ["#b45f06", "#2a78d6", "#7a3ab4"]
     for k, track in enumerate([t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]):
@@ -444,14 +450,15 @@ def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: s
     fig.tight_layout()
     picked = table[(table["date"] >= t0) & (table["date"] < t1)]
     picked = picked[cs.reindex(picked["date"]).to_numpy() >= 0.5]
-    sheet = (p26.plot_chips(picked, chips, clear, table["date"].to_numpy(), pd.DataFrame(), box=block)
-             if len(picked) else None)
+    sheet = (p26.plot_chips(picked, chips, clear, table["date"].to_numpy(), pd.DataFrame(), box=block,
+                            outline=outline) if len(picked) else None)
     if out_dir:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out / f"aoi{aoi_id}_block{center}_curve.png", dpi=90, facecolor=SURFACE)
+        stem = file_stem or f"aoi{aoi_id}_block{center}"
+        fig.savefig(out / f"{stem}_curve.png", dpi=90, facecolor=SURFACE)
         if sheet is not None:
-            sheet.savefig(out / f"aoi{aoi_id}_block{center}_chips.png", dpi=70, facecolor=SURFACE)
+            sheet.savefig(out / f"{stem}_chips.png", dpi=70, facecolor=SURFACE)
     plt.close(fig)
     if sheet is not None:
         plt.close(sheet)
@@ -669,7 +676,9 @@ def block_series(aoi_id: int, center: int, block: int = 5, season=("2026-03-15",
 
     d = nd.load(aoi_id)
     g = d["loc"]["grid"]
-    pids = block_pids(center, int(g["width"]), int(g["height"]), block)
+    if pids is None:
+        pids = block_pids(center, int(g["width"]), int(g["height"]), block)
+    pids = np.asarray(pids)
     dates = pd.DatetimeIndex(d["dates"])
     ndvi = d["ndvi"].reshape(len(dates), -1)[:, pids]
     ok = d["ok"].reshape(len(dates), -1)[:, pids]

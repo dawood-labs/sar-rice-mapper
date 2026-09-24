@@ -252,6 +252,14 @@ and `python -m sar_pipeline.analysis.field_level --ids <ids>` (docs/15). The art
 `bad-passes` are listed in `processed/_batch/s2_2026/report/final_audit/bad_passes_all.csv` and are
 dropped whenever the radar is read.
 
+**Checking the maps by eye.** `python -m sar_pipeline.qgis_review build --review-ids <ids>` writes to
+`processed/_batch/s2_2026/qgis_review/`: one mosaic of all map versions (a band per version, style
+`classes.qml`), all fields in one GeoPackage (each with a unique `field_id`), and `review_aois.csv`.
+To look at a field or a pixel (NDVI curve, radar curves, Sentinel-2 chips), open
+`notebooks/08_inspect_field_or_pixel.ipynb` and give a `field_id`, or an AOI and pixel id (band 1 of
+`processed/aoi<N>/monsoon2026/grid/pixel_index.tif`); or on the command line:
+`python -m sar_pipeline.qgis_review field aoi116_000002` / `... pixel --aoi 116 --pid 317933`.
+
 **Delivery package.** `python -m sar_pipeline.delivery` copies every AOI's map to
 `processed/_batch/s2_2026/delivery/` as `<aoi>_standing_rice_<map date>.tif` with a colour table and
 class names, and writes `acres_by_class.csv` (every class per AOI, plus totals), `legend.csv` and
