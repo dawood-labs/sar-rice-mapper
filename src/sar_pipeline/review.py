@@ -295,7 +295,7 @@ def panel(aoi_id: int, out_dir=OUT) -> Path:
                               "radar: R VH Aug-Sep, G VH min Jun-Jul, B VH Apr (red = paddy)")):
         a.imshow(img, interpolation="nearest")
         a.set_title(title, fontsize=9)
-    axes[3].imshow(fmap, cmap=ListedColormap([COLOURS[k][1] for k in range(7)]), vmin=-0.5, vmax=6.5,
+    axes[3].imshow(fmap, cmap=ListedColormap([COLOURS[k][1] for k in range(len(COLOURS))]), vmin=-0.5, vmax=len(COLOURS) - 0.5,
                    interpolation="nearest")
     axes[3].set_title("field labels: dark green rice, light green young rice, pale young, orange 3, "
                       "brown harvested, purple never bare, grey not rice", fontsize=8)

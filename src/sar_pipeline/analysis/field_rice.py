@@ -36,14 +36,30 @@ DELINEATION = "../data/delineation/fields.gpkg"   # the delineation run's merged
 NODATA = 255
 
 
-def load_fields(aoi_id: int, path=DELINEATION):
-    """The delineated fields of one AOI (``source_aoi`` names end in ``_<NNN>_delineation``)."""
+#: Refined delineation per AOI (``analysis/field_refine``, fix plan stage 3): used when it exists.
+REFINED = f"{SRC}/fields_refined"
+
+
+def refined_path(aoi_id: int, refined_dir=REFINED) -> Path:
+    return Path(refined_dir) / f"aoi{aoi_id}_delineation_refined.gpkg"
+
+
+def load_fields(aoi_id: int, path=DELINEATION, refined_dir=REFINED):
+    """The delineated fields of one AOI (``source_aoi`` names end in ``_<NNN>_delineation``).
+
+    When ``field_refine`` has written a refined file for the AOI it is read instead of the raw
+    delineation; its ``field_id`` column then keeps the ids of the raw file (same order), so
+    reviews and deliveries can be followed across versions.
+    """
     import pyogrio
 
+    r = refined_path(aoi_id, refined_dir) if refined_dir else None
+    if r is not None and r.exists():
+        return pyogrio.read_dataframe(r)
     return pyogrio.read_dataframe(path, where=f"source_aoi LIKE '%\\_{aoi_id:03d}\\_delineation'")
 
 
-def counts_per_field(field_index, classes, n_fields: int, n_classes: int = 7) -> np.ndarray:
+def counts_per_field(field_index, classes, n_fields: int, n_classes: int = mr.N_CLASSES) -> np.ndarray:
     """(n_fields, n_classes) pixel counts from a raster of field indices (-1 = no field) and classes."""
     f = np.asarray(field_index).ravel()
     c = np.asarray(classes).ravel()
@@ -90,26 +106,55 @@ def label_aoi(aoi_id: int, map_suffix: str = "_final", src_root=SRC, path=DELINE
     fallback = np.full(len(g), NODATA)
     fallback[inside] = classes[rows[inside], cols[inside]]
     lab = label_from_counts(counts, fallback)
-    out = gpd.GeoDataFrame(pd.concat([fields[["uid", "area_acres", "Confidence"]].reset_index(drop=True), lab], axis=1),
+    keep = [c for c in ("uid", "area_acres", "Confidence", "is_field", "refine_flag", "area_acres_delivered",
+                        "overlap_lost_share") if c in fields]
+    out = gpd.GeoDataFrame(pd.concat([fields[keep].reset_index(drop=True), lab], axis=1),
                            geometry=fields.geometry.reset_index(drop=True), crs=fields.crs)
     out["class_name"] = out["label"].map({k: v for k, v in mr.CLASSES.items()})
     out["aoi"] = f"aoi{aoi_id}"
     # the delineation's uid repeats across tiles and AOIs: a unique id per field of this delivery
-    out.insert(0, "field_id", [f"aoi{aoi_id}_{i:06d}" for i in range(len(out))])
+    # (a refined file already carries the ids of the raw file)
+    ids = fields["field_id"].reset_index(drop=True) if "field_id" in fields else \
+        pd.Series([f"aoi{aoi_id}_{i:06d}" for i in range(len(out))])
+    out.insert(0, "field_id", ids)
+    if "is_field" not in out:
+        out["is_field"], out["refine_flag"] = True, ""
     return out, idx, classes
 
 
+def water_share_per_field(aoi_id: int, idx, n_fields: int, out_root=SRC) -> np.ndarray:
+    """Share of each field's pixels that were water all season (fitted NDVI < 0.10 in >= 80 % of
+    windows, the ``validation.reference_sets`` definition): ponds and channels traced as fields."""
+    from . import ndvi_5day as nd
+
+    d = nd.load(aoi_id, out_root=out_root)
+    ndvi = d["ndvi5d"].reshape(d["ndvi5d"].shape[0], -1)
+    with np.errstate(invalid="ignore"):
+        water = np.nanmean(ndvi < 0.10, axis=0) >= 0.80
+    f = np.asarray(idx).ravel()
+    ok = f >= 0
+    n = np.bincount(f[ok], minlength=n_fields)
+    w = np.bincount(f[ok], weights=water[ok].astype(float), minlength=n_fields)
+    nd.forget()
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(n > 0, w / np.maximum(n, 1), 0.0)
+
+
 def acres_by_label(fields) -> dict:
+    """Acres per class of the delineated fields (their own ``area_acres``; flagged non-fields excluded)."""
+    f = fields[fields["is_field"]] if "is_field" in fields else fields
     return {f"{mr.CLASSES.get(k, k)}_acres": round(float(v), 1)
-            for k, v in fields.groupby("label")["area_acres"].sum().items()}
+            for k, v in f.groupby("label")["area_acres"].sum().items()}
 
 
 def field_label_raster(field_index, labels, classes) -> np.ndarray:
-    """Every pixel takes its field's label; pixels in no field keep their own class; no-data stays."""
+    """Every pixel takes its field's label; pixels in no field, or in a polygon whose label is -1
+    (a flagged non-field: strip, pond, dropped outline), keep their own class; no-data stays."""
     idx = np.asarray(field_index)
     lab = np.asarray(labels)
     out = np.asarray(classes).copy()
     inf = idx >= 0
+    inf[inf] = lab[idx[inf]] >= 0
     out[inf] = lab[idx[inf]]
     out[np.asarray(classes) == NODATA] = NODATA
     return out.astype("uint8")
@@ -142,8 +187,14 @@ def evaluate(aoi_ids, plots, map_suffix: str = "_final") -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final") -> pd.DataFrame:
-    """Label the fields of every AOI; one GeoPackage per AOI and ``field_acres_by_class.csv``."""
+def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refine: bool = True) -> pd.DataFrame:
+    """Label the fields of every AOI; one GeoPackage per AOI and ``field_acres_by_class.csv``.
+
+    With ``refine`` (and a refined delineation for the AOI) the label-aware refinement runs after
+    labelling: slivers merge into same-label neighbours and all-season water is flagged as pond.
+    """
+    from . import field_refine
+
     ids = aoi_ids or sorted(int(p.parent.name[3:]) for p in Path(SRC).glob(f"aoi*/aoi*_monsoon2026{map_suffix}.tif"))
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     rows = []
@@ -152,6 +203,9 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final") -> pd
         if fields.empty:
             rows.append({"aoi": f"aoi{aoi_id}", "fields": 0})
             continue
+        if refine and refined_path(aoi_id).exists():
+            share = water_share_per_field(aoi_id, idx, len(fields))
+            fields = field_refine.label_stage(fields, share)
         # second opinion (analysis/field_level): the rule re-run on the field's mean curves
         fl_path = Path(SRC) / "report" / "field_level" / f"aoi{aoi_id}.parquet"
         if fl_path.exists():
@@ -173,7 +227,7 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final") -> pd
         fields.to_file(out_file, layer="fields", driver="GPKG")
         # the same pixels as the pixel map, each with its field's label: acres inside the AOI,
         # directly comparable with the pixel map (field polygons reach beyond the AOI edge)
-        fmap = field_label_raster(idx, fields["label"].to_numpy(), classes)
+        fmap = field_label_raster(idx, np.where(fields["is_field"], fields["label"], -1).astype("int64"), classes)
         inside = {}
         for tag, arr in (("pixelmap", classes), ("fieldmap", fmap)):
             counts = np.bincount(arr[arr != NODATA], minlength=mr.N_CLASSES)

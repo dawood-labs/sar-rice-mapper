@@ -30,7 +30,8 @@ OUT = f"{SRC}/qgis_review"
 VERSIONS = (("rule_v1", "_v1"), ("rule_current", ""), ("final_previous", "_final_prev"), ("final_current", "_final"))
 COLOURS = {0: ("not rice", "#e6e6e6"), 1: ("rice, standing", "#008c3c"), 2: ("young", "#aadc78"),
            3: ("rice-like, water not confirmed", "#f5a028"), 4: ("harvested", "#96643c"),
-           5: ("never bare (trees/houses)", "#8c5abe"), 6: ("young rice, standing", "#6ec83c")}
+           5: ("never bare (trees/houses)", "#8c5abe"), 6: ("young rice, standing", "#6ec83c"),
+           7: ("flooded, not yet green", "#3c78c8"), 8: ("cut crop, water not confirmed", "#c8aa78")}
 
 
 def version_files(suffix: str, src_root=SRC) -> list[str]:

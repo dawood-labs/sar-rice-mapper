@@ -203,11 +203,11 @@ def preview(aoi_id: int, lo: float = -26, hi: float = -12, out_dir=OUT) -> Path:
     with rasterio.open(f"processed/_batch/s2_2026/aoi{aoi_id}/aoi{aoi_id}_monsoon2026_final.tif") as ds:
         c = ds.read(1).astype("float32")
     c[c == 255] = np.nan
-    cmap = ListedColormap([COLOURS[k][1] for k in range(7)])
+    cmap = ListedColormap([COLOURS[k][1] for k in range(len(COLOURS))])
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(16, 9))
     a1.imshow(img, interpolation="nearest")
     a1.set_title(f"aoi{aoi_id}: R = VH Aug-Sep, G = VH min Jun-Jul, B = VH Apr ({lo}..{hi} dB)", fontsize=10)
-    a2.imshow(c, cmap=cmap, vmin=-0.5, vmax=6.5, interpolation="nearest")
+    a2.imshow(c, cmap=cmap, vmin=-0.5, vmax=len(COLOURS) - 0.5, interpolation="nearest")
     a2.set_title("final class map (green rice, light green young rice, orange class 3, grey not rice)", fontsize=10)
     for a in (a1, a2):
         a.set_xticks([]), a.set_yticks([])
@@ -290,7 +290,7 @@ def preview_single(path, aoi_id: int, ranges=((-25, -10), (-20, -4), (-25, -10))
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(16, 9))
     a1.imshow(img, interpolation="nearest")
     a1.set_title(f"{Path(path).stem}: R = VH, G = VV, B = VH", fontsize=10)
-    a2.imshow(c, cmap=ListedColormap([COLOURS[k][1] for k in range(7)]), vmin=-0.5, vmax=6.5, interpolation="nearest")
+    a2.imshow(c, cmap=ListedColormap([COLOURS[k][1] for k in range(len(COLOURS))]), vmin=-0.5, vmax=len(COLOURS) - 0.5, interpolation="nearest")
     a2.set_title("final class map", fontsize=10)
     for a in (a1, a2):
         a.set_xticks([]), a.set_yticks([])

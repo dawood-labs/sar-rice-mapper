@@ -89,8 +89,16 @@ LOW_WINDOWS_MIN = 8
 WET_RISE_MIN = 0.15
 WET_LOOKBACK_DAYS, WET_LOOKAHEAD_DAYS = 60, 25
 CLASSES = {0: "not rice", 1: "rice", 2: "young", 3: "rice_unconfirmed", 4: "harvested",
-           5: "never_bare", 6: "young_rice", 255: "no data"}
-N_CLASSES = 7
+           5: "never_bare", 6: "young_rice", 7: "flooded_not_green", 8: "cut_unconfirmed", 255: "no data"}
+N_CLASSES = 9
+#: Report classes (fix plan, stage 2.5). 7 "flooded, not yet green": a confirmed radar flood within
+#: ``FLOODED_RECENT_DAYS`` of the map date and no canopy yet (last fitted NDVI below
+#: ``FLOODED_NDVI_MAX``): the next map's rice, hidden in "not rice" before (issue 22). 8 "cut crop,
+#: water not confirmed": a rice-like cycle cut before the map date without transplanting water,
+#: which the review found to be mostly rain-fed dry-land crops (issue 18), separated from class 4
+#: (harvested with water) so the harvested-paddy acres are not inflated.
+FLOODED_RECENT_DAYS = 45
+FLOODED_NDVI_MAX = 0.20
 #: A young crop is delivered as young rice (class 6) when its water is confirmed and its canopy is
 #: already visible on the map date: 95 % of the field plots' pixels that sat in "young" were at or
 #: above 0.30 (bare soil 0.15-0.25, open water 0-0.1). docs/15.
@@ -204,7 +212,8 @@ def low_run(ndvi, trough_idx, level: float, reach: int = 8) -> np.ndarray:
 
 def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, young_min=YOUNG_MIN,
              canopy_min=CANOPY_MIN, young_canopy_min=YOUNG_CANOPY_MIN, radar_wet=None,
-             low_windows_min: int = LOW_WINDOWS_MIN, never_bare=None, radar_trough: bool = False):
+             low_windows_min: int = LOW_WINDOWS_MIN, never_bare=None, radar_trough: bool = False,
+             map_date=None):
     """0 not rice, 1 rice standing, 2 young, 3 standing with water unconfirmed, 4 harvested,
     5 rice-like curve on ground that was never bare (radar), 6 young rice (young, water confirmed,
     canopy visible: last NDVI >= ``YOUNG_VISIBLE``), 255 no data.
@@ -214,7 +223,8 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     ``radar_water.water_evidence``) moves unconfirmed pixels whose radar shows a canopy or buildings
     all season to class 5. With ``radar_trough`` (see ``RADAR_TROUGH_DEFAULT``) a pixel whose
     optical trough failed (hidden by cloud, or a short fallow) is still rice / young rice when its
-    confirmed radar flood is followed by the same climb (``radar_trough_events`` columns).
+    confirmed radar flood is followed by the same climb (``radar_trough_events`` columns). With
+    ``map_date`` (the last window) the report classes 7 and 8 are assigned (see ``FLOODED_RECENT_DAYS``).
     """
     out = np.zeros(len(events), dtype="uint8")
     low = events["trough_ndvi"] <= trough_max
@@ -240,9 +250,16 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     out[rice & ~wet] = 3
     last = events["last_ndvi"].to_numpy() if "last_ndvi" in events else np.zeros(len(events))
     young_rice = young & wet & (last >= YOUNG_VISIBLE)
-    out[grown & ~standing] = 4
+    out[grown & ~standing & wet] = 4
+    out[grown & ~standing & ~wet] = 8
     out[young] = 2
     out[young_rice] = 6
+    if map_date is not None and "flood_ok" in events and "flood_date" in events:
+        with np.errstate(invalid="ignore"):
+            since = (np.datetime64(pd.Timestamp(map_date).date()) - pd.to_datetime(events["flood_date"]).to_numpy()
+                     .astype("datetime64[D]")) / np.timedelta64(1, "D")
+            recent = events["flood_ok"].to_numpy(dtype=bool) & (since >= 0) & (since <= FLOODED_RECENT_DAYS)
+        out[np.isin(out, (0, 2)) & recent & (last < FLOODED_NDVI_MAX)] = 7
     if never_bare is not None:
         # trees, gardens and houses: the radar never saw bare ground, so the optical "cycle" is
         # haze. Applied to every rice-like class (fix plan, issues 2 and 5; before only class 3),
@@ -250,7 +267,7 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
         nb = np.asarray(never_bare, dtype=bool)
         if "flood_ok" in events:
             nb &= ~events["flood_ok"].to_numpy(dtype=bool)
-        out[np.isin(out, (1, 2, 3, 4, 6)) & nb] = 5
+        out[np.isin(out, (1, 2, 3, 4, 6, 8)) & nb] = 5
     out[~events["valid"].to_numpy()] = 255
     return out
 
@@ -305,7 +322,7 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, ins
     shape = d["ndvi5d"].shape[1:]
     classes = classify(events, radar_wet=events["radar_wet"] if radar else None,
                        never_bare=events["never_bare"] if radar and "never_bare" in events else None,
-                       radar_trough=radar_trough and radar)
+                       radar_trough=radar_trough and radar, map_date=pd.DatetimeIndex(d["windows"])[-1])
     if inside_only:
         classes[~nd.inside_aoi(aoi_id)] = 255
     grid = d["loc"]["grid"]

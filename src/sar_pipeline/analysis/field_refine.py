@@ -78,7 +78,12 @@ def cut_overlaps(g):
     lost = np.zeros(len(g))
     for left, grp in pairs.groupby(level=0):
         smaller = shapely.union_all(geoms[grp["index_right"].to_numpy()])
-        new = shapely.difference(geoms[left], smaller)
+        try:
+            new = shapely.difference(geoms[left], smaller)
+        except shapely.errors.GEOSException:
+            # traced outlines can be topologically broken in ways make_valid does not repair;
+            # a zero buffer rebuilds both operands as clean polygons
+            new = shapely.difference(shapely.buffer(geoms[left], 0), shapely.buffer(smaller, 0))
         lost[left] = 1 - (shapely.area(new) / a[left] if a[left] > 0 else 0)
         geoms[left] = new
     return gpd.GeoSeries(geoms, index=g.index, crs=g.crs), lost
@@ -109,7 +114,7 @@ def geometry_stage(fields, aoi_id: int | None = None):
     g["area_acres_delivered"] = g["area_acres"] if "area_acres" in g else np.nan
     utm = _utm(g)
     m = g.to_crs(utm)
-    m["geometry"] = m.geometry.make_valid().simplify(SIMPLIFY_M, preserve_topology=True)
+    m["geometry"] = m.geometry.make_valid().simplify(SIMPLIFY_M, preserve_topology=True).make_valid()
     a0 = m.geometry.area.to_numpy()
     geoms, lost = cut_overlaps(m)
     m["geometry"] = geoms
@@ -209,13 +214,19 @@ def run_geometry(aoi_ids, out_dir=OUT) -> pd.DataFrame:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     rows = []
     for aoi_id in aoi_ids:
-        fields = field_rice.load_fields(aoi_id)
+        path = Path(out_dir) / f"aoi{aoi_id}_delineation_refined.gpkg"
+        if path.exists():
+            continue                                    # re-runnable after an interruption
+        fields = field_rice.load_fields(aoi_id, refined_dir=None)      # always the raw delineation
         if fields.empty:
             rows.append({"aoi": f"aoi{aoi_id}", "polygons": 0})
             continue
-        g = geometry_stage(fields, aoi_id)
-        path = Path(out_dir) / f"aoi{aoi_id}_delineation_refined.gpkg"
-        path.unlink(missing_ok=True)
+        try:
+            g = geometry_stage(fields, aoi_id)
+        except Exception as exc:  # keep the batch going; the table says which AOI failed
+            rows.append({"aoi": f"aoi{aoi_id}", "error": f"{type(exc).__name__}: {exc}"[:200]})
+            print(f"aoi{aoi_id}: FAILED {type(exc).__name__}: {exc}"[:200])
+            continue
         g.to_file(path, layer="fields", driver="GPKG")
         rows.append({"aoi": f"aoi{aoi_id}", **summary(g)})
     t = pd.DataFrame(rows)

@@ -42,7 +42,7 @@ def _series():
 def test_classes_follow_trough_and_rise():
     ndvi, lswi, windows = _series()
     ev = mr.pixel_events(ndvi, lswi, windows)
-    assert mr.classify(ev).tolist() == [3, 2, 0, 0, 0, 4, 0]   # no radar: standing rice unconfirmed; water->soil is no canopy; cut crop is 4; haze dip on a canopy is nothing
+    assert mr.classify(ev).tolist() == [3, 2, 0, 0, 0, 8, 0]   # no radar: standing rice unconfirmed; water->soil is no canopy; a cut crop without water is 8; haze dip on a canopy is nothing
     assert mr.classify(ev, radar_wet=[True] * 7).tolist() == [1, 6, 0, 0, 0, 4, 0]   # the young crop with water is young rice
     assert ev.loc[0, "low_windows"] >= mr.LOW_WINDOWS_MIN and ev.loc[6, "low_windows"] < mr.LOW_WINDOWS_MIN
     assert ev.loc[0, "standing"] and not ev.loc[5, "standing"]
@@ -138,4 +138,25 @@ def test_never_bare_removes_every_rice_like_class_unless_a_flood_was_confirmed()
     out = mr.classify(ev, radar_wet=wet, never_bare=nb)
     # class 1 (v1 water only), 4, 6 and 2 all fall to 5; the confirmed flood keeps its class 1
     assert out.tolist() == [5, 1, 5, 5, 5]
-    assert mr.classify(ev, radar_wet=wet, never_bare=~nb).tolist() == [1, 1, 4, 6, 2]
+    assert mr.classify(ev, radar_wet=wet, never_bare=~nb).tolist() == [1, 1, 8, 6, 2]   # the cut pixel had no water: 8
+
+
+def test_report_classes_flooded_not_green_and_cut_unconfirmed():
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import monsoon_rule as mr
+
+    windows = pd.date_range("2026-05-01", "2026-09-21", freq="5D")
+    n = len(windows)
+    cut = np.r_[np.full(10, 0.1), np.linspace(0.1, 0.8, n - 15), np.full(5, 0.2)]     # cycle cut at the end
+    water = np.r_[np.full(n - 4, 0.15), np.full(4, 0.05)]                             # bare, then open water
+    ndvi = np.stack([cut, cut, water, water], axis=1)
+    ev = mr.pixel_events(ndvi, ndvi * 0, windows)
+    ev["flood_ok"] = [True, False, True, True]
+    ev["flood_date"] = pd.to_datetime(["2026-06-05", "NaT", "2026-09-10", "2026-06-05"])
+    wet = ev["flood_ok"].to_numpy()
+    out = mr.classify(ev, radar_wet=wet, map_date=windows[-1])
+    # cut with water -> 4, cut without -> 8; open water with a flood 11 days ago -> 7; an old flood -> stays 0
+    assert out.tolist() == [4, 8, 7, 0]
+    assert mr.classify(ev, radar_wet=wet).tolist() == [4, 8, 0, 0]       # no map date: no class 7
