@@ -1,6 +1,6 @@
 # 17. Review of the first map and the fixes (September 2026)
 
-*Status: draft, numbers to be filled from the stage-4 re-run.*
+*Status: final numbers from the stage-6 re-run of 25 September 2026 (section "Measurements").*
 
 ## Why this document
 
@@ -66,11 +66,32 @@ the first map (`analysis/compare_runs`).
 ### Rule
 * **Radar-defined trough** (`monsoon_rule.radar_trough_events`): a confirmed radar flood can stand
   in for an optical trough hidden by cloud or cut short by a short fallow; the pixel then needs a
-  canopy after the flood, its own optical history must show bare ground within 60 days before /
-  30 days after the flood (the radar box is 5 x 5 pixels: a tree line beside flooded paddies
-  floods in the radar), and no canopy may have been seen in the 25 days before the drop (that is a
-  harvest).
+  canopy after the flood, and its own optical history must show ground without a canopy (NDVI
+  <= 0.45, the canopy level less a margin) at some clear date from 90 days before the flood to the
+  optical climb (the radar box is 5 x 5 pixels: a tree line beside flooded paddies floods in the
+  radar). A canopy seen in the 10 days before a drop makes that drop a harvest, not a flood (25 days
+  at first; that refused the transplanting flood of a second crop cut 2-3 weeks earlier).
 * **Canopy on the flood date** judged on clear observations, not on the fitted curve.
+* **The flood is the largest drop that passes the whole water test**, not the season's largest drop
+  (round 2, aoi110). Every monsoon pass is tested on its own (drop >= 4 dB below the pass's own
+  earlier level, dark enough for water, no canopy in the 10 days before it, a second pass within
+  14 days or a very deep single pass). On a double-crop plain the season's largest drop is the
+  summer crop's ripening and harvest (a bright canopy falling to -14..-16 dB VH, which is not
+  water); judging only that pass hid the real August transplanting flood, and ~150 ac of monsoon
+  rice in one AOI lost their water. The largest drop of all is still reported where no pass
+  qualifies, so the reason for a failed test stays visible.
+* **No "other polarisation" test on the v2 flood.** It was added against a broken pass (issue 15:
+  VH 5-20 dB low while VV was bright) but also refused real transplanting floods, where VV rises
+  2-4 dB by double bounce off the seedlings while VH falls into the water. Broken passes are now
+  removed by the pass screening before any rule runs, and the flood keeps its support test; the v1
+  dip, which has no support test, keeps the check.
+* **Radar canopy**: a young rice seen only by the radar is class 1 when the canopy is full (VH rose
+  >= 8 dB from the flood to >= -15 dB at the season end) and class 7 while its optical value is
+  still open water (< 0.20). The radar canopy may only stand in where the optical end is stale: a
+  clear view in the last 20 days that reads below 0.30 contradicts it (open water and bare mud
+  beside bright bunds showed a 12-16 dB "rise" in the 5 x 5 radar box and were delivered as rice).
+* **Fit ceiling**: the fitted NDVI may not exceed the pixel's highest observation by more than 0.05
+  (a peak invented across a gap made "harvested" fields).
 * **Flood support** from either polarisation of any track; a very dark, very deep pass (VH <= -24,
   drop >= 8 dB) needs no second pass.
 * **Never bare** applied to every rice-like class unless a flood was confirmed.
@@ -96,47 +117,58 @@ slivers under 4 pixels merged into a same-label neighbour; areas recomputed in t
 Flagged polygons stay in the file with `is_field = False` and a `refine_flag`. Every polygon keeps
 its `field_id`.
 
-## Measurements (stage-4 re-run of all 132 AOIs, 25 September 2026)
+## Measurements (final re-run of all 132 AOIs, 25 September 2026, "stage 7")
 
-**Class acres inside the AOIs, pixel map, first map -> new map** (`report/compare/stage4_matrix.csv`):
+**Class acres inside the AOIs, pixel map, first map -> final map** (`report/compare/stage7_matrix.csv`):
 
-| class | first map | new map | where the difference went |
+| class | first map | final map | where the difference went |
 |---|---|---|---|
-| rice (1) | 42,741 | 45,308 | +2,967 from "harvested", +2,699 from "not rice", +1,845 from class 3; -3,086 to class 3, -2,292 to "not rice" |
-| young rice (6) | 6,072 | 8,405 | +3,411 from "not rice", +531 from "young" |
-| **delivered (1 + 6)** | **48,812** | **53,714** | |
-| rice-like, water not confirmed (3) | 11,454 | 12,535 | |
-| harvested (4) | 7,021 | 588 | 2,967 to rice, 1,468 to class 3, 1,419 to "not rice", 494 to class 8 |
-| young (2) | 3,629 | 2,155 | |
-| never bare (5) | 3,998 | 2,478 | 2,862 to "not rice" (haze troughs gone with the mask) |
-| flooded, not yet green (7, new) | - | 5,081 | 4,862 from "not rice" |
-| cut crop, water not confirmed (8, new) | - | 716 | |
-| not rice (0) | 38,491 | 36,141 | |
+| rice (1) | 42,740 | 47,206 | +3,064 from "harvested", +3,219 from "not rice", +2,032 from class 3; -2,649 to class 3, -1,843 to "not rice" |
+| young rice (6) | 6,072 | 7,419 | +2,512 from "not rice", +483 from "young" |
+| **delivered (1 + 6)** | **48,812** | **54,626** | |
+| rice-like, water not confirmed (3) | 11,454 | 11,870 | |
+| harvested (4) | 7,020 | 628 | 3,064 to rice, 1,419 to class 3, 1,359 to "not rice", 444 to class 8 |
+| young (2) | 3,630 | 2,878 | |
+| never bare (5) | 3,998 | 2,476 | 2,861 to "not rice" (haze troughs gone with the mask) |
+| flooded, not yet green (7, new) | - | 5,901 | 5,632 from "not rice" |
+| cut crop, water not confirmed (8, new) | - | 642 | |
+| not rice (0) | 38,491 | 34,386 | |
 
-Field labels inside the AOIs (refined delineation): rice 47,056 ac, young rice 7,857 ac
-(delivered 54,913; first map 49,586), class 3 11,584, flooded not green 5,028, harvested 481,
-never bare 1,892, not rice 37,394.
+Field labels inside the AOIs (refined delineation): rice 48,824 ac, young rice 6,939 ac
+(delivered 55,763; first map 49,586), class 3 11,042, flooded not green 5,859, young 2,126,
+never bare 1,899, harvested 520, cut crop 576, not rice 35,639.
 
 **Surveyed plots** (share of plot-interior pixels delivered as rice, three established regions):
 
 | | delta | region B | region N |
 |---|---|---|---|
 | first map, field labels | 96.9 | 94.8 | 98.3 |
-| new map, pixel map | 97.9 | 95.2 | 93.6 |
-| new map, field labels | 98.9 | 97.7 | 96.7 |
+| final map, pixel map | 98.0 | 97.0 | 94.4 |
+| final map, field labels | 99.0 | 98.0 | 96.8 |
 
-Negatives: evergreen, water, bare / built and "cut before the map date" pixels are delivered as
-rice in 0 % of cases in the rule map; the 4-pixel minimum mapping unit then absorbs isolated tree
-pixels inside rice fields (31 of 221 evergreen pixels in the delta plot AOIs, all of them created
-by the sieve, as in the first map). Region N is 1.6 points under the first map at field level: its
-remaining misses are fields whose water is shallower than the thresholds (VH -17.5 to -18.5 dB,
-3-4 dB drop); accepting them would also accept dark dry soils in the dry-zone AOIs, so they stay
-in class 3.
+Negatives (rule map, before the 4-pixel sieve): water and bare / built pixels 0 %; "cut before the
+map date" 0 % in the delta and 1.2 % in the fourth region (3 of 249 pixels; the 12-pixel set of
+region B is 7 fields last seen clear in July whose radar canopy grew afterwards); evergreen 1.4 %
+in the delta (3 of 221) and 0.7 % in the fourth region (6 of 853): tree lines beside paddies whose
+5 x 5 radar box floods and whose clear views once read 0.36-0.45 (first map and stage 5: 0 %).
+The 4-pixel minimum mapping unit then absorbs isolated tree pixels inside rice fields (17 % of
+the delta evergreen pixels, as in the first map). Region N is 1.5 points under the first map at
+field level: its remaining misses are fields whose water is shallower than the thresholds
+(VH -17.5 to -18.5 dB, 3-4 dB drop); accepting them would also accept dark dry soils in the
+dry-zone AOIs, so they stay in class 3.
 
 **Reviewed fields** (432 fields judged by eye in 20 AOIs, final field labels): of the fields the
-reviewers called right, 198 of 216 decidable keep a label that agrees with them (first map 213); of
-the fields called wrong, 127 of 148 now agree (first map 38); of the uncertain ones 20 of 34 (14).
-Agreement over all decidable fields: 89 % against 69 % for the first map.
+reviewers called right, 197 of 216 decidable keep a label that agrees with them (first map 213); of
+the fields called wrong, 128 of 148 now agree (first map 38); of the uncertain ones 21 of 34 (14).
+Agreement over the right and wrong fields: 89 % against 69 % for the first map. The last two
+rule changes (flood pick among all passes, no other-polarisation test) moved 12 reviewed fields:
+4 towards the reviewers, 5 against them (a 5-acre polygon over trees and paddies labelled by
+plurality, a 0.3-acre tree strip, and three "non-paddy / dry-land / stream bed" fields that carry
+a -19.6 to -22 dB flood on 3-4 passes and a full optical cycle, which the data cannot refuse).
+
+**Double-crop check** (aoi110, the AOI the round-2 review found worse): 6 of the 7 fields named
+by the reviewer are delivered (the seventh has a 3.3 dB water drop, too weak); the AOI gained
+65 ac against stage 5 and no AOI lost delivered area.
 
 **Refined delineation**: 428,349 polygons -> 422,763 fields; 123,279 attribute acres -> 112,618
 UTM acres -> 101,204 refined field acres (overlaps and tails removed, 597 ac of monster outlines

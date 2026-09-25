@@ -122,6 +122,25 @@ STANDING_MIN = 0.40
 #: already visible on the map date: 95 % of the field plots' pixels that sat in "young" were at or
 #: above 0.30 (bare soil 0.15-0.25, open water 0-0.1). docs/15.
 YOUNG_VISIBLE = 0.30
+#: A clear optical view within the last ``CLEAR_RECENT_WINDOWS`` windows (20 days) that reads below
+#: ``YOUNG_VISIBLE`` contradicts a canopy seen by the radar alone: the radar canopy (``RADAR_MATURE_*``,
+#: ``RADAR_VISIBLE_RISE_DB``) may only stand in for the optical one where the optical end is stale.
+#: Why (stage 6): 23 pixels of open water / bare mud (raw NDVI -0.14 to 0.25 on a clear 16 Sep)
+#: next to bright bunds were delivered as "rice" by a 12 dB radar rise in a 5 x 5 box.
+CLEAR_RECENT_WINDOWS = 4
+
+
+def last_clear_view(ndvi_raw, windows) -> pd.DataFrame:
+    """Per pixel, the last clear observation: ``last_clear_ndvi`` and its ``last_clear_age`` in
+    windows before the series end (inf where nothing was ever observed)."""
+    raw = np.asarray(ndvi_raw)
+    obs = np.isfinite(raw)
+    any_obs = obs.any(axis=0)
+    last_idx = raw.shape[0] - 1 - np.argmax(obs[::-1], axis=0)
+    cols = np.arange(raw.shape[1])
+    value = np.where(any_obs, raw[last_idx, cols], np.nan)
+    age = np.where(any_obs, raw.shape[0] - 1 - last_idx, np.inf).astype(float)
+    return pd.DataFrame({"last_clear_ndvi": value, "last_clear_age": age})
 #: Water test versions: "v1" = dip at the optical trough only; "v2" (docs/11) = v1 OR the flood
 #: searched over the whole bare period, plus class 5 for "rice-like" curves on ground the radar
 #: shows was never bare (trees, houses: the optical trough there is haze).
@@ -253,6 +272,11 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
     standing = events["standing"].to_numpy() if "standing" in events else np.ones(len(events), dtype=bool)
     young = (low & ~grown & (events["rise"] >= young_min) & (events["peak_after"] >= young_canopy_min)).to_numpy()
     wet = np.zeros(len(events), dtype=bool) if radar_wet is None else np.asarray(radar_wet, dtype=bool)
+    contradicted = np.zeros(len(events), dtype=bool)
+    if "last_clear_ndvi" in events:
+        with np.errstate(invalid="ignore"):
+            contradicted = ((np.array(events["last_clear_age"], dtype=float) <= CLEAR_RECENT_WINDOWS)
+                            & (np.array(events["last_clear_ndvi"], dtype=float) < YOUNG_VISIBLE))
     if radar_trough and "rise_from_flood" in events:
         with np.errstate(invalid="ignore"):
             # a confirmed flood is bare, wet ground (NDVI of water is at or below 0.2), so the climb
@@ -267,7 +291,7 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
                 rise_db = np.array(events["radar_canopy_rise"], dtype=float)
                 vh_end = np.array(events["vh_end"], dtype=float) if "vh_end" in events else np.full(len(events), np.nan)
                 canopy_level = ~(vh_end < RADAR_CANOPY_VH_MIN)
-                mature = ok & (rise_db >= RADAR_MATURE_RISE_DB) & (vh_end >= RADAR_MATURE_VH_MIN)
+                mature = ok & (rise_db >= RADAR_MATURE_RISE_DB) & (vh_end >= RADAR_MATURE_VH_MIN) & ~contradicted
                 r_grown = r_grown | (mature & ~grown & ~young)
                 r_young = r_young & ~mature
                 r_young |= ~r_grown & ok & (rise_db >= RADAR_YOUNG_RISE_DB) & canopy_level
@@ -289,7 +313,8 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
         with np.errstate(invalid="ignore"):
             at_canopy = np.array(events["vh_end"], dtype=float) >= RADAR_CANOPY_VH_MIN if "vh_end" in events \
                 else np.ones(len(events), dtype=bool)
-            visible |= (np.array(events["radar_canopy_rise"], dtype=float) >= RADAR_VISIBLE_RISE_DB) & at_canopy
+            visible |= ((np.array(events["radar_canopy_rise"], dtype=float) >= RADAR_VISIBLE_RISE_DB) & at_canopy
+                        & ~contradicted)
     young_rice = young & wet & visible
     out[grown & ~standing & wet] = 4
     out[grown & ~standing & ~wet] = 8
@@ -348,6 +373,8 @@ def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
             events["radar_wet_v1"] = events["radar_wet"]
             events["radar_wet"] = events["radar_wet"] | events["flood_ok"]
             events = pd.concat([events, radar_trough_events(events, ndvi, d["windows"])], axis=1)
+            if raw is not None:
+                events = pd.concat([events, last_clear_view(raw, d["windows"])], axis=1)
     return d, events, radar
 
 

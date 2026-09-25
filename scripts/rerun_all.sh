@@ -6,7 +6,8 @@
 # Why a script: nine steps in a fixed order for 132 AOIs; each step skips or overwrites cleanly, so
 # the script can be re-run after an interruption. Nothing here starts an Earth Engine export.
 #
-# Usage: scripts/rerun_all.sh <mask> <stage_name> [<id> ...]
+# Usage: [SKIP_SERIES=1] [JOBS=n] scripts/rerun_all.sh <mask> <stage_name> [<id> ...]
+#   SKIP_SERIES=1: keep the series already on disk (only the rule or later steps changed).
 #   <mask>: a variant name of analysis/mask_experiment.VARIANTS (e.g. hyb60); the series are built
 #           straight into the standard folder processed/_batch/s2_2026/<aoi>/ (the baseline series
 #           are not needed any more: the map baseline is baseline_v3/).
@@ -23,9 +24,14 @@ fi
 mkdir -p logs
 t0=$(date +%s); stamp() { echo "[$(( ($(date +%s) - t0) / 60 )) min] $*"; }
 
-stamp "series ($MASK mask, $JOBS at a time)"
-$PY -m sar_pipeline.analysis.mask_experiment build --ids $IDS --variants "$MASK" --jobs "$JOBS" --into-standard \
-    > logs/rerun_${STAGE}_series.log 2>&1; tail -1 logs/rerun_${STAGE}_series.log
+if [ "${SKIP_SERIES:-0}" = "1" ]; then
+  # a rule-only change (the series on disk were built with $MASK already): saves ~40 min for 132 AOIs
+  stamp "series step skipped (SKIP_SERIES=1)"
+else
+  stamp "series ($MASK mask, $JOBS at a time)"
+  $PY -m sar_pipeline.analysis.mask_experiment build --ids $IDS --variants "$MASK" --jobs "$JOBS" --into-standard \
+      > logs/rerun_${STAGE}_series.log 2>&1; tail -1 logs/rerun_${STAGE}_series.log
+fi
 stamp "rule"
 echo $IDS | tr ' ' '\n' | xargs -P "$JOBS" -I{} sh -c "$PY -u -m sar_pipeline.monsoon_batch rule --ids {} --out processed/_batch/s2_2026/${STAGE}_parts/aoi{}.csv > logs/rerun_${STAGE}_rule_aoi{}.log 2>&1 || echo 'aoi{} rule FAILED'"
 stamp "finalize (relabels + sieve)"

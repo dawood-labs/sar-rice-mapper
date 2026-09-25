@@ -210,9 +210,14 @@ SHALLOW_SUPPORT_MIN = 4
 #: The radar canopy after a flood must reach this VH: still-dark ground (VH below it) is water or
 #: mud, not a crop (a pond's VH went from -32 to -24 dB and looked like a "rise").
 RADAR_CANOPY_VH_MIN = -18.0
-#: On the flood pass the other polarisation may not sit more than this above its own earlier level
-#: (a drop of -1 dB = a rise of 1 dB). Why (fix plan, issue 15): on 11 Jun 2026 one pass read VH
-#: 5-20 dB low on dry fields while VV was at its brightest; water never does that.
+#: v1 dip only: the other polarisation may not RISE by more than -OTHER_POL_DROP_MIN over the flood
+#: window (a drop of -1 dB = a rise of 1 dB). Why (fix plan, issue 15): on 11 Jun 2026 one pass read
+#: VH 5-20 dB low on dry fields while VV was at its brightest; water never does that. The v2 flood
+#: does NOT use it any more (round 2, aoi110): in a freshly transplanted paddy VV often RISES 2-4 dB
+#: (double bounce off the seedlings) while VH falls into the water, so the test refused real floods;
+#: v2 is protected instead by its support test (a second pass within 14 days) and by the pass
+#: screening of ``final_audit.screen_passes``, which now removes broken passes before any rule runs.
+#: ``flood_other_drop`` is still reported.
 OTHER_POL_DROP_MIN = -1.0
 #: Support for the flood pass (fix plan, stage 2.4, issue 3): a second pass within 14 days that also
 #: sits >= 2 dB below its own earlier level, in EITHER polarisation of any track (before: the same
@@ -231,14 +236,17 @@ DEEP_FLOOD_DROP_MIN = 8.0
 RAW_BEFORE_WINDOWS = 2
 RAW_AFTER_WINDOWS = 0          # a canopy AFTER the drop is the crop growing (one field read 0.56 nine days after its flood)
 #: ``bare_near_flood``: a clear observation without canopy (NDVI <= ``BARE_SEEN_NDVI``) from
-#: ``BARE_SEEN_BEFORE_WINDOWS`` windows before to ``BARE_SEEN_AFTER_WINDOWS`` after the flood. Why:
-#: the radar is read over a 5 x 5 box, so a tree line next to flooded paddies also "floods" in the
-#: radar; the pixel's own optical history must show bare ground at some point around the flood
-#: before the radar alone may call it rice (the radar-trough path). No observation at all in that
-#: span counts as unknown, not as a canopy.
-BARE_SEEN_NDVI = 0.40
+#: ``BARE_SEEN_BEFORE_WINDOWS`` windows before the flood to ``BARE_SEEN_AFTER_WINDOWS`` after it or
+#: to the optical climb, whichever is later. Why: the radar is read over a 5 x 5 box, so a tree line
+#: next to flooded paddies also "floods" in the radar; the pixel's own optical history must show
+#: ground without a canopy at some point around the flood before the radar alone may call it rice
+#: (the radar-trough path). No observation at all in that span counts as unknown, not as a canopy.
+#: The level is the rule's canopy level (``monsoon_rule.CANOPY_MIN`` 0.50) less a margin: a double
+#: crop's first clear view after its August flood is often 5-6 weeks later, when the seedlings
+#: already read 0.40-0.45 (round 2, aoi110); a tree line reads 0.6 and more on every clear date.
+BARE_SEEN_NDVI = 0.45
 BARE_SEEN_BEFORE_WINDOWS = 18      # 90 days: the last dry-season view of a field can be that old under monsoon cloud
-BARE_SEEN_AFTER_WINDOWS = 6
+BARE_SEEN_AFTER_WINDOWS = 6        # 30 days, the minimum; the window runs on to the climb
 #: ``vh_end``: median VH of the passes in the last ``END_DAYS`` before the series end (any track);
 #: ``radar_canopy_rise`` = vh_end - flood_vh. Why: a young crop transplanted in August is often
 #: seen clear only through haze by the map date, but the radar sees its canopy: VH climbs from the
@@ -292,20 +300,33 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
     n = ndvi.shape[1]
     trough = np.asarray(trough).astype("datetime64[D]")
     climb = np.asarray(climb).astype("datetime64[D]")
-    best = np.full(n, -np.inf)
-    when = np.full(n, np.datetime64("NaT"), dtype="datetime64[D]")
-    pol_of = np.full(n, "", dtype=object)
+    # Two selections per pixel, each "the largest drop of any pass, any track, either polarisation":
+    # ``ok``: among the passes that pass the whole water test (below); ``any``: among all monsoon
+    # passes. The reported flood is the ``ok`` pass where one exists, else the ``any`` pass, so a
+    # failed test stays visible in the report. Why not simply the largest drop: on a double-crop
+    # plain the season's largest drop is the summer crop's ripening and harvest (a bright canopy
+    # falling to -14..-16 dB VH, not water); judging only that pass hid the real transplanting
+    # flood of August (-19..-23 dB, a smaller drop from an already cut field) and ~150 ac of
+    # monsoon rice per AOI lost their water (fix plan, round 2, aoi110).
+    keys = ("best", "when", "pol", "vh", "other", "support", "ndvi")
+    def _empty():
+        return {"best": np.full(n, -np.inf), "when": np.full(n, np.datetime64("NaT"), dtype="datetime64[D]"),
+                "pol": np.full(n, "", dtype=object), "vh": np.full(n, np.nan), "other": np.full(n, np.nan),
+                "support": np.zeros(n, dtype=int), "ndvi": np.full(n, np.nan)}
+    sel = {"ok": _empty(), "any": _empty()}
     vh_min = np.full(n, np.inf)
     vh_low2 = np.full((2, n), np.inf)      # the two darkest VH passes in the span, over all tracks
     vh_trough = np.full(n, -np.inf)
-    vh_at_flood = np.full(n, np.nan)
-    other_drop = np.full(n, np.nan)        # the other polarisation's drop on the flood pass
     earliest = np.datetime64(FLOOD_EARLIEST)
+    win = pd.DatetimeIndex(windows).to_numpy().astype("datetime64[D]")
     tracks = []
     for dates, flat in series:
         day = pd.DatetimeIndex(dates).to_numpy().astype("datetime64[D]")
-        drops = {p: local_drops(dates, flat[p]) for p in ("VV", "VH")}
-        tracks.append((day, drops))
+        tracks.append((day, {p: local_drops(dates, flat[p]) for p in ("VV", "VH")}, flat))
+    # a pass "supports" a flood when it sits 2 dB below its own earlier level in either polarisation
+    hits = [((drops["VV"] >= 2.0) | (drops["VH"] >= 2.0)).astype("float32") for _, drops, _ in tracks]
+    cols = np.arange(n)
+    for day, drops, flat in tracks:
         rel = (day[:, None] - climb[None, :]) / np.timedelta64(1, "D")
         with np.errstate(invalid="ignore"):
             span = (rel >= LONG_SPAN[0]) & (rel <= LONG_SPAN[1])
@@ -322,23 +343,43 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
             # the flood itself: monsoon passes only. A dry-season pass on a freshly harvested,
             # drying field is also a VH drop to about -22 dB (seen on a field in April).
             monsoon = span & (day >= earliest)[:, None]
+            # support of every pass of this track: passes of any track within 14 days that also dropped
+            support_p = np.zeros((len(day), n), dtype="float32")
+            for (day2, _, _), hit in zip(tracks, hits):
+                near = (np.abs((day[:, None] - day2[None, :]) / np.timedelta64(1, "D")) <= 14).astype("float32")
+                support_p += near @ hit
+            # canopy on each pass date: the clear observations RAW_BEFORE_WINDOWS windows before to
+            # RAW_AFTER_WINDOWS after it (see the module notes), or the fitted value without raw data
+            idx_p = np.clip(np.searchsorted(win, day), 0, len(win) - 1)
+            if ndvi_raw is None:
+                canopy_p = ndvi[idx_p]
+            else:
+                canopy_p = np.stack([np.nanmax(ndvi_raw[max(i - RAW_BEFORE_WINDOWS, 0):i + RAW_AFTER_WINDOWS + 1], axis=0)
+                                     for i in idx_p])
             for p, q in (("VV", "VH"), ("VH", "VV")):
                 m = np.where(monsoon, drops[p], np.nan)
-                b = np.nanmax(m, axis=0)
-                arg = np.nanargmax(np.where(np.isfinite(m), m, -np.inf), axis=0)
-                better = np.isfinite(b) & (b > best)
-                best = np.where(better, b, best)
-                when = np.where(better, day[arg], when)
-                pol_of = np.where(better, p, pol_of)
-                vh_at_flood = np.where(better, flat["VH"][arg, np.arange(n)], vh_at_flood)
-                other_drop = np.where(better, drops[q][arg, np.arange(n)], other_drop)
-    support = np.zeros(n, dtype=int)
-    for day, drops in tracks:
-        near = np.abs((day[:, None] - when[None, :]) / np.timedelta64(1, "D")) <= 14
-        with np.errstate(invalid="ignore"):
-            # a pass counts once, whichever polarisation shows the drop
-            hit = (near & ((drops["VV"] >= 2.0) | (drops["VH"] >= 2.0))).sum(axis=0)
-        support += hit
+                vh = flat["VH"]
+                deep = (vh <= DEEP_FLOOD_VH_MAX) & (m >= DEEP_FLOOD_DROP_MIN)
+                dark = (vh <= FLOOD_VH_MAX) | ((vh <= SHALLOW_VH_MAX) & (m >= SHALLOW_DROP_MIN)
+                                               & (support_p >= SHALLOW_SUPPORT_MIN))
+                ok_p = ((m >= FLOOD_DROP_MIN) & dark & ~(canopy_p > FLOOD_NDVI_MAX)
+                        & ((support_p >= SUPPORT_MIN) | deep))
+                for name, mm in (("ok", np.where(ok_p, m, np.nan)), ("any", m)):
+                    st = sel[name]
+                    b = np.nanmax(mm, axis=0)
+                    arg = np.nanargmax(np.where(np.isfinite(mm), mm, -np.inf), axis=0)
+                    better = np.isfinite(b) & (b > st["best"])
+                    st["best"] = np.where(better, b, st["best"])
+                    st["when"] = np.where(better, day[arg], st["when"])
+                    st["pol"] = np.where(better, p, st["pol"])
+                    st["vh"] = np.where(better, vh[arg, cols], st["vh"])
+                    st["other"] = np.where(better, drops[q][arg, cols], st["other"])
+                    st["support"] = np.where(better, support_p[arg, cols].astype(int), st["support"])
+                    st["ndvi"] = np.where(better, canopy_p[arg, cols], st["ndvi"])
+    qualified = np.isfinite(sel["ok"]["best"])
+    pick = {k: np.where(qualified, sel["ok"][k], sel["any"][k]) for k in keys}
+    best, when, pol_of, vh_at_flood, other_drop = pick["best"], pick["when"], pick["pol"], pick["vh"], pick["other"]
+    support, ndvi_at = pick["support"], pick["ndvi"]
     win = pd.DatetimeIndex(windows).to_numpy().astype("datetime64[D]")
     end_from = win[-1] - np.timedelta64(END_DAYS, "D")
     vh_end_parts = []
@@ -352,17 +393,19 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
         vh_end = np.nanmedian(np.concatenate(vh_end_parts), axis=0) if vh_end_parts else np.full(n, np.nan)
     has = ~np.isnat(when)
     idx = np.clip(np.searchsorted(win, np.where(has, when, win[0])), 0, len(win) - 1)
+    ndvi_at = np.where(has, ndvi_at, np.nan)
     bare_seen = np.ones(n, dtype=bool)
-    if ndvi_raw is None:
-        ndvi_at = np.where(has, ndvi[idx, np.arange(n)], np.nan)
-    else:
+    if ndvi_raw is not None:
         step = np.arange(len(win))[:, None]
         rel = step - idx[None, :]
-        near = (rel >= -RAW_BEFORE_WINDOWS) & (rel <= RAW_AFTER_WINDOWS)
-        around = (rel >= -BARE_SEEN_BEFORE_WINDOWS) & (rel <= BARE_SEEN_AFTER_WINDOWS)
+        # ... up to the optical climb when that is later: between the flood and the climb the field
+        # carries no canopy, so any clear view there counts (a double crop's harvest-to-flood gap
+        # often falls inside a cloud gap, and its first bare view comes 5-6 weeks after the flood)
+        climb_idx = np.clip(np.searchsorted(win, np.where(np.isnat(climb), win[-1], climb)), 0, len(win) - 1)
+        upto = np.maximum(idx + BARE_SEEN_AFTER_WINDOWS, climb_idx)
+        around = (rel >= -BARE_SEEN_BEFORE_WINDOWS) & (step <= upto[None, :])
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            ndvi_at = np.where(has, np.nanmax(np.where(near, ndvi_raw, np.nan), axis=0), np.nan)
             seen_min = np.nanmin(np.where(around, ndvi_raw, np.nan), axis=0)
         bare_seen = ~(seen_min > BARE_SEEN_NDVI)           # unknown (no observation) stays True
     out = pd.DataFrame({
@@ -379,17 +422,13 @@ def water_evidence(aoi_id: int, trough, climb, ndvi, windows, season_key: str = 
         "radar_canopy_rise": vh_end - vh_at_flood,
     })
     with np.errstate(invalid="ignore"):
-        # water lowers VV and VH together; a pass where one polarisation falls while the other
-        # rises is a broken pass (issue 15), not a flood. Unknown (no reference) is not held against it.
-        consistent = ~(out["flood_other_drop"] < OTHER_POL_DROP_MIN)
         deep = (out["flood_vh"] <= DEEP_FLOOD_VH_MAX) & (out["flood_drop"] >= DEEP_FLOOD_DROP_MIN)
         no_canopy = ~(out["ndvi_at_flood"] > FLOOD_NDVI_MAX)        # unknown (no observation) passes
         dark_enough = (out["flood_vh"] <= FLOOD_VH_MAX) | ((out["flood_vh"] <= SHALLOW_VH_MAX)
                                                           & (out["flood_drop"] >= SHALLOW_DROP_MIN)
                                                           & (out["support"] >= SHALLOW_SUPPORT_MIN))
         out["flood_ok"] = ((out["flood_drop"] >= FLOOD_DROP_MIN) & dark_enough
-                           & no_canopy & ((out["support"] >= SUPPORT_MIN) | deep)
-                           & consistent)
+                           & no_canopy & ((out["support"] >= SUPPORT_MIN) | deep))
         # the second-darkest pass, not the darkest: one speckled or mis-registered pass must not
         # decide that a village or a tree line was once a bare, wet field
         out["never_bare"] = (out["vh_at_trough"] > VEG_VH_MIN) & (out["flood_vh_2nd"] > VEG_FLOOD_VH_MIN)

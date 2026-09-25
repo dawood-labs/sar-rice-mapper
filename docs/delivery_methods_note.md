@@ -45,15 +45,19 @@ dark). The mask was chosen by scoring seven alternatives on the surveyed plots.
    below the field's own dry level around the optical trough and ends dark, or when, anywhere in
    the bare period before the canopy climb, a monsoon pass falls at least 4 dB below the weeks
    before it, is dark enough to be water (VH at or below -19 dB, or -18 dB with a larger drop seen
-   on more passes), falls on a field where no canopy was observed in the weeks before, and is
+   on more passes), falls on a field where no canopy was observed in the ten days before, and is
    supported by a second pass in either polarisation (a very dark, very deep pass needs none).
+   Every pass is tested on its own and the flood is the largest drop that passes the test: on a
+   double-cropped plain the season's largest drop is the summer crop's harvest, not the water.
 3. *Radar-defined start.* Where cloud hid the weeks around transplanting, the fitted curve runs
    straight across the gap and shows no trough. A confirmed radar flood then stands in for it: the
    pixel is rice when a canopy of at least 0.50 follows the flood and is still standing, provided
-   the field's own clear observations showed bare ground within 90 days before or 30 days after
-   the flood (the radar is read over a 50 m box, so a tree line beside flooded paddies floods in
-   the radar too). A young crop transplanted late is recognised by the radar canopy rising at
-   least 4 dB from the water (5 dB to deliver it as young rice) when no clear view shows it yet.
+   the field's own clear observations showed ground without a canopy (NDVI at most 0.45) at some
+   date between 90 days before the flood and the canopy climb (the radar is read over a 50 m box,
+   so a tree line beside flooded paddies floods in the radar too). A young crop transplanted late
+   is recognised by the radar canopy rising at least 4 dB from the water (5 dB to deliver it as
+   young rice) when no clear view shows it yet; a clear view in the last 20 days without a canopy
+   (NDVI below 0.30) overrides the radar.
 4. *Never bare.* Where the radar shows a canopy or buildings throughout, the low optical values were
    haze over a long cloud gap, and the pixel is not rice (class 5). This applies to every rice-like
    class unless a flood was confirmed.
@@ -89,8 +93,9 @@ can extend past the AOI edge; their full area is in `area_acres`).
 **Accuracy.** Checked against the field plots reported as standing rice: 97-99 % of plot-interior
 pixels in the three established regions are mapped as rice on the field-labelled map (94-98 % on
 the pixel map). Areas known not to be rice (evergreen cover, permanent water, bare and built
-ground, fields cut before the map date) are mapped as rice in 0 % of pixels by the rule; the
-4-pixel minimum mapping unit then absorbs isolated tree pixels inside rice fields. About 430
+ground, fields cut before the map date) are mapped as rice in 0-1.4 % of pixels by the rule
+(the exceptions are tree lines beside paddies, whose 50 m radar box floods); the 4-pixel minimum
+mapping unit then absorbs isolated tree pixels inside rice fields. About 430
 fields judged by eye during the review of the first map agree with this map in 89 % of cases
 (69 % for the first map). Dates of the crop events are accurate to about one to two weeks. Where plots were transplanted
 late (late August) the crop is young on the map date: class 6 when the canopy is visible (optical or

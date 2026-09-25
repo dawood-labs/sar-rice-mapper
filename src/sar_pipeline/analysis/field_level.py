@@ -121,6 +121,8 @@ def field_audit(aoi_id: int, out_dir=f"{SRC}/report/field_level") -> pd.DataFram
     # the same decision path as the pixel rule (radar-defined trough, report classes)
     ev2 = pd.concat([ev, v2], axis=1)
     ev2 = pd.concat([ev2, mr.radar_trough_events(ev2, ndvi_f, windows)], axis=1)
+    if raw_f is not None:
+        ev2 = pd.concat([ev2, mr.last_clear_view(raw_f, windows)], axis=1)
     field_class = mr.classify(ev2, radar_wet=wet, never_bare=v2["never_bare"].to_numpy(),
                               radar_trough=mr.RADAR_TROUGH_DEFAULT, map_date=windows[-1])
     # was the field green shortly before its flood? (issue 23: a mid-August wetting after a

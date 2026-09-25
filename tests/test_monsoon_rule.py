@@ -210,3 +210,29 @@ def test_a_ripening_crop_is_still_standing():
     ndvi = np.stack([ripening, cut], axis=1)
     ev = mr.pixel_events(ndvi, ndvi * 0, windows)
     assert mr.classify(ev, radar_wet=np.array([True, True])).tolist() == [1, 4]
+
+
+def test_a_recent_clear_view_without_canopy_beats_the_radar_canopy():
+    """Stage 6: open water / bare mud (raw NDVI -0.1 on a clear view 10 days before the map date)
+    beside bright bunds showed a 12 dB radar rise; the radar canopy may only stand in for the
+    optical one where the optical end is stale."""
+    import numpy as np
+    import pandas as pd
+
+    from sar_pipeline.analysis import monsoon_rule as mr
+
+    base = dict(valid=True, trough_ndvi=0.0, low_windows=12, rise=0.0, peak_after=0.1, standing=False,
+                last_ndvi=0.1, flood_ok=True, flood_date=pd.Timestamp("2026-07-15"), bare_near_flood=True,
+                peak_after_flood=0.1, rise_from_flood=0.1, standing_after_flood=False,
+                radar_canopy_rise=12.0, vh_end=-12.0)
+    ev = pd.DataFrame([dict(base, last_clear_ndvi=-0.1, last_clear_age=2),     # clear 10 days ago: water
+                       dict(base, last_clear_ndvi=0.2, last_clear_age=12),     # last seen 60 days ago: stale
+                       dict(base, last_clear_ndvi=0.6, last_clear_age=1)])     # clear and green
+    out = mr.classify(ev, radar_wet=[True] * 3, radar_trough=True, map_date="2026-09-21")
+    assert out[0] not in (1, 6)
+    assert out[1] == 1 and out[2] == 1
+    raw = np.full((5, 2), np.nan)
+    raw[1, 0], raw[3, 0] = 0.5, -0.1
+    view = mr.last_clear_view(raw, pd.date_range("2026-09-01", periods=5, freq="5D"))
+    assert view.loc[0, "last_clear_ndvi"] == -0.1 and view.loc[0, "last_clear_age"] == 1
+    assert np.isnan(view.loc[1, "last_clear_ndvi"]) and np.isinf(view.loc[1, "last_clear_age"])

@@ -63,7 +63,7 @@ def _two_pol_series(n_pixels=3):
     return [(dates, {"VV": vv, "VH": vh})]
 
 
-def test_water_evidence_rejects_a_pass_where_only_one_polarisation_fell():
+def test_water_evidence_reports_the_other_polarisation_and_finds_the_real_flood():
     series = _two_pol_series()
     windows = pd.date_range("2026-03-01", "2026-09-21", freq="5D")
     ndvi = np.full((len(windows), 3), 0.2)
@@ -71,8 +71,10 @@ def test_water_evidence_rejects_a_pass_where_only_one_polarisation_fell():
     climb = np.array(["2026-07-25"] * 3, dtype="datetime64[D]")
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series)
     assert ev.loc[0, "flood_ok"] and ev.loc[0, "flood_other_drop"] > 0        # both fell: water
-    assert ev.loc[1, "flood_drop"] >= 4 and ev.loc[1, "flood_vh"] <= -19       # looks like water in VH...
-    assert ev.loc[1, "flood_other_drop"] < rw.OTHER_POL_DROP_MIN and not ev.loc[1, "flood_ok"]
+    # the v2 flood reports the other polarisation but no longer judges on it (a transplanted paddy
+    # raises VV while VH falls); broken passes are removed by the pass screening instead
+    assert ev.loc[1, "flood_drop"] >= 4 and ev.loc[1, "flood_vh"] <= -19
+    assert ev.loc[1, "flood_other_drop"] < rw.OTHER_POL_DROP_MIN
     assert not ev.loc[2, "flood_ok"]
 
 
@@ -111,10 +113,17 @@ def test_canopy_at_flood_is_judged_on_observations_not_on_the_fit():
     raw = np.full((len(windows), 3), np.nan)                 # nothing observed near the flood: pixel 0 passes
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
     assert ev.loc[0, "flood_ok"] and np.isnan(ev.loc[0, "ndvi_at_flood"])
-    before = ((windows - pd.Timestamp("2026-06-12")).days >= -10) & ((windows - pd.Timestamp("2026-06-12")).days <= -3)
-    raw[before, 0] = 0.7                                     # a canopy seen in the 10 days before the drop: a harvest, not water
+    # a canopy seen in the 10 days before every dark pass (12-28 Jun): a harvest, not water
+    before = ((windows - pd.Timestamp("2026-06-12")).days >= -10) & ((windows - pd.Timestamp("2026-06-28")).days <= -3)
+    raw[before, 0] = 0.7
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
     assert not ev.loc[0, "flood_ok"] and ev.loc[0, "ndvi_at_flood"] == 0.7
+    # every pass is judged on its own: a canopy cut just before the first dark pass refuses that
+    # pass, but the field still under water 12 days later is a flood (a double crop's transplanting)
+    raw[:] = np.nan
+    raw[((windows - pd.Timestamp("2026-06-12")).days >= -10) & ((windows - pd.Timestamp("2026-06-12")).days <= -3), 0] = 0.7
+    ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
+    assert ev.loc[0, "flood_ok"] and ev.loc[0, "flood_date"] >= np.datetime64("2026-06-24")
     raw[:] = np.nan
     after = ((windows - pd.Timestamp("2026-06-12")).days >= 5) & ((windows - pd.Timestamp("2026-06-12")).days <= 30)
     raw[after, 0] = 0.7                                      # a canopy after the flood is the rice itself, however fast
@@ -167,3 +176,26 @@ def test_a_summer_crop_cut_three_weeks_before_the_flood_does_not_block_it():
     raw[(days >= -25) & (days <= -15), 0] = 0.65             # the summer rice, green three weeks before the flood
     raw[(days >= -60) & (days <= -35), 0] = 0.2              # ... and bare before that (a field)
     assert rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw).loc[0, "flood_ok"]
+
+
+def test_flood_is_picked_among_dark_passes_not_the_seasons_largest_drop():
+    """Double-crop plain (fix plan, round 2, aoi110): the summer crop's harvest is the season's
+    largest radar drop (bright canopy -> -17.5 dB, not water); the real transplanting flood in
+    August is a smaller drop from the already dry field. The flood must be found anyway."""
+    dates = pd.DatetimeIndex(np.arange(np.datetime64("2026-04-01"), np.datetime64("2026-09-20"), 6))
+    day = dates.to_numpy().astype("datetime64[D]")
+    vh = np.full((len(dates), 1), -12.0)                    # summer canopy
+    vv = np.full((len(dates), 1), -6.0)
+    after_harvest = day >= np.datetime64("2026-06-24")
+    vh[after_harvest], vv[after_harvest] = -17.5, -10.0     # cut and drying: a 5.5 dB drop, VH -17.5
+    flood = (day >= np.datetime64("2026-08-15")) & (day <= np.datetime64("2026-08-27"))
+    vh[flood], vv[flood] = -22.0, -14.0                     # transplanting water: a 4.5 dB drop, VH -22
+    series = [(dates, {"VV": vv, "VH": vh})]
+    windows = pd.date_range("2026-03-01", "2026-09-21", freq="5D")
+    ndvi = np.full((len(windows), 1), 0.2)
+    trough = np.array(["2026-08-10"], dtype="datetime64[D]")
+    climb = np.array(["2026-09-15"], dtype="datetime64[D]")
+    ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series)
+    assert ev.loc[0, "flood_vh"] <= -19 and ev.loc[0, "flood_date"] >= np.datetime64("2026-08-15")
+    assert 4.0 <= ev.loc[0, "flood_drop"] < 5.5                                  # not the harvest drop
+    assert ev.loc[0, "flood_ok"]
