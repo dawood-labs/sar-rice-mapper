@@ -214,7 +214,11 @@ def merge_tiny(g, label_col: str = "label"):
         right = int(best["index_right"])
         if merged_into.iloc[right] != "":
             continue                                   # the absorber was itself merged away
-        geoms[right] = shapely.union(geoms[right], geoms[left])
+        try:
+            geoms[right] = shapely.union(geoms[right], geoms[left])
+        except shapely.errors.GEOSException:
+            # a traced outline can be broken in a way make_valid leaves; a zero buffer rebuilds it
+            geoms[right] = shapely.union(shapely.buffer(geoms[right], 0), shapely.buffer(geoms[left], 0))
         merged_into.iloc[left] = best["fid"]
     g["geometry"] = gpd.GeoSeries(geoms, index=g.index, crs=g.crs)
     gone = merged_into != ""
@@ -236,6 +240,7 @@ def flag_ponds(g, water_share: np.ndarray):
 def label_stage(fields_labelled, water_share=None):
     """Phase B on labelled fields (lon/lat, with ``label``, ``is_field``, ``refine_flag``)."""
     m = fields_labelled.to_crs(_utm(fields_labelled))
+    m["geometry"] = m.geometry.make_valid()
     m, _ = merge_tiny(m)
     if water_share is not None:
         m = flag_ponds(m, water_share)
