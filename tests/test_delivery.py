@@ -19,3 +19,20 @@ def test_package_aoi_writes_colours_names_and_acres(tmp_path):
     with rasterio.open(tmp_path / "out" / "aoi7_standing_rice_2026-09-19.tif") as ds:
         assert ds.tags()["class_1"].startswith("rice")
         assert ds.colormap(1)[1][:3] == (0, 140, 60)
+
+
+def test_deliver_fields_drops_merged_slivers_and_dropped_monsters(tmp_path):
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from sar_pipeline.delivery import deliver_fields
+
+    g = gpd.GeoDataFrame({"field_id": ["a", "b", "c", "d", "e"], "label": [1, 1, 3, 0, 0],
+                          "is_field": [True, False, False, False, False],
+                          "refine_flag": ["", "merged", "strip", "monster_dropped", "pond"]},
+                         geometry=[box(i * 20, 0, i * 20 + 10, 10) for i in range(5)], crs="EPSG:32630")
+    src = tmp_path / "in.gpkg"
+    g.to_file(src, layer="fields", driver="GPKG")
+    n = deliver_fields(src, tmp_path / "out.gpkg")
+    out = gpd.read_file(tmp_path / "out.gpkg")
+    assert n == 3 and sorted(out["field_id"]) == ["a", "c", "e"]

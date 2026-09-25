@@ -70,6 +70,25 @@ def package_aoi(aoi: str, out_dir, map_date: str, src_root=SRC) -> dict:
     return row
 
 
+#: Refinement flags whose polygons are still delivered (with ``is_field = false``): the client can see
+#: what was traced over a road, canal or pond. Slivers merged into a neighbour and dropped monster
+#: outlines are pure tracing artefacts and are left out, so no delivered polygon hides under another.
+DELIVERED_NON_FIELD_FLAGS = ("strip", "pond")
+
+
+def deliver_fields(src, dst) -> int:
+    """Copy one AOI's labelled fields for delivery, keeping fields and flagged strips / ponds only.
+    Returns the number of polygons written. A file without the refinement columns is copied as is."""
+    import geopandas as gpd
+
+    g = gpd.read_file(src)
+    if "is_field" in g and "refine_flag" in g:
+        g = g[g["is_field"] | g["refine_flag"].isin(DELIVERED_NON_FIELD_FLAGS)]
+    Path(dst).unlink(missing_ok=True)
+    g.to_file(dst, layer="fields", driver="GPKG")
+    return len(g)
+
+
 def package(out_dir, map_date: str | None = None, src_root=SRC) -> pd.DataFrame:
     """Every AOI with a map; writes the GeoTIFFs, ``acres_by_class.csv`` and ``legend.csv``."""
     if map_date is None:
@@ -90,7 +109,7 @@ def package(out_dir, map_date: str | None = None, src_root=SRC) -> pd.DataFrame:
         out_fields = Path(out_dir) / "fields"
         out_fields.mkdir(parents=True, exist_ok=True)
         for f in sorted(fields_dir.glob("aoi*_fields_monsoon2026.gpkg")):
-            shutil.copy2(f, out_fields / f.name.replace("monsoon2026", f"standing_rice_{map_date}"))
+            deliver_fields(f, out_fields / f.name.replace("monsoon2026", f"standing_rice_{map_date}"))
         if (fields_dir / "field_acres_by_class.csv").exists():
             shutil.copy2(fields_dir / "field_acres_by_class.csv", Path(out_dir) / "field_acres_by_class.csv")
     note = Path(__file__).resolve().parents[2] / "docs" / "delivery_methods_note.md"
