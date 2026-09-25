@@ -85,7 +85,9 @@ def deliver_fields(src, dst) -> int:
     if "is_field" in g and "refine_flag" in g:
         g = g[g["is_field"] | g["refine_flag"].isin(DELIVERED_NON_FIELD_FLAGS)]
     Path(dst).unlink(missing_ok=True)
-    g.to_file(dst, layer="fields", driver="GPKG")
+    # the layer carries the file's name: two AOIs (or two versions) opened side by side in QGIS
+    # are then told apart in the layer list
+    g.to_file(dst, layer=Path(dst).stem, driver="GPKG")
     return len(g)
 
 

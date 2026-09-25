@@ -18,14 +18,23 @@ Two phases, because some rules need the class labels:
   lines), outlines simplified by 0.5 m (the traced pixel staircase), areas recomputed in the local
   UTM zone. Every polygon keeps its original ``field_id`` (the id used in the review and the
   delivery), so a field can be followed across versions.
-* :func:`label_stage` (after labelling): polygons smaller than 4 pixels whose touching neighbours
-  all share their label are merged into the largest such neighbour; polygons that are water all
-  season are flagged ``pond``. Flagged polygons stay in the file with ``is_field = False`` and a
-  ``refine_flag`` saying why, so nothing is silently deleted.
+* :func:`label_stage` (after labelling): crumbs under 4 pixels merge into the neighbour they share
+  most outline with, small same-label pieces (under 0.5 ac, mostly enclosed by one field at least
+  twice their size) merge into that field, and polygons that are water all season are flagged
+  ``pond``. Flagged polygons stay in the file with ``is_field = False`` and a ``refine_flag`` saying
+  why, so nothing is silently deleted (the delivery copies fields, strips and ponds only).
+
+Geometry hygiene throughout (user review of aoi116): only valid polygons (never lines or
+geometry collections), thin or tiny holes left by cutting a neighbour out are filled, the
+tail-removing opening is clipped to the original outline (its mitred corners spiked into
+neighbours), a polygon cut into pieces keeps one outline per field (other pieces become fields of
+their own or are dropped as crumbs), duplicate outlines are cut to nothing. :func:`audit` measures
+all of this on a delivered file.
 
 Use::
 
     python -m sar_pipeline.analysis.field_refine geometry --ids 40 116     # -> fields_refined/aoi<N>_delineation_refined.gpkg
+    python -m sar_pipeline.analysis.field_refine audit --ids 116           # hygiene numbers of the delivered fields file
     (then field_rice labels those files; label_stage runs inside field_rice.run when asked)
 """
 from __future__ import annotations
@@ -62,14 +71,147 @@ STRIP_MIN_LENGTH_M = 150.0
 TAIL_RADIUS_M = 3.0
 #: Simplification tolerance for the traced outlines (far below the 10 m pixel).
 SIMPLIFY_M = 0.5
-#: A polygon under this many pixels inside same-label neighbours is merged into the largest one.
+#: A polygon under this many pixels is a crumb of the segmentation, not a field: it merges into the
+#: neighbour it shares most boundary with (whatever that neighbour's label: 1-3 pixels cannot carry
+#: a label of their own), or is dropped when nothing touches it.
 TINY_PX = 4
+#: A small piece of a field (under ``SMALL_PIECE_M2``) that shares at least ``PIECE_SHARED_MIN`` of its
+#: outline with ONE same-label neighbour at least ``PIECE_RATIO_MIN`` times its size is part of that
+#: field: the segmentation cut a corner or a strip off it (user review, aoi116).
+SMALL_PIECE_M2 = 0.5 * 4046.8564224
+PIECE_SHARED_MIN = 0.5
+PIECE_RATIO_MIN = 2.0
+#: Holes narrower than twice this (a line left where an overlapping neighbour was cut out) or
+#: smaller than ``TINY_PX`` pixels are filled; wider holes (a pond, a house) stay.
+HOLE_THIN_M = 3.0
+#: Merging closes gaps narrower than twice this between a piece and its absorber.
+MERGE_GAP_M = 0.6
 #: A polygon is a pond when this share of its pixels was water all season.
 POND_SHARE = 0.6
 
 
 def _utm(g):
     return g.estimate_utm_crs()
+
+
+def polygonal(geoms):
+    """Valid polygons only: set operations on traced outlines leave line and point crumbs and
+    geometry collections behind, which no reader treats as a field. Empty where nothing is left."""
+    import shapely
+
+    geoms = shapely.make_valid(np.asarray(geoms, dtype=object))
+    out = np.empty(len(geoms), dtype=object)
+    for i, g in enumerate(geoms):
+        if g is None or g.is_empty:
+            out[i] = shapely.Polygon()
+            continue
+        parts = [q for q in shapely.get_parts(g) if q.geom_type == "Polygon" and q.area > 0]
+        out[i] = shapely.Polygon() if not parts else (parts[0] if len(parts) == 1 else shapely.MultiPolygon(parts))
+    return out
+
+
+def robust(op, a, b):
+    """``op(a, b)`` (a shapely set operation) that survives the broken topology of traced outlines.
+
+    GEOS raises "side location conflict" / "non-noded intersection" / "ring edge missing" on
+    outlines that ``make_valid`` accepts. First retry: both operands rebuilt by a zero buffer.
+    Second: both snapped to a 1 cm grid (noding on a grid is what GEOS recommends for such
+    inputs). Third: to a 10 cm grid. Why not always snap: a snapped operand can move an edge by
+    up to half the grid, so it is done only where needed.
+    """
+    import shapely
+
+    try:
+        return op(a, b)
+    except shapely.errors.GEOSException:
+        pass
+    try:
+        return op(shapely.buffer(a, 0), shapely.buffer(b, 0))
+    except shapely.errors.GEOSException:
+        pass
+    for grid in (0.01, 0.1):
+        try:
+            return op(shapely.make_valid(shapely.set_precision(a, grid)), shapely.make_valid(shapely.set_precision(b, grid)))
+        except shapely.errors.GEOSException:
+            continue
+    raise
+
+
+def clean(geoms, grid_m: float = 0.01):
+    """Snap coordinates to a 1 cm grid and keep valid polygons: removes the near-duplicate vertices
+    and hairline self-touches that reprojection and set operations leave (an "invalid" outline in
+    QGIS) without moving any edge visibly."""
+    import shapely
+
+    return polygonal(shapely.set_precision(shapely.make_valid(np.asarray(geoms, dtype=object)), grid_m))
+
+
+def fill_small_holes(geoms, thin_m: float = HOLE_THIN_M, min_m2: float = TINY_PX * PIXEL_M2):
+    """Fill interior rings that are thin (nothing survives an erosion of ``thin_m``) or under
+    ``min_m2``: the lines and specks that cutting an overlapping neighbour out of a field leaves.
+    Returns (geometries, number of holes filled per polygon)."""
+    import shapely
+
+    out = np.asarray(geoms, dtype=object).copy()
+    filled = np.zeros(len(out), dtype=int)
+    for i, g in enumerate(out):
+        if g is None or g.is_empty or shapely.get_num_interior_rings(g) == 0 and g.geom_type == "Polygon":
+            continue
+        polys = []
+        for q in shapely.get_parts(g):
+            if q.geom_type != "Polygon":
+                continue
+            keep = []
+            for ring in q.interiors:
+                hole = shapely.Polygon(ring)
+                if hole.area < min_m2 or shapely.buffer(hole, -thin_m).is_empty:
+                    filled[i] += 1
+                else:
+                    keep.append(ring)
+            polys.append(shapely.Polygon(q.exterior, keep))
+        out[i] = polys[0] if len(polys) == 1 else shapely.MultiPolygon(polys)
+    return out, filled
+
+
+def split_parts(m, min_m2: float = TINY_PX * PIXEL_M2):
+    """One outline per field: a polygon cut into pieces keeps its largest piece; other pieces of
+    at least ``min_m2`` become fields of their own (``field_id`` + a letter, flag ``split_part``),
+    smaller ones are crumbs and are dropped (their share is recorded in ``crumbs_dropped_share``).
+    ``m`` in a metric CRS. Returns the frame with the new rows appended."""
+    import geopandas as gpd
+    import shapely
+
+    m = m.copy()
+    geoms = m.geometry.to_numpy().copy()
+    dropped = np.zeros(len(m))
+    new_rows = []
+    is_field = m["is_field"].to_numpy() if "is_field" in m else np.ones(len(m), dtype=bool)
+    for i, g in enumerate(geoms):
+        parts = [q for q in shapely.get_parts(g) if q.geom_type == "Polygon" and q.area > 0]
+        if len(parts) <= 1 or not is_field[i]:         # flagged records keep their outline as it is
+            continue
+        parts.sort(key=lambda q: q.area, reverse=True)
+        total = sum(q.area for q in parts)
+        geoms[i] = parts[0]
+        letters = "bcdefghijklmnopqrstuvwxyz"
+        n_new = 0
+        for q in parts[1:]:
+            if q.area >= min_m2 and n_new < len(letters):
+                row = m.iloc[i].copy()
+                row["geometry"] = q
+                row["field_id"] = f"{m['field_id'].iloc[i]}{letters[n_new]}"
+                new_rows.append(row)
+                n_new += 1
+            else:
+                dropped[i] += q.area / total
+    m["geometry"] = gpd.GeoSeries(geoms, index=m.index, crs=m.crs)
+    m["crumbs_dropped_share"] = np.round(dropped, 3)
+    if new_rows:
+        extra = gpd.GeoDataFrame(new_rows, crs=m.crs)
+        extra["refine_flag"] = "split_part"
+        extra["crumbs_dropped_share"] = 0.0
+        m = gpd.GeoDataFrame(pd.concat([m, extra], ignore_index=True), geometry="geometry", crs=m.crs)
+    return m
 
 
 def cut_overlaps(g):
@@ -85,20 +227,22 @@ def cut_overlaps(g):
     a = g.geometry.area.to_numpy()
     idx = gpd.GeoDataFrame({"a": a}, geometry=g.geometry.to_numpy(), crs=g.crs)
     pairs = gpd.sjoin(idx[["geometry", "a"]], idx[["geometry", "a"]], predicate="intersects", how="inner")
-    pairs = pairs[(pairs.index != pairs["index_right"]) & (pairs["a_right"] < pairs["a_left"])]
+    # the smaller polygon wins; of two identical outlines (the delineation holds duplicates) the
+    # later one wins, so the earlier one is cut to nothing and dropped as a crumb
+    pairs = pairs[(pairs.index != pairs["index_right"])
+                  & ((pairs["a_right"] < pairs["a_left"])
+                     | ((pairs["a_right"] == pairs["a_left"]) & (pairs["index_right"] > pairs.index)))]
     geoms = g.geometry.to_numpy().copy()
     lost = np.zeros(len(g))
     for left, grp in pairs.groupby(level=0):
-        smaller = shapely.union_all(geoms[grp["index_right"].to_numpy()])
         try:
-            new = shapely.difference(geoms[left], smaller)
+            smaller = shapely.union_all(geoms[grp["index_right"].to_numpy()])
         except shapely.errors.GEOSException:
-            # traced outlines can be topologically broken in ways make_valid does not repair;
-            # a zero buffer rebuilds both operands as clean polygons
-            new = shapely.difference(shapely.buffer(geoms[left], 0), shapely.buffer(smaller, 0))
+            smaller = shapely.union_all(shapely.make_valid(shapely.set_precision(geoms[grp["index_right"].to_numpy()], 0.01)))
+        new = robust(shapely.difference, geoms[left], smaller)
         lost[left] = 1 - (shapely.area(new) / a[left] if a[left] > 0 else 0)
         geoms[left] = new
-    return gpd.GeoSeries(geoms, index=g.index, crs=g.crs), lost
+    return gpd.GeoSeries(polygonal(geoms), index=g.index, crs=g.crs), lost
 
 
 def strip_like(geom_series) -> np.ndarray:
@@ -129,6 +273,9 @@ def remove_tails(geom_series, radius: float = TAIL_RADIUS_M):
     geoms = geom_series.to_numpy()
     opened = shapely.buffer(shapely.buffer(geoms, -radius, quad_segs=2, join_style="mitre"), radius,
                             quad_segs=2, join_style="mitre")
+    # the dilation's mitred corners can spike past the original outline (into a neighbour); an
+    # opening is contained in its input by definition, so clip it back
+    opened = polygonal([robust(shapely.intersection, o, g) for o, g in zip(opened, geoms)])
     a0 = shapely.area(geoms)
     with np.errstate(divide="ignore", invalid="ignore"):
         removed = np.where(a0 > 0, 1 - shapely.area(opened) / a0, 0.0)
@@ -151,21 +298,27 @@ def geometry_stage(fields, aoi_id: int | None = None):
     g["area_acres_delivered"] = g["area_acres"] if "area_acres" in g else np.nan
     utm = _utm(g)
     m = g.to_crs(utm)
-    m["geometry"] = m.geometry.make_valid().simplify(SIMPLIFY_M, preserve_topology=True).make_valid()
+    m["geometry"] = gpd.GeoSeries(polygonal(m.geometry.make_valid().simplify(SIMPLIFY_M, preserve_topology=True)),
+                                  index=m.index, crs=m.crs)
     a0 = m.geometry.area.to_numpy()
     geoms, lost = cut_overlaps(m)
+    filled_geoms, holes_filled = fill_small_holes(geoms.to_numpy())
+    geoms = gpd.GeoSeries(filled_geoms, index=m.index, crs=m.crs)
     strip_before = strip_like(geoms)                 # judged before the opening: a 6 m canal is a strip, not "nothing"
     opened, tail_share = remove_tails(geoms)
-    # polygons under 4 pixels are slivers for the label stage (merge_tiny), not fields with tails:
+    # polygons under 4 pixels are crumbs for the label stage (merge_pieces), not fields with tails:
     # the opening would erase them and lose the merge
     tiny = geoms.area.to_numpy() < TINY_PX * PIXEL_M2
     opened[tiny], tail_share[tiny] = geoms.to_numpy()[tiny], 0.0
     m["geometry"] = gpd.GeoSeries(opened, index=m.index, crs=m.crs)
+    m["holes_filled"] = holes_filled
+    # a monster outline cut around many fields is left in scattered patches: judge the number of
+    # pieces before they are split into fields of their own
+    parts = shapely.get_num_geometries(m.geometry.to_numpy())
     a1 = m.geometry.area.to_numpy()
     flag = np.full(len(m), "", dtype=object)
     monster = lost >= MONSTER_COVER
     thin = strip_before | (a1 <= 0)
-    parts = shapely.get_num_geometries(m.geometry.to_numpy())
     drop = monster & ((a1 < MIN_REMAINDER_PX * PIXEL_M2) | thin | (parts > MAX_REMAINDER_PARTS))
     flag[monster & ~drop] = "monster_cut"
     flag[drop] = "monster_dropped"
@@ -175,57 +328,118 @@ def geometry_stage(fields, aoi_id: int | None = None):
     m["overlap_lost_share"] = np.round(lost, 3)
     m["tail_removed_share"] = np.round(tail_share, 3)
     m["is_field"] = ~(drop | strip)
-    # a polygon that is nothing but tails has no geometry left: keep the raw outline for the record
+    m["area_acres_original"] = np.round(a0 / SQM_PER_ACRE, 4)
+    # a polygon that is nothing but tails (or a duplicate cut to nothing) has no geometry left:
+    # keep the raw outline for the record, flagged, not a field
     empty = m.geometry.is_empty.to_numpy()
     m.loc[empty, "geometry"] = geoms[empty]
-    m["area_acres"] = np.round(a1 / SQM_PER_ACRE, 4)
-    m["area_acres_original"] = np.round(a0 / SQM_PER_ACRE, 4)
+    still_empty = m.geometry.is_empty.to_numpy()
+    m.loc[still_empty, "geometry"] = fields.to_crs(utm).geometry.to_numpy()[still_empty]
+    m.loc[empty & (flag == ""), "refine_flag"] = "crumb"
+    m.loc[empty, "is_field"] = False
+    # one outline per field: pieces of a cut polygon become fields of their own or crumbs (after
+    # the clean-up, which can itself split a self-touching outline into pieces)
+    m["geometry"] = gpd.GeoSeries(clean(m.geometry.to_numpy()), index=m.index, crs=m.crs)
+    m = split_parts(m)
+    m["area_acres"] = np.round(m.geometry.area.to_numpy() / SQM_PER_ACRE, 4)
     out = m.to_crs(4326)
     # dropped monsters are kept as records (empty geometry would break readers): keep the geometry,
     # is_field False and the flag say what happened; they get no label acres in the delivery
     return gpd.GeoDataFrame(out, geometry="geometry", crs=4326)
 
 
-def merge_tiny(g, label_col: str = "label"):
-    """Phase B, part 1: tiny polygons inside same-label neighbours merge into the largest neighbour.
+def shared_outline(geom, other, tol: float = 1.0) -> float:
+    """Length of ``geom``'s outline that runs within ``tol`` metres of ``other``."""
+    import shapely
+
+    return float(shapely.length(robust(shapely.intersection, geom.boundary, shapely.buffer(other, tol))))
+
+
+def merge_pieces(g, label_col: str = "label", passes: int = 3):
+    """Phase B, part 1: crumbs and small same-label pieces merge into the field they belong to.
 
     ``g`` in a metric CRS. Returns (GeoDataFrame, merged_into Series: field_id of the absorber or "").
+    * a polygon under ``TINY_PX`` pixels joins the neighbour it shares most outline with, whatever
+      that neighbour's label (a crumb's own 1-3 pixels are no label); with no neighbour it is a
+      ``crumb`` and is not delivered;
+    * a polygon under ``SMALL_PIECE_M2`` joins a same-label neighbour that holds at least
+      ``PIECE_SHARED_MIN`` of its outline and is at least ``PIECE_RATIO_MIN`` times larger.
+    Merging closes the hairline gap between the two outlines and never enters a third polygon.
+    Repeated up to ``passes`` times, as one merge can make the next possible.
     """
     import geopandas as gpd
     import shapely
 
     g = g.copy()
-    a = g.geometry.area.to_numpy()
-    tiny = (a < TINY_PX * PIXEL_M2) & g["is_field"].to_numpy()
-    merged_into = pd.Series("", index=g.index, dtype=object)
-    if not tiny.any():
-        return g, merged_into
-    idx = gpd.GeoDataFrame({"lab": g[label_col].to_numpy(), "a": a, "fid": g["field_id"].to_numpy(),
-                            "is_field": g["is_field"].to_numpy()}, geometry=g.geometry.to_numpy(), crs=g.crs)
-    # sjoin suffixes only the columns both sides share: lab -> lab_left / lab_right, the rest keep their names
-    touch = gpd.sjoin(idx[tiny][["geometry", "lab"]], idx[["geometry", "lab", "a", "fid", "is_field"]],
-                      predicate="dwithin", distance=1.0, how="inner")
-    touch = touch[(touch.index != touch["index_right"]) & touch["is_field"]]
+    if "merged_into" not in g:
+        g["merged_into"] = ""
+    merged_into = pd.Series(g["merged_into"].to_numpy().astype(object), index=g.index)
     geoms = g.geometry.to_numpy().copy()
-    for left, grp in touch.groupby(level=0):
-        if not (grp["lab_right"] == grp["lab_left"]).all():
-            continue
-        best = grp.sort_values("a", ascending=False).iloc[0]
-        right = int(best["index_right"])
-        if merged_into.iloc[right] != "":
-            continue                                   # the absorber was itself merged away
-        try:
-            geoms[right] = shapely.union(geoms[right], geoms[left])
-        except shapely.errors.GEOSException:
-            # a traced outline can be broken in a way make_valid leaves; a zero buffer rebuilds it
-            geoms[right] = shapely.union(shapely.buffer(geoms[right], 0), shapely.buffer(geoms[left], 0))
-        merged_into.iloc[left] = best["fid"]
+    labels = g[label_col].to_numpy()
+    fids = g["field_id"].to_numpy()
+    flags = g["refine_flag"].to_numpy().astype(object)
+    active = g["is_field"].to_numpy().copy()
+    for _ in range(passes):
+        area = shapely.area(geoms)
+        tree = shapely.STRtree(geoms)
+        order = np.argsort(area)                       # smallest first: a crumb joins before its absorber moves
+        changed = False
+        for i in order:
+            if not active[i]:
+                continue
+            tiny = area[i] < TINY_PX * PIXEL_M2
+            small = area[i] < SMALL_PIECE_M2
+            if not (tiny or small):
+                break
+            near = [j for j in tree.query(shapely.buffer(geoms[i], 1.0), predicate="intersects") if j != i and active[j]]
+            if not near:
+                if tiny:
+                    active[i] = False
+                    flags[i] = "crumb"
+                    changed = True
+                continue
+            shared = {j: shared_outline(geoms[i], geoms[j]) for j in near}
+            perimeter = max(shapely.length(geoms[i]), 1e-9)
+            j = max(shared, key=shared.get)
+            if tiny:
+                if shared[j] <= 0:
+                    continue
+            else:
+                same = [k for k in near if labels[k] == labels[i] and area[k] >= PIECE_RATIO_MIN * area[i]
+                        and shared[k] >= PIECE_SHARED_MIN * perimeter]
+                if not same:
+                    continue
+                j = max(same, key=shared.get)
+            others = [k for k in near if k != j]
+            joined = robust(shapely.union, geoms[j], geoms[i])
+            joined = shapely.buffer(shapely.buffer(joined, MERGE_GAP_M, join_style="mitre"), -MERGE_GAP_M, join_style="mitre")
+            if others:
+                block = robust(lambda x, y: shapely.union_all([x, y]), shapely.union_all(shapely.buffer([geoms[k] for k in others], 0)),
+                               shapely.Polygon())
+                joined = robust(shapely.difference, joined, block)
+            joined, _ = fill_small_holes(polygonal([joined]))
+            joined = joined[0]
+            if joined.is_empty or joined.geom_type != "Polygon":
+                if tiny:                                   # not attached after all: a crumb on its own
+                    active[i] = False
+                    flags[i] = "crumb"
+                    changed = True
+                continue
+            geoms[j] = joined
+            active[i] = False
+            flags[i] = "merged"
+            merged_into.iloc[i] = fids[j]
+            changed = True
+        if not changed:
+            break
     g["geometry"] = gpd.GeoSeries(geoms, index=g.index, crs=g.crs)
-    gone = merged_into != ""
-    g.loc[gone, "is_field"] = False
-    g.loc[gone, "refine_flag"] = "merged"
+    g["is_field"] = active
+    g["refine_flag"] = flags
     g["merged_into"] = merged_into
     return g, merged_into
+
+
+merge_tiny = merge_pieces        # the name the first version used
 
 
 def flag_ponds(g, water_share: np.ndarray):
@@ -239,11 +453,15 @@ def flag_ponds(g, water_share: np.ndarray):
 
 def label_stage(fields_labelled, water_share=None):
     """Phase B on labelled fields (lon/lat, with ``label``, ``is_field``, ``refine_flag``)."""
+    import geopandas as gpd
+
     m = fields_labelled.to_crs(_utm(fields_labelled))
-    m["geometry"] = m.geometry.make_valid()
-    m, _ = merge_tiny(m)
+    m["geometry"] = gpd.GeoSeries(polygonal(m.geometry.to_numpy()), index=m.index, crs=m.crs)
+    m, _ = merge_pieces(m)
     if water_share is not None:
         m = flag_ponds(m, water_share)
+    m["geometry"] = gpd.GeoSeries(clean(m.geometry.to_numpy()), index=m.index, crs=m.crs)
+    m = split_parts(m)
     m["area_acres"] = np.round(m.geometry.area / SQM_PER_ACRE, 4)
     return m.to_crs(4326)
 
@@ -313,6 +531,121 @@ def examples(aoi_id: int, n: int = 2, half_m: float = 150, out_dir=OUT) -> list:
     return made
 
 
+def audit(path, layer=None) -> dict:
+    """Geometry hygiene of one fields file: what a reviewer sees in QGIS, as numbers.
+
+    Overlaps are measured in the local UTM zone on the polygons as written (lon/lat rounding
+    makes hairline overlaps of a few m2 unavoidable; pairs over ``PIXEL_M2`` are real).
+    """
+    import geopandas as gpd
+    import shapely
+
+    g = gpd.read_file(path, layer=layer) if layer else gpd.read_file(path)
+    m = g.to_crs(_utm(g))
+    geoms = m.geometry.to_numpy()
+    valid = shapely.is_valid(geoms)
+    types = pd.Series(shapely.get_type_id(geoms)).value_counts().to_dict()
+    area = shapely.area(shapely.make_valid(geoms))
+    holes_thin = holes_tiny = holes_wide = 0
+    for gm in shapely.make_valid(geoms):
+        for q in shapely.get_parts(gm):
+            if q.geom_type != "Polygon":
+                continue
+            for ring in q.interiors:
+                hole = shapely.Polygon(ring)
+                if shapely.buffer(hole, -HOLE_THIN_M).is_empty:
+                    holes_thin += 1
+                elif hole.area < TINY_PX * PIXEL_M2:
+                    holes_tiny += 1
+                else:
+                    holes_wide += 1
+    tree = shapely.STRtree(geoms)
+    left, right = tree.query(geoms, predicate="intersects")
+    keep = left < right
+    left, right = left[keep], right[keep]
+    inter = shapely.area(shapely.intersection(shapely.make_valid(geoms[left]), shapely.make_valid(geoms[right])))
+    labels = m["label"].to_numpy() if "label" in m else np.zeros(len(m))
+    # small same-label pieces mostly enclosed by one larger same-label neighbour (what merge_pieces removes)
+    enclosed = 0
+    for i in np.flatnonzero(area < SMALL_PIECE_M2):
+        near = [j for j in tree.query(shapely.buffer(geoms[i], 1.0), predicate="intersects") if j != i]
+        per = max(shapely.length(geoms[i]), 1e-9)
+        if any(labels[j] == labels[i] and area[j] >= PIECE_RATIO_MIN * area[i]
+               and shared_outline(geoms[i], geoms[j]) >= PIECE_SHARED_MIN * per for j in near):
+            enclosed += 1
+    return {"polygons": len(m), "invalid": int((~valid).sum()),
+            "non_polygon_features": int(sum(n for t, n in types.items() if t not in (3, 6))),
+            "multipart": int((shapely.get_num_geometries(geoms) > 1).sum()),
+            "under_4px": int((area < TINY_PX * PIXEL_M2).sum()),
+            "holes_thin": holes_thin, "holes_tiny": holes_tiny, "holes_wide": holes_wide,
+            "overlap_pairs_over_1m2": int((inter > 1).sum()), "overlap_pairs_over_1px": int((inter > PIXEL_M2).sum()),
+            "overlap_m2_total": round(float(inter[inter > 1].sum()), 1),
+            "small_same_label_pieces_enclosed": enclosed}
+
+
+def review_crops(aoi_id: int, new_path, prev_path=None, field_ids=(), n_random: int = 6, half_m: float = 120,
+                 seed: int = 0, out_dir=f"{OUT}/review") -> list:
+    """Crops of the latest clear true-colour image with the delivered outlines drawn on it: the
+    new file (cyan, fields filled by class colour at 35 %) beside the previous one (yellow), around
+    the named fields and ``n_random`` random fields. Why: the numbers of :func:`audit` say the
+    geometry is clean; only a look says the fields look like fields."""
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    import rasterio
+    from matplotlib.patches import Polygon as MplPolygon
+    from rasterio.windows import from_bounds
+    from shapely.geometry import box
+
+    from ..optical_export import band_index
+    from ..review import _stretch, latest_clear
+
+    colours = {0: "#a070c0", 1: "#60b0e0", 2: "#40d0c0", 3: "#e0b060", 4: "#8060c0", 5: "#a0c060", 6: "#e070c0",
+               7: "#3c78c8", 8: "#c8aa78"}
+    new = gpd.read_file(new_path)
+    prev = gpd.read_file(prev_path) if prev_path else None
+    path, date, _ = latest_clear(aoi_id)
+    rng = np.random.default_rng(seed)
+    made = []
+    with rasterio.open(path) as ds:
+        new_m = new.to_crs(ds.crs)
+        prev_m = prev.to_crs(ds.crs) if prev is not None else None
+        known = set(new_m["field_id"]) | (set(prev_m["field_id"]) if prev_m is not None else set())
+        picks = [f for f in field_ids if f in known]
+        pool = new_m[new_m["is_field"]] if "is_field" in new_m else new_m
+        picks += list(pool["field_id"].sample(n_random, random_state=int(rng.integers(1 << 30))))
+        for fid in picks:
+            src = new_m if fid in set(new_m["field_id"]) else prev_m
+            c = src.loc[src["field_id"] == fid].geometry.iloc[0].centroid
+            bx = (c.x - half_m, c.y - half_m, c.x + half_m, c.y + half_m)
+            win = from_bounds(*bx, transform=ds.transform)
+            img = np.dstack([_stretch(ds.read(band_index(ds, b), window=win, boundless=True, fill_value=0)
+                                      .astype("float32")) for b in ("B4", "B3", "B2")])
+            panels = [("new", new_m, "cyan")] + ([("previous", prev_m, "yellow")] if prev_m is not None else [])
+            fig, axes = plt.subplots(1, len(panels), figsize=(6 * len(panels), 6), squeeze=False)
+            for ax, (title, frame, colour) in zip(axes[0], panels):
+                ax.imshow(img, extent=(bx[0], bx[2], bx[1], bx[3]))
+                near = frame[frame.intersects(box(*bx))]
+                for geom, lab in zip(near.geometry, near["label"] if "label" in near else [1] * len(near)):
+                    for part in getattr(geom, "geoms", [geom]):
+                        if part.geom_type != "Polygon":        # the previous files hold line crumbs
+                            continue
+                        ax.add_patch(MplPolygon(np.asarray(part.exterior.coords), closed=True, facecolor=colours.get(int(lab), "grey"),
+                                                edgecolor=colour, linewidth=0.8, alpha=0.35))
+                        for ring in part.interiors:
+                            ax.add_patch(MplPolygon(np.asarray(ring.coords), closed=True, facecolor="white", edgecolor="red",
+                                                    linewidth=0.8, alpha=0.6))
+                ax.set_xlim(bx[0], bx[2]), ax.set_ylim(bx[1], bx[3]), ax.set_xticks([]), ax.set_yticks([])
+                ax.set_title(f"{title}: {len(near)} polygons", fontsize=9)
+            fig.suptitle(f"{fid}; S2 {date.date()}; holes drawn white/red", fontsize=9)
+            out = Path(out_dir)
+            out.mkdir(parents=True, exist_ok=True)
+            f = out / f"aoi{aoi_id}_{fid}.png"
+            fig.savefig(f, dpi=80, bbox_inches="tight")
+            plt.close(fig)
+            made.append(f)
+    return made
+
+
 def run_geometry(aoi_ids, out_dir=OUT) -> pd.DataFrame:
     from . import field_rice
 
@@ -345,9 +678,15 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.field_refine", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["geometry", "examples"])
+    p.add_argument("step", choices=["geometry", "examples", "audit"])
     p.add_argument("--ids", nargs="+", type=int, required=True)
+    p.add_argument("--file", default=f"{SRC}/delivery/fields/aoi{{}}_fields_standing_rice_2026-09-21.gpkg",
+                   help="audit: file pattern with {} for the AOI number")
     args = p.parse_args(argv)
+    if args.step == "audit":
+        rows = [{"aoi": f"aoi{a}", **audit(args.file.format(a))} for a in args.ids]
+        print(pd.DataFrame(rows).to_string(index=False))
+        return 0
     if args.step == "examples":
         for a in args.ids:
             print("\n".join(str(f) for f in examples(a)))

@@ -303,6 +303,32 @@ prefix plus a single digit also matches ordinary code, such as the EPSG:4326 hel
 
 ---
 
+## Field polygons: refining the delineation and checking it
+
+The field polygons (a segmentation model's output) are cleaned before they are labelled, because
+the raw file holds outlines drawn around groups of fields, roads traced as fields, duplicates,
+overlaps and crumbs. `analysis/field_refine` does this in two phases and always starts from the raw
+delineation; see the module docstring for every rule and why it exists.
+
+```bash
+# phase A, geometry only (overlaps, monsters, strips, tails, holes, pieces, UTM areas)
+python -m sar_pipeline.analysis.field_refine geometry --ids 116        # -> processed/_batch/s2_2026/fields_refined/aoi116_delineation_refined.gpkg
+# labelling reads the refined file and runs phase B (crumbs and small same-class pieces merged, ponds flagged)
+python -m sar_pipeline.analysis.field_level --ids 116                  # second opinion per field (mean curves)
+python -m sar_pipeline.analysis.field_rice --ids 116                   # -> fields/aoi116_fields_monsoon2026.gpkg
+python -m sar_pipeline.delivery --out processed/_batch/s2_2026/delivery
+# what a reviewer would see in QGIS, as numbers (invalid outlines, holes, pieces, overlaps, crumbs)
+python -m sar_pipeline.analysis.field_refine audit --ids 116
+# every AOI, in the right order, with the comparison and the audit at the end
+scripts/refine_all.sh <stage_name>
+```
+
+`field_refine.review_crops(aoi_id, new_file, previous_file, field_ids=[...], n_random=8)` writes
+before/after crops of the latest clear Sentinel-2 image with the polygons drawn on it; look at a
+few before trusting a change to the geometry rules. Delivered polygons carry `refine_flag`
+(`strip`, `pond`, `monster_cut`, `split_part` or empty), `holes_filled`, `crumbs_dropped_share`,
+`overlap_lost_share` and `tail_removed_share`, so nothing that was changed is hidden.
+
 ## Sentinel-2 reference images for checking a map by eye
 
 `sar_pipeline.optical_export` exports, for each AOI and month, the **one date whose Sentinel-2

@@ -113,9 +113,29 @@ Overlaps resolved (the smaller polygon wins); an outline that loses half its are
 polygons is cut to its remainder or dropped (remainder under 4 pixels, a strip, or scattered in
 more than 3 pieces); tails narrower than 6 m removed by a morphological opening; long thin polygons
 (no part wider than 15 m, longer than 150 m) flagged as strips; all-season water flagged as ponds;
-slivers under 4 pixels merged into a same-label neighbour; areas recomputed in the local UTM zone.
-Flagged polygons stay in the file with `is_field = False` and a `refine_flag`. Every polygon keeps
-its `field_id`.
+areas recomputed in the local UTM zone. Flagged polygons stay in the file with `is_field = False`
+and a `refine_flag`. Every polygon keeps its `field_id`.
+
+**Geometry hygiene (after the user's QGIS review of the delivered aoi116 file, 25 September):** the
+first refined files still carried invalid outlines, line-shaped holes where an overlapping
+neighbour had been cut out, crumbs left by the cut (one field in several pieces), mitred corners of
+the tail-removing opening that spiked into neighbours, duplicate outlines, tiny polygons that had
+not merged, and small same-class pieces sitting inside a bigger field. Now, always starting from
+the raw delineation: only valid polygons are kept (never lines or geometry collections); holes that
+are thin (under 6 m wide) or under 4 pixels are filled, wider holes (a pond, a house) stay; the
+opening is clipped to the original outline; duplicates are cut to nothing; a polygon left in
+pieces keeps one outline per field (pieces of 4 pixels or more become fields of their own,
+`field_id` + a letter, flag `split_part`; smaller pieces are dropped, their share recorded in
+`crumbs_dropped_share`); after labelling, crumbs under 4 pixels merge into the neighbour they share
+most outline with (whatever its label: 1-3 pixels carry no label), small pieces under 0.5 ac that
+share at least half their outline with one same-label field at least twice their size merge into
+it, and merged outlines are labelled again from their final shape. `field_refine audit` measures
+all of this on a delivered file and `field_refine.review_crops` draws before/after crops.
+Delivered fields of aoi116, before -> after: invalid 327 -> 0, line-shaped holes 2,652 -> 1,
+polygons in pieces 862 -> 8 (all strips), polygons under 4 pixels 1,495 -> 1, overlapping pairs
+1,562 -> 0, small same-class pieces inside a field 578 -> 0; polygons 7,917 -> 5,982, delivered
+acres unchanged (rice 4,904 + young rice 60). The delivered GeoPackage layer now carries the file
+name, so two AOIs or two versions opened together in QGIS are told apart.
 
 ## Measurements (final re-run of all 132 AOIs, 25 September 2026, "stage 7")
 

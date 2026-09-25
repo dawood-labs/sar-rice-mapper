@@ -81,11 +81,14 @@ def label_from_counts(counts: np.ndarray, fallback) -> pd.DataFrame:
     })
 
 
+#: Polygons with these flags are records only (merged into another field, or a crumb): they do
+#: not own pixels and get no label of their own.
+RECORD_ONLY_FLAGS = ("merged", "crumb", "monster_dropped")
+
+
 def label_aoi(aoi_id: int, map_suffix: str = "_final", src_root=SRC, path=DELINEATION):
     """Fields of one AOI with their class label; also the grid of field indices (for scoring)."""
-    import geopandas as gpd
     import rasterio
-    from rasterio.features import rasterize
 
     fields = load_fields(aoi_id, path)
     with rasterio.open(Path(src_root) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026{map_suffix}.tif") as ds:
@@ -93,9 +96,23 @@ def label_aoi(aoi_id: int, map_suffix: str = "_final", src_root=SRC, path=DELINE
         transform, crs = ds.transform, ds.crs
     if fields.empty:
         return fields, np.full(classes.shape, -1, dtype="int32"), classes
+    out, idx = label_frame(fields, classes, transform, crs, aoi_id)
+    return out, idx, classes
+
+
+def label_frame(fields, classes, transform, crs, aoi_id: int):
+    """Label a frame of field polygons from the class raster: the pixel-majority label, shares
+    and pixel counts per polygon, and the grid of field indices. Called again after the label
+    stage merged pieces, so every delivered polygon's numbers describe its final outline."""
+    import geopandas as gpd
+    import rasterio
+    from rasterio.features import rasterize
+
     g = fields.to_crs(crs)
     g["geometry"] = g.geometry.make_valid()
+    owns = ~g["refine_flag"].isin(RECORD_ONLY_FLAGS).to_numpy() if "refine_flag" in g else np.ones(len(g), dtype=bool)
     order = np.argsort(-g.geometry.area.to_numpy())          # largest first, finer tracing burns last
+    order = order[owns[order]]
     idx = rasterize(((geom, int(i)) for i, geom in zip(order, g.geometry.to_numpy()[order])),
                     out_shape=classes.shape, transform=transform, fill=-1, dtype="int32")
     counts = counts_per_field(idx, classes, len(g))
@@ -107,7 +124,8 @@ def label_aoi(aoi_id: int, map_suffix: str = "_final", src_root=SRC, path=DELINE
     fallback[inside] = classes[rows[inside], cols[inside]]
     lab = label_from_counts(counts, fallback)
     keep = [c for c in ("uid", "area_acres", "Confidence", "is_field", "refine_flag", "area_acres_delivered",
-                        "overlap_lost_share", "tail_removed_share") if c in fields]
+                        "overlap_lost_share", "tail_removed_share", "holes_filled", "crumbs_dropped_share",
+                        "merged_into") if c in fields]
     out = gpd.GeoDataFrame(pd.concat([fields[keep].reset_index(drop=True), lab], axis=1),
                            geometry=fields.geometry.reset_index(drop=True), crs=fields.crs)
     out["class_name"] = out["label"].map({k: v for k, v in mr.CLASSES.items()})
@@ -119,7 +137,7 @@ def label_aoi(aoi_id: int, map_suffix: str = "_final", src_root=SRC, path=DELINE
     out.insert(0, "field_id", ids)
     if "is_field" not in out:
         out["is_field"], out["refine_flag"] = True, ""
-    return out, idx, classes
+    return out, idx
 
 
 def water_share_per_field(aoi_id: int, idx, n_fields: int, out_root=SRC) -> np.ndarray:
@@ -240,9 +258,21 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refin
         if fields.empty:
             rows.append({"aoi": f"aoi{aoi_id}", "fields": 0})
             continue
+        idx0, labels0 = idx, fields["label"].to_numpy()      # before merging: what field_level saw
+        refine_error = ""
         if refine and refined_path(aoi_id).exists():
             share = water_share_per_field(aoi_id, idx, len(fields))
-            fields = field_refine.label_stage(fields, share)
+            try:
+                fields = field_refine.label_stage(fields, share)
+            except Exception as exc:  # one broken outline must not stop the other 131 AOIs
+                refine_error = f"{type(exc).__name__}: {exc}"[:200]
+                print(f"aoi{aoi_id}: label stage FAILED, fields delivered without merges: {refine_error}")
+            else:
+                # merged outlines own more pixels now: label them again from their final outline
+                import rasterio
+
+                with rasterio.open(Path(SRC) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026{map_suffix}.tif") as ds:
+                    fields, idx = label_frame(fields, classes, ds.transform, ds.crs, aoi_id)
         # second opinion (analysis/field_level): the rule re-run on the field's mean curves
         fl_path = Path(SRC) / "report" / "field_level" / f"aoi{aoi_id}.parquet"
         if fl_path.exists():
@@ -251,11 +281,11 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refin
             from .field_level import MIN_PX
 
             fl = pd.read_parquet(fl_path)
-            owner = np.where(classes.ravel() != NODATA, idx.ravel(), -1)
+            owner = np.where(classes.ravel() != NODATA, idx0.ravel(), -1)
             keep = np.bincount(owner[owner >= 0], minlength=len(fields)) >= MIN_PX
             rule = np.full(len(fields), -1)
             note = np.full(len(fields), "", dtype=object)
-            if int(keep.sum()) == len(fl) and (fl["label"].to_numpy() == fields["label"].to_numpy()[keep]).all():
+            if int(keep.sum()) == len(fl) and (fl["label"].to_numpy() == labels0[keep]).all():
                 rule[keep] = fl["field_rule_label"].to_numpy()
                 note[keep] = confidence_notes(fl, fields["label"].to_numpy()[keep], relabelled_aoi=f"aoi{aoi_id}" in overrides)
             fields["field_rule_label"] = rule
@@ -274,7 +304,7 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refin
             counts = np.bincount(arr[arr != NODATA], minlength=mr.N_CLASSES)
             for k in range(mr.N_CLASSES):
                 inside[f"{mr.CLASSES[k]}_acres_{tag}"] = round(mr.acres(int(counts[k])), 1)
-        rows.append({"aoi": f"aoi{aoi_id}", "fields": len(fields),
+        rows.append({"aoi": f"aoi{aoi_id}", "fields": len(fields), "refine_error": refine_error,
                      "fields_without_pixel_centre": int((fields["pixels"] == 0).sum()),
                      "aoi_pixels_in_a_field_pct": round(100 * float(((idx >= 0) & (classes != NODATA)).sum())
                                                         / max(int((classes != NODATA).sum()), 1), 1),
