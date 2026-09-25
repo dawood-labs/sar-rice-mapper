@@ -27,17 +27,28 @@ import pandas as pd
 
 SRC = "processed/_batch/s2_2026"
 OUT = f"{SRC}/qgis_review"
-VERSIONS = (("rule_v1", "_v1"), ("rule_current", ""), ("final_previous", "_final_prev"), ("final_current", "_final"))
+#: Map versions shown per pixel by ``inspect_field`` / ``inspect_pixel``. ``first_map`` is the frozen copy of
+#: the map delivered on 24 Sep 2026 (``baseline_v3/``, fix plan stage 0); ``final_current`` is the map as it
+#: is now; ``rule_current`` the same before relabels and sieve; ``rule_v1`` the first water test.
+VERSIONS = (("rule_v1", "_v1"), ("rule_current", ""), ("first_map", "baseline_v3"), ("final_current", "_final"))
 COLOURS = {0: ("not rice", "#e6e6e6"), 1: ("rice, standing", "#008c3c"), 2: ("young", "#aadc78"),
            3: ("rice-like, water not confirmed", "#f5a028"), 4: ("harvested", "#96643c"),
            5: ("never bare (trees/houses)", "#8c5abe"), 6: ("young rice, standing", "#6ec83c"),
            7: ("flooded, not yet green", "#3c78c8"), 8: ("cut crop, water not confirmed", "#c8aa78")}
 
 
+def version_path(aoi: str, suffix: str, src_root=SRC) -> Path:
+    """The file of one map version for one AOI. A suffix naming a folder (``baseline_v3``) points at
+    the frozen copy of a delivered map in that folder instead of a suffix on the AOI's own file."""
+    if suffix.startswith("baseline"):
+        return Path(src_root) / suffix / f"{aoi}_monsoon2026_final.tif"
+    return Path(src_root) / aoi / f"{aoi}_monsoon2026{suffix}.tif"
+
+
 def version_files(suffix: str, src_root=SRC) -> list[str]:
-    """Each AOI's map of one version: exactly ``<aoi>/<aoi>_monsoon2026<suffix>.tif``."""
-    return sorted(str(d / f"{d.name}_monsoon2026{suffix}.tif") for d in Path(src_root).glob("aoi*")
-                  if (d / f"{d.name}_monsoon2026{suffix}.tif").exists())
+    """Each AOI's map of one version (see :func:`version_path`)."""
+    return sorted(str(version_path(d.name, suffix, src_root)) for d in Path(src_root).glob("aoi*")
+                  if version_path(d.name, suffix, src_root).exists())
 
 
 def run(cmd):
@@ -170,7 +181,7 @@ def classes_at(aoi_id: int, pid: int) -> dict:
 
     out = {}
     for name, suffix in VERSIONS:
-        p = Path(SRC) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026{suffix}.tif"
+        p = version_path(f"aoi{aoi_id}", suffix)
         if p.exists():
             with rasterio.open(p) as ds:
                 v = int(ds.read(1).ravel()[pid])

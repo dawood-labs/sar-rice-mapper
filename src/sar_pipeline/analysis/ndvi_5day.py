@@ -463,8 +463,8 @@ def sample_pids(aoi_id: int, per_group: int = 3, groups: int = 4, seed: int = 0)
 def sheet(aoi_id: int, pids, out_path=None, cols: int = 3, lswi: bool = True):
     """Small multiples: one panel per pixel with raw dates, the composite, the fit and gap shading.
 
-    Raw dates are drawn by mask outcome: kept (QA60 clear), kept but SCL would have removed it, and
-    removed by QA60. Windows filled from more than 15 days away are shaded, so a filled stretch is
+    Raw dates are drawn by mask outcome: kept by the series' mask, kept but SCL would have removed
+    it, and removed by the mask. Windows filled from more than 15 days away are shaded, so a filled stretch is
     never mistaken for a measured one.
     """
     import matplotlib.pyplot as plt
@@ -486,7 +486,7 @@ def sheet(aoi_id: int, pids, out_path=None, cols: int = 3, lswi: bool = True):
         kept = raw["qa60_clear"] & ~raw["scl_cloud"]
         scl_only = raw["qa60_clear"] & raw["scl_cloud"]
         ax.plot(raw["date"][~raw["qa60_clear"]], raw["ndvi"][~raw["qa60_clear"]], "x", ms=4,
-                color=INK_MUTED, label="removed by QA60")
+                color=INK_MUTED, label="removed by the mask")
         ax.plot(raw["date"][scl_only], raw["ndvi"][scl_only], "o", ms=4, mfc="none",
                 color=SERIES_COLORS[1], label="kept, SCL would remove")
         ax.plot(raw["date"][kept], raw["ndvi"][kept], "o", ms=3.5, color=INK_SECONDARY, label="kept")
@@ -504,7 +504,7 @@ def sheet(aoi_id: int, pids, out_path=None, cols: int = 3, lswi: bool = True):
     handles, labels = axes.ravel()[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 0.965), ncol=5, frameon=False,
                fontsize=9)
-    fig.suptitle(f"{load(aoi_id)['loc']['aoi']}: QA60-masked dates, 5-day max composite, upper-envelope "
+    fig.suptitle(f"{load(aoi_id)['loc']['aoi']}: masked dates ({load(aoi_id).get('mask') or 'QA60'}), 5-day max composite, upper-envelope "
                  f"Whittaker (λ={LMBD}). Grey band = filled from > 15 days away.",
                  y=0.995, fontsize=10.5, color=INK)
     fig.autofmt_xdate()
