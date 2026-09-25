@@ -111,8 +111,8 @@ def test_canopy_at_flood_is_judged_on_observations_not_on_the_fit():
     raw = np.full((len(windows), 3), np.nan)                 # nothing observed near the flood: pixel 0 passes
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
     assert ev.loc[0, "flood_ok"] and np.isnan(ev.loc[0, "ndvi_at_flood"])
-    before = ((windows - pd.Timestamp("2026-06-12")).days >= -25) & ((windows - pd.Timestamp("2026-06-12")).days <= -15)
-    raw[before, 0] = 0.7                                     # a canopy seen 2-3 weeks before the drop: a harvest, not water
+    before = ((windows - pd.Timestamp("2026-06-12")).days >= -10) & ((windows - pd.Timestamp("2026-06-12")).days <= -3)
+    raw[before, 0] = 0.7                                     # a canopy seen in the 10 days before the drop: a harvest, not water
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
     assert not ev.loc[0, "flood_ok"] and ev.loc[0, "ndvi_at_flood"] == 0.7
     raw[:] = np.nan
@@ -154,3 +154,16 @@ def test_shallow_water_counts_with_a_larger_drop_and_more_passes():
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series)
     assert ev.loc[0, "support"] >= 4 and ev.loc[0, "flood_ok"]
     assert not ev.loc[1, "flood_ok"]
+
+
+def test_a_summer_crop_cut_three_weeks_before_the_flood_does_not_block_it():
+    series = _two_pol_series()
+    windows = pd.date_range("2026-03-01", "2026-09-21", freq="5D")
+    ndvi = np.full((len(windows), 3), 0.6)
+    trough = np.array(["2026-06-20"] * 3, dtype="datetime64[D]")
+    climb = np.array(["2026-07-25"] * 3, dtype="datetime64[D]")
+    raw = np.full((len(windows), 3), np.nan)
+    days = (windows - pd.Timestamp("2026-06-12")).days
+    raw[(days >= -25) & (days <= -15), 0] = 0.65             # the summer rice, green three weeks before the flood
+    raw[(days >= -60) & (days <= -35), 0] = 0.2              # ... and bare before that (a field)
+    assert rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw).loc[0, "flood_ok"]

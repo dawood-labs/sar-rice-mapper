@@ -224,10 +224,11 @@ OTHER_POL_DROP_MIN = -1.0
 DEEP_FLOOD_VH_MAX = -24.0
 DEEP_FLOOD_DROP_MIN = 8.0
 #: Clear observations from ``RAW_BEFORE_WINDOWS`` windows before to ``RAW_AFTER_WINDOWS`` after the
-#: flood date decide whether a canopy stood on the field then (see ``water_evidence``). Asymmetric:
-#: a canopy seen in the 25 days BEFORE the drop is the signature of a harvest (or of trees, which
-#: never lose it), while a canopy 2-3 weeks after a transplanting is the young rice itself.
-RAW_BEFORE_WINDOWS = 5
+#: flood date decide whether a canopy stood on the field then (see ``water_evidence``). A canopy
+#: seen in the 10 days BEFORE the drop is the signature of a harvest (the cut is quick) or of trees;
+#: 25 days was too long: in a double-crop AOI the summer rice was green until 8 June and the
+#: monsoon flood came on 23 June, so 97 % of a paddy block was refused its water.
+RAW_BEFORE_WINDOWS = 2
 RAW_AFTER_WINDOWS = 0          # a canopy AFTER the drop is the crop growing (one field read 0.56 nine days after its flood)
 #: ``bare_near_flood``: a clear observation without canopy (NDVI <= ``BARE_SEEN_NDVI``) from
 #: ``BARE_SEEN_BEFORE_WINDOWS`` windows before to ``BARE_SEEN_AFTER_WINDOWS`` after the flood. Why:
