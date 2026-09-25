@@ -133,3 +133,15 @@ def test_clear_mask_drops_grey_haze_whatever_the_ndvi_but_keeps_brown_soil():
     ndvi = (b8 - b4) / (b8 + b4)                 # 0.26, 0.25, 0.33, 0.78
     out = nd.clear_mask(data, qa, cs, b8, ndvi, 40, 1 << 10, True, True, b2, b4)
     assert out.tolist() == [False, True, True, True]
+
+
+def test_upper_envelope_never_overshoots_the_observations_in_a_gap():
+    import numpy as np
+
+    from sar_pipeline.analysis import ndvi_5day as nd
+
+    y = np.full(40, np.nan)
+    y[:8] = np.linspace(0.1, 0.5, 8)                  # a crop climbing ...
+    y[30:] = [0.86, 0.8, 0.75, 0.7, 0.66, 0.63, 0.6, 0.6, 0.6, 0.6]   # ... seen again ripening
+    fit, _ = nd.upper_envelope(y, 1.0)
+    assert np.nanmax(fit) <= 0.86 + nd.FIT_CEILING_MARGIN + 1e-9

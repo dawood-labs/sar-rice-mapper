@@ -64,6 +64,11 @@ LMBD = 1.0
 #: fitted NDVI dived to -0.4 between a May and a September observation (impossible for land),
 #: which made a trough out of nothing. A value below every observation is never evidence.
 FIT_FLOOR_MARGIN = 0.05
+#: ... nor rise further than this above the pixel's highest observation. Why: across an unobserved
+#: August the envelope smoother overshot to 0.9-1.0 on fields whose clear peak was 0.86; the standing
+#: test then read the clear 0.63 of the last window as a fall of 0.36 from the "peak" and called a
+#: standing crop harvested. A value above every observation is no more evidence than one below.
+FIT_CEILING_MARGIN = 0.05
 
 
 #: Which QA60 bits the mask removes: ``both`` (opaque cloud and cirrus, the mask of the delivered
@@ -233,7 +238,7 @@ def upper_envelope(y, lmbd: float = LMBD, iterations: int = ENVELOPE_ITERATIONS,
             break
         weights = np.where(seen, np.where(below > 0, 1.0 - below / worst, 1.0), 0.0)
         fit = op.whittaker(y, lmbd, dtd=dtd, weights=weights)
-    fit = np.maximum(fit, np.nanmin(y) - FIT_FLOOR_MARGIN)
+    fit = np.clip(fit, np.nanmin(y) - FIT_FLOOR_MARGIN, np.nanmax(y) + FIT_CEILING_MARGIN)
     return hold_edges(fit, seen), weights
 
 

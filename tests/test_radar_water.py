@@ -116,8 +116,8 @@ def test_canopy_at_flood_is_judged_on_observations_not_on_the_fit():
     ev = rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw)
     assert not ev.loc[0, "flood_ok"] and ev.loc[0, "ndvi_at_flood"] == 0.7
     raw[:] = np.nan
-    after = ((windows - pd.Timestamp("2026-06-12")).days >= 20) & ((windows - pd.Timestamp("2026-06-12")).days <= 30)
-    raw[after, 0] = 0.7                                      # a canopy 3-4 weeks after the flood is the rice itself
+    after = ((windows - pd.Timestamp("2026-06-12")).days >= 5) & ((windows - pd.Timestamp("2026-06-12")).days <= 30)
+    raw[after, 0] = 0.7                                      # a canopy after the flood is the rice itself, however fast
     assert rw.water_evidence(0, trough, climb, ndvi, windows, series=series, ndvi_raw=raw).loc[0, "flood_ok"]
 
 

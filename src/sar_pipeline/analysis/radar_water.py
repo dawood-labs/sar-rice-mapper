@@ -228,7 +228,7 @@ DEEP_FLOOD_DROP_MIN = 8.0
 #: a canopy seen in the 25 days BEFORE the drop is the signature of a harvest (or of trees, which
 #: never lose it), while a canopy 2-3 weeks after a transplanting is the young rice itself.
 RAW_BEFORE_WINDOWS = 5
-RAW_AFTER_WINDOWS = 2
+RAW_AFTER_WINDOWS = 0          # a canopy AFTER the drop is the crop growing (one field read 0.56 nine days after its flood)
 #: ``bare_near_flood``: a clear observation without canopy (NDVI <= ``BARE_SEEN_NDVI``) from
 #: ``BARE_SEEN_BEFORE_WINDOWS`` windows before to ``BARE_SEEN_AFTER_WINDOWS`` after the flood. Why:
 #: the radar is read over a 5 x 5 box, so a tree line next to flooded paddies also "floods" in the
