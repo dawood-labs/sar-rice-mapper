@@ -145,11 +145,14 @@ LATE_FLOOD = "2026-07-25"
 STALE_DAYS = 45
 
 
-def confidence_notes(fl: pd.DataFrame, labels) -> np.ndarray:
+def confidence_notes(fl: pd.DataFrame, labels, relabelled_aoi: bool = False) -> np.ndarray:
     """Why a field's label deserves a field check, from the field-level audit columns.
 
     * "late flood after an earlier crop": delivered rice (1 / 6) whose confirmed flood is after
-      ``LATE_FLOOD`` and whose field was green (NDVI >= 0.5) in the 60 days before it (issue 23);
+      ``LATE_FLOOD`` and whose field carried a crop in the 60 days before it, seen optically
+      (NDVI >= 0.5) or by the radar (canopy-level VH and VV) (issue 23);
+    * "rice by AOI relabel": in an AOI where the user relabelled class 3 to rice, a field whose own
+      field-mean curves put it in class 3 (the water was never confirmed for it);
     * "no clear view in the last 45 days": rice, young rice or harvested whose last clear
       observation is older than ``STALE_DAYS`` (the standing decision rests on an old view).
     """
@@ -157,8 +160,14 @@ def confidence_notes(fl: pd.DataFrame, labels) -> np.ndarray:
     note = np.full(len(fl), "", dtype=object)
     if "flood_date" in fl:
         late = pd.to_datetime(fl["flood_date"]) >= pd.Timestamp(LATE_FLOOD)
-        m = np.isin(lab, (1, 6)) & late.to_numpy() & fl["green_before_flood"].to_numpy(dtype=bool)
+        before = fl["green_before_flood"].to_numpy(dtype=bool)
+        if "radar_bright_before_flood" in fl:
+            before = before | fl["radar_bright_before_flood"].to_numpy(dtype=bool)
+        m = np.isin(lab, (1, 6)) & late.to_numpy() & before
         note[m] = "late flood after an earlier crop"
+    if relabelled_aoi and "field_rule_label" in fl:
+        m = (lab == 1) & (fl["field_rule_label"].to_numpy() == 3) & (note == "")
+        note[m] = "rice by AOI relabel"
     if "days_since_clear" in fl:
         stale = fl["days_since_clear"].to_numpy() > STALE_DAYS
         m = np.isin(lab, (1, 4, 6)) & stale & (note == "")
@@ -220,7 +229,9 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refin
     labelling: slivers merge into same-label neighbours and all-season water is flagged as pond.
     """
     from . import field_refine
+    from .finalize import load_overrides
 
+    overrides = load_overrides()
     ids = aoi_ids or sorted(int(p.parent.name[3:]) for p in Path(SRC).glob(f"aoi*/aoi*_monsoon2026{map_suffix}.tif"))
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     rows = []
@@ -246,7 +257,7 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refin
             note = np.full(len(fields), "", dtype=object)
             if int(keep.sum()) == len(fl) and (fl["label"].to_numpy() == fields["label"].to_numpy()[keep]).all():
                 rule[keep] = fl["field_rule_label"].to_numpy()
-                note[keep] = confidence_notes(fl, fields["label"].to_numpy()[keep])
+                note[keep] = confidence_notes(fl, fields["label"].to_numpy()[keep], relabelled_aoi=f"aoi{aoi_id}" in overrides)
             fields["field_rule_label"] = rule
             fields["confidence_note"] = note
             fields["label_confidence"] = np.where(fields["field_rule_label"] < 0, "not checked (small field)",

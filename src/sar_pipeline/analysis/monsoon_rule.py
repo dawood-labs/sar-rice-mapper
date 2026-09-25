@@ -300,7 +300,9 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
             since = (np.datetime64(pd.Timestamp(map_date).date()) - pd.to_datetime(events["flood_date"]).to_numpy()
                      .astype("datetime64[D]")) / np.timedelta64(1, "D")
             recent = events["flood_ok"].to_numpy(dtype=bool) & (since >= 0) & (since <= FLOODED_RECENT_DAYS)
-        out[np.isin(out, (0, 2)) & recent & (last < FLOODED_NDVI_MAX)] = 7
+        # a young rice seen only by the radar while the optical value is still open water is
+        # "flooded, not yet green" (the seedlings are emerging), not a delivered canopy
+        out[np.isin(out, (0, 2, 6)) & recent & (last < FLOODED_NDVI_MAX)] = 7
     if never_bare is not None:
         # trees, gardens and houses: the radar never saw bare ground, so the optical "cycle" is
         # haze. Applied to every rice-like class (fix plan, issues 2 and 5; before only class 3),

@@ -37,9 +37,12 @@ def test_confidence_notes_flag_late_floods_after_a_crop_and_stale_views():
 
     from sar_pipeline.analysis import field_rice as fr
 
-    fl = pd.DataFrame({"flood_date": pd.to_datetime(["2026-08-10", "2026-08-10", "2026-06-10", "NaT"]),
-                       "green_before_flood": [True, False, True, False],
-                       "days_since_clear": [10, 60, 60, 5]})
-    notes = fr.confidence_notes(fl, [1, 6, 1, 0])
+    fl = pd.DataFrame({"flood_date": pd.to_datetime(["2026-08-10", "2026-08-10", "2026-06-10", "NaT", "2026-08-12", "NaT"]),
+                       "green_before_flood": [True, False, True, False, False, False],
+                       "radar_bright_before_flood": [False, False, False, False, True, False],
+                       "days_since_clear": [10, 60, 60, 5, 10, 5],
+                       "field_rule_label": [1, 6, 1, 0, 1, 3]})
+    notes = fr.confidence_notes(fl, [1, 6, 1, 0, 6, 1])
     assert notes.tolist() == ["late flood after an earlier crop", "no clear view in the last 45 days",
-                              "no clear view in the last 45 days", ""]
+                              "no clear view in the last 45 days", "", "late flood after an earlier crop", ""]
+    assert fr.confidence_notes(fl, [1, 6, 1, 0, 6, 1], relabelled_aoi=True)[5] == "rice by AOI relabel"

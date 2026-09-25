@@ -177,7 +177,9 @@ def test_radar_canopy_rise_makes_young_rice_when_the_optical_end_is_stale():
     ndvi = np.stack([stale, stale, stale], axis=1)
     ev = mr.pixel_events(ndvi, ndvi * 0, windows)
     ev["flood_ok"] = [True, True, False]
-    ev["flood_date"] = pd.to_datetime(["2026-08-15", "2026-08-15", "NaT"])
+    # pixel 0 flooded in mid-June (more than 60 days before the map date): a radar canopy on it is a
+    # crop, not a fresh flood; pixel 1 flooded in mid-August and still dark
+    ev["flood_date"] = pd.to_datetime(["2026-06-15", "2026-08-15", "NaT"])
     ev["bare_near_flood"] = [True, True, True]
     ev = pd.concat([ev, mr.radar_trough_events(ev, ndvi, windows)], axis=1)
     ev["radar_canopy_rise"] = [6.0, 2.0, 6.0]                  # dB from the water to the season end
@@ -187,6 +189,10 @@ def test_radar_canopy_rise_makes_young_rice_when_the_optical_end_is_stale():
     assert out[0] == 6 and out[1] == 7 and out[2] == 0     # canopy in the radar; still water; no flood
     ev["radar_canopy_rise"], ev["vh_end"] = [11.0, 2.0, 6.0], [-14.0, -22.0, -15.5]
     assert mr.classify(ev, radar_wet=wet, radar_trough=True, map_date=windows[-1])[0] == 1   # full-grown in the radar
+    # a radar-only young rice whose optical value is still open water (0.12 here) is class 7, not 6
+    ev["radar_canopy_rise"], ev["vh_end"] = [6.0, 2.0, 6.0], [-15.5, -22.0, -15.5]
+    ev["flood_date"] = pd.to_datetime(["2026-08-25", "2026-08-15", "NaT"])
+    assert mr.classify(ev, radar_wet=wet, radar_trough=True, map_date=windows[-1])[0] == 7
     ev["vh_end"] = [-24.0, -22.0, -15.0]                       # a pond: from -32 to -24 dB is still water
     assert mr.classify(ev, radar_wet=wet, radar_trough=True, map_date=windows[-1])[0] == 7
 

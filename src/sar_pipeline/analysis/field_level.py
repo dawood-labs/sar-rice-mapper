@@ -42,6 +42,11 @@ MIN_PX = 4
 #: the flood date means a crop stood there just before the wetting.
 GREEN_BEFORE_NDVI = 0.50
 GREEN_BEFORE_DAYS = 60
+#: The radar's version (clouds hide the optical one for months in the double-crop AOIs): field-mean
+#: VH >= -15.5 and VV >= -8.5 dB over the passes 60 to 15 days before the flood = a canopy stood there.
+BRIGHT_BEFORE_DAYS = (60, 15)
+BRIGHT_BEFORE_VH_MIN = -15.5
+BRIGHT_BEFORE_VV_MIN = -8.5
 
 
 def field_means(values, index, n_fields: int, weights_mask=None) -> np.ndarray:
@@ -127,6 +132,20 @@ def field_audit(aoi_id: int, out_dir=f"{SRC}/report/field_level") -> pd.DataFram
     with np.errstate(invalid="ignore"):
         before = (rel >= -GREEN_BEFORE_DAYS) & (rel <= -5)
         peak_before = np.where(before.any(axis=0), np.nanmax(np.where(before, ndvi_f, -np.inf), axis=0), np.nan)
+    # the radar's view of the same question (issue 23 under cloud): a canopy stood on the field in
+    # the weeks before the flood when the field-mean VH and VV sat at canopy levels then
+    bright = np.zeros(keep.sum(), dtype=bool)
+    for rd, flat in series:
+        day = pd.DatetimeIndex(rd).to_numpy().astype("datetime64[D]")
+        lag = (flood[None, :] - day[:, None]) / np.timedelta64(1, "D")
+        with np.errstate(invalid="ignore"):
+            inwin = (lag >= BRIGHT_BEFORE_DAYS[1]) & (lag <= BRIGHT_BEFORE_DAYS[0])
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            vh_b = np.nanmedian(np.where(inwin, flat["VH"], np.nan), axis=0)
+            vv_b = np.nanmedian(np.where(inwin, flat["VV"], np.nan), axis=0)
+        bright |= (vh_b >= BRIGHT_BEFORE_VH_MIN) & (vv_b >= BRIGHT_BEFORE_VV_MIN)
     cols = ["field_id", "uid", "area_acres", "pixels", "label", "rice_share", "unconfirmed_share"]
     out = fields.loc[keep, [c for c in cols if c in fields]].reset_index(drop=True)
     out["field_rule_label"] = field_class
@@ -139,6 +158,7 @@ def field_audit(aoi_id: int, out_dir=f"{SRC}/report/field_level") -> pd.DataFram
     out["flood_date"] = v2["flood_date"].to_numpy()
     out["peak_before_flood"] = peak_before
     out["green_before_flood"] = np.isfinite(peak_before) & (peak_before >= GREEN_BEFORE_NDVI)
+    out["radar_bright_before_flood"] = bright
     out["never_bare"] = v2["never_bare"].to_numpy()
     out["last_seen_clear"] = last_seen
     out["days_since_clear"] = np.array([(windows[-1] - pd.Timestamp(t)).days if pd.notna(t) else np.nan for t in last_seen])
