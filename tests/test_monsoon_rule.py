@@ -181,10 +181,12 @@ def test_radar_canopy_rise_makes_young_rice_when_the_optical_end_is_stale():
     ev["bare_near_flood"] = [True, True, True]
     ev = pd.concat([ev, mr.radar_trough_events(ev, ndvi, windows)], axis=1)
     ev["radar_canopy_rise"] = [6.0, 2.0, 6.0]                  # dB from the water to the season end
-    ev["vh_end"] = [-15.0, -22.0, -15.0]
+    ev["vh_end"] = [-15.5, -22.0, -15.5]
     wet = ev["flood_ok"].to_numpy()
     out = mr.classify(ev, radar_wet=wet, radar_trough=True, map_date=windows[-1])
     assert out[0] == 6 and out[1] == 7 and out[2] == 0     # canopy in the radar; still water; no flood
+    ev["radar_canopy_rise"], ev["vh_end"] = [11.0, 2.0, 6.0], [-14.0, -22.0, -15.5]
+    assert mr.classify(ev, radar_wet=wet, radar_trough=True, map_date=windows[-1])[0] == 1   # full-grown in the radar
     ev["vh_end"] = [-24.0, -22.0, -15.0]                       # a pond: from -32 to -24 dB is still water
     assert mr.classify(ev, radar_wet=wet, radar_trough=True, map_date=windows[-1])[0] == 7
 

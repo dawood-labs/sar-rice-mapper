@@ -107,6 +107,12 @@ FLOODED_NDVI_MAX = 0.20
 #: while their radar showed the canopy rising 5-8 dB from the water.
 RADAR_YOUNG_RISE_DB = 4.0
 RADAR_VISIBLE_RISE_DB = 5.0
+#: A radar canopy this far above the water (dB) and reaching ``RADAR_MATURE_VH_MIN`` at the season end
+#: is a full-grown crop, not a young one: the pixel is class 1 even when no clear optical view showed
+#: the canopy (a paddy flooded in late May whose only later clear view was a cloud edge read
+#: VH -25 -> -14 by August: "young rice" would misname it).
+RADAR_MATURE_RISE_DB = 8.0
+RADAR_MATURE_VH_MIN = -15.0
 from .radar_water import RADAR_CANOPY_VH_MIN  # noqa: E402  (the radar canopy must reach this VH)
 #: A ripening (yellowing) crop is still standing: its NDVI falls from ~0.75 to ~0.45 before the
 #: cut. The standing test therefore accepts a last value at or above ``STANDING_MIN`` that has not
@@ -130,6 +136,41 @@ WATER_DEFAULT = "v2"
 #: from the fitted NDVI on the flood date. Haze dips on trees never come with such a flood, which
 #: is why the 40-day bare criterion is not needed on this path.
 RADAR_TROUGH_DEFAULT = True
+
+
+#: Context rescue for class 3 (fix plan, issue 6, decided after the stage-4 review): a pixel with a
+#: complete rice cycle and WEAK water (a drop of >= CONTEXT_DROP_MIN dB to VH <= CONTEXT_VH_MAX, VV also
+#: falling by >= CONTEXT_VV_FALL_MIN) is rice when at least CONTEXT_RICE_SHARE of the pixels within
+#: CONTEXT_RADIUS_PX around it are confirmed rice. Why: shallow water on light soils reads -17.5 to
+#: -18.5 dB and split the reviewers' paddies between class 1 and 3 pixel by pixel; the same weak
+#: signal on the dark dry soils of the dry-zone AOIs comes with no confirmed rice around it, so the
+#: neighbourhood separates the two cases that the thresholds alone cannot.
+CONTEXT_DROP_MIN = 3.0
+CONTEXT_VH_MAX = -17.5
+CONTEXT_VV_FALL_MIN = 1.0
+CONTEXT_RADIUS_PX = 10         # a 21 x 21 window, 210 m: two or three fields in every direction
+CONTEXT_RICE_SHARE = 0.5
+
+
+def context_rescue(classes: np.ndarray, events: pd.DataFrame, shape) -> np.ndarray:
+    """Boolean per pixel: class 3 with weak water inside a confirmed-rice neighbourhood (see
+    ``CONTEXT_*``). ``classes`` flat (before the rescue), ``shape`` the grid. The neighbourhood share
+    is confirmed rice over the DECIDED pixels of the window that are not themselves class 3, so a
+    class-3 field does not vote against itself and unmapped ground does not count."""
+    from scipy.ndimage import uniform_filter
+
+    c2 = classes.reshape(shape)
+    rice = (c2 == 1).astype("float32")
+    decided = ((c2 != 255) & (c2 != 3)).astype("float32")
+    size = 2 * CONTEXT_RADIUS_PX + 1
+    with np.errstate(invalid="ignore", divide="ignore"):
+        share = (uniform_filter(rice, size=size, mode="constant") / uniform_filter(decided, size=size, mode="constant")).ravel()
+    share = np.where(np.isfinite(share), share, 0.0)
+    with np.errstate(invalid="ignore"):
+        weak = ((events["flood_drop"] >= CONTEXT_DROP_MIN) & (events["flood_vh"] <= CONTEXT_VH_MAX)
+                & (events["flood_other_drop"] >= CONTEXT_VV_FALL_MIN)).to_numpy() if "flood_other_drop" in events \
+            else np.zeros(len(events), dtype=bool)
+    return (classes == 3) & weak & (share >= CONTEXT_RICE_SHARE)
 
 
 def radar_trough_events(events: pd.DataFrame, ndvi, windows) -> pd.DataFrame:
@@ -259,12 +300,18 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
             r_young = ~r_grown & ok & (events["peak_after_flood"] >= young_canopy_min).to_numpy()
             if "radar_canopy_rise" in events:          # the canopy seen by the radar alone
                 rise_db = np.array(events["radar_canopy_rise"], dtype=float)
-                canopy_level = np.array(events["vh_end"], dtype=float) >= RADAR_CANOPY_VH_MIN if "vh_end" in events \
-                    else np.ones(len(events), dtype=bool)
+                vh_end = np.array(events["vh_end"], dtype=float) if "vh_end" in events else np.full(len(events), np.nan)
+                canopy_level = ~(vh_end < RADAR_CANOPY_VH_MIN)
+                mature = ok & (rise_db >= RADAR_MATURE_RISE_DB) & (vh_end >= RADAR_MATURE_VH_MIN)
+                r_grown = r_grown | (mature & ~grown & ~young)
+                r_young = r_young & ~mature
                 r_young |= ~r_grown & ok & (rise_db >= RADAR_YOUNG_RISE_DB) & canopy_level
         r_standing = events["standing_after_flood"].to_numpy(dtype=bool)
         # the radar path only adds: a pixel the optical path already decided keeps that decision
         add = r_grown & ~grown & ~young
+        if "radar_canopy_rise" in events:
+            # a full-grown radar canopy at the season end is standing whatever the stale optical end says
+            r_standing = r_standing | (add & (rise_db >= RADAR_MATURE_RISE_DB) & (vh_end >= RADAR_MATURE_VH_MIN))
         standing = np.where(add, r_standing, standing)
         grown = grown | add
         young = young | (r_young & ~grown & ~young)
