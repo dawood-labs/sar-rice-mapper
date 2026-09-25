@@ -138,41 +138,6 @@ WATER_DEFAULT = "v2"
 RADAR_TROUGH_DEFAULT = True
 
 
-#: Context rescue for class 3 (fix plan, issue 6, decided after the stage-4 review): a pixel with a
-#: complete rice cycle and WEAK water (a drop of >= CONTEXT_DROP_MIN dB to VH <= CONTEXT_VH_MAX, VV also
-#: falling by >= CONTEXT_VV_FALL_MIN) is rice when at least CONTEXT_RICE_SHARE of the pixels within
-#: CONTEXT_RADIUS_PX around it are confirmed rice. Why: shallow water on light soils reads -17.5 to
-#: -18.5 dB and split the reviewers' paddies between class 1 and 3 pixel by pixel; the same weak
-#: signal on the dark dry soils of the dry-zone AOIs comes with no confirmed rice around it, so the
-#: neighbourhood separates the two cases that the thresholds alone cannot.
-CONTEXT_DROP_MIN = 3.0
-CONTEXT_VH_MAX = -17.5
-CONTEXT_VV_FALL_MIN = 1.0
-CONTEXT_RADIUS_PX = 10         # a 21 x 21 window, 210 m: two or three fields in every direction
-CONTEXT_RICE_SHARE = 0.5
-
-
-def context_rescue(classes: np.ndarray, events: pd.DataFrame, shape) -> np.ndarray:
-    """Boolean per pixel: class 3 with weak water inside a confirmed-rice neighbourhood (see
-    ``CONTEXT_*``). ``classes`` flat (before the rescue), ``shape`` the grid. The neighbourhood share
-    is confirmed rice over the DECIDED pixels of the window that are not themselves class 3, so a
-    class-3 field does not vote against itself and unmapped ground does not count."""
-    from scipy.ndimage import uniform_filter
-
-    c2 = classes.reshape(shape)
-    rice = (c2 == 1).astype("float32")
-    decided = ((c2 != 255) & (c2 != 3)).astype("float32")
-    size = 2 * CONTEXT_RADIUS_PX + 1
-    with np.errstate(invalid="ignore", divide="ignore"):
-        share = (uniform_filter(rice, size=size, mode="constant") / uniform_filter(decided, size=size, mode="constant")).ravel()
-    share = np.where(np.isfinite(share), share, 0.0)
-    with np.errstate(invalid="ignore"):
-        weak = ((events["flood_drop"] >= CONTEXT_DROP_MIN) & (events["flood_vh"] <= CONTEXT_VH_MAX)
-                & (events["flood_other_drop"] >= CONTEXT_VV_FALL_MIN)).to_numpy() if "flood_other_drop" in events \
-            else np.zeros(len(events), dtype=bool)
-    return (classes == 3) & weak & (share >= CONTEXT_RICE_SHARE)
-
-
 def radar_trough_events(events: pd.DataFrame, ndvi, windows) -> pd.DataFrame:
     """Per pixel, the climb measured from the radar flood: ``peak_after_flood``, ``rise_from_flood``,
     ``standing_after_flood``; NaN / False where there is no confirmed flood (``flood_ok``)."""
