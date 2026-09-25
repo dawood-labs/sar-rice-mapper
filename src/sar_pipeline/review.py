@@ -440,8 +440,14 @@ def delineation_qa(aoi_id: int) -> pd.DataFrame:
     pairs = pairs[pairs.index != pairs["index_right"]]
     pairs = pairs[pairs["a_right"] < pairs["a_left"]]
     geom = gs.geometry
-    inter = shapely.area(shapely.intersection(geom.loc[pairs.index].to_numpy(),
-                                              geom.loc[pairs["index_right"]].to_numpy()))
+    try:
+        inter = shapely.area(shapely.intersection(geom.loc[pairs.index].to_numpy(),
+                                                  geom.loc[pairs["index_right"]].to_numpy()))
+    except shapely.errors.GEOSException:
+        # a traced outline broken beyond make_valid: a zero buffer rebuilds clean polygons
+        a = shapely.buffer(geom.loc[pairs.index].to_numpy(), 0)
+        b = shapely.buffer(geom.loc[pairs["index_right"]].to_numpy(), 0)
+        inter = shapely.area(shapely.intersection(a, b))
     covered = pd.Series(inter, index=pairs.index).groupby(level=0).sum()
     g["covered_by_smaller"] = (covered.reindex(g.index).fillna(0) / g["a"]).clip(0, 1)
     # tails: area lost to an opening of 5 m (removes parts narrower than 10 m)
