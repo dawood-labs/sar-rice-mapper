@@ -353,6 +353,61 @@ def review_aoi(aoi_id: int, per_category: int = 3, out_dir=OUT) -> dict:
     return {"aoi": f"aoi{aoi_id}", "fields": len(ev), "suspects": len(sus), "rendered": len(rendered)}
 
 
+# ---------------------------------------------------------------- what changed since the first map
+BASELINE = f"{SRC}/baseline_v3"
+FLOW_NAMES = {0: "not_rice", 1: "rice", 2: "young", 3: "class3", 4: "harvested", 5: "never_bare",
+              6: "young_rice", 7: "flooded", 8: "cut_unconfirmed"}
+
+
+def change_samples(aoi_id: int, n_per_flow: int = 4, n_unchanged: int = 4, baseline_dir=BASELINE, out_dir=OUT,
+                   seed: int = 0) -> pd.DataFrame:
+    """Fields whose label changed between the first map and the current one, the largest of every
+    (old -> new) flow drawn as curve + chip sheets, plus a random sample of unchanged rice fields.
+
+    Why: after a fix the reviewer must judge the CHANGES (did the rice we added exist, was the rice
+    we removed really wrong?) and check that untouched rice is still right; the suspect categories
+    alone do not show that. Writes ``<aoi>/changes.csv`` and the sheets under ``<aoi>/changes/``.
+    """
+    import matplotlib.pyplot as plt
+    import rasterio
+
+    from . import qgis_review as q
+    from .analysis import field_rice
+    from .analysis import ndvi_5day as nd
+
+    fields, idx, classes = field_rice.label_aoi(aoi_id)
+    with rasterio.open(Path(baseline_dir) / f"aoi{aoi_id}_monsoon2026_final.tif") as ds:
+        base = ds.read(1)
+    counts = field_rice.counts_per_field(idx, base, len(fields))
+    old = np.where(counts.sum(axis=1) >= 4, counts.argmax(axis=1), -1)
+    t = fields[["field_id", "area_acres", "label", "is_field", "pixels"]].copy()
+    t["old_label"] = old
+    t = t[t["is_field"] & (t["old_label"] >= 0) & (t["pixels"] >= 4)]
+    changed = t[t["old_label"] != t["label"]].copy()
+    changed["flow"] = changed["old_label"].map(FLOW_NAMES) + " -> " + changed["label"].map(FLOW_NAMES)
+    flows = (changed.groupby("flow").agg(fields=("field_id", "size"), acres=("area_acres", "sum"))
+             .sort_values("acres", ascending=False).round(1))
+    pick = changed.sort_values("area_acres", ascending=False).groupby("flow").head(n_per_flow)
+    same_rice = t[(t["old_label"] == t["label"]) & t["label"].isin([1, 6])]
+    pick_same = same_rice.sample(min(n_unchanged, len(same_rice)), random_state=seed).assign(flow="unchanged rice")
+    pick = pd.concat([pick, pick_same], ignore_index=True)
+    out = Path(out_dir) / f"aoi{aoi_id}"
+    out.mkdir(parents=True, exist_ok=True)
+    flows.to_csv(out / "change_flows.csv")
+    rendered = []
+    for fid in pick["field_id"]:
+        try:
+            q.inspect_field(fid, out_dir=str(out / "changes"), keep_cache=True)
+            plt.close("all")
+            rendered.append("ok")
+        except Exception as exc:
+            rendered.append(f"FAILED {type(exc).__name__}: {exc}")
+    pick["rendered"] = rendered
+    pick.to_csv(out / "changes.csv", index=False)
+    nd.forget()
+    return pick
+
+
 # ---------------------------------------------------------------- delineation boundaries
 DELIN_TYPES = {
     "monster_over_smaller": "a large polygon at least 30 % covered by smaller polygons traced on top of it",
@@ -516,6 +571,9 @@ def main(argv=None) -> int:
                    help="only draw curve + chip sheets for these fields (same AOI loaded once)")
     p.add_argument("--out", default=None, help="folder for --render (default: review/<aoi>/fields_extra)")
     p.add_argument("--masks", action="store_true", help="only the QA60 vs Cloud Score+ table per date for --ids")
+    p.add_argument("--out-dir", default=OUT, help="review folder (default review/; use another for a second round)")
+    p.add_argument("--changes", type=int, default=0, metavar="N",
+                   help="also draw the N largest fields of every old->new label flow (and N unchanged rice fields)")
     p.add_argument("--without-pass", default=None, metavar="DATE",
                    help="only the per-field flood evidence with / without the radar pass on DATE for --ids")
     p.add_argument("--nan-spread", action="store_true",
@@ -573,7 +631,10 @@ def main(argv=None) -> int:
         return 0
     for a in args.ids:
         t0 = time.time()
-        r = review_aoi(a, args.per_category)
+        r = review_aoi(a, args.per_category, out_dir=args.out_dir)
+        if args.changes:
+            c = change_samples(a, args.changes, args.changes, out_dir=args.out_dir)
+            r["change_sheets"] = int((c["rendered"] == "ok").sum())
         # peak memory of this process (kB on Linux): the batch runs several AOIs side by side on a
         # machine with limited RAM, so every AOI reports what it needed
         r["seconds"] = round(time.time() - t0)
