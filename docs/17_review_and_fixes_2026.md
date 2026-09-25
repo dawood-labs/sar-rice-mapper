@@ -96,7 +96,48 @@ slivers under 4 pixels merged into a same-label neighbour; areas recomputed in t
 Flagged polygons stay in the file with `is_field = False` and a `refine_flag`. Every polygon keeps
 its `field_id`.
 
-## Measurements
+## Measurements (stage-4 re-run of all 132 AOIs, 25 September 2026)
 
-TODO after the stage-4 re-run: class transition table against the first map, plot and negative
-scores, reviewed-field agreement, refined delineation totals.
+**Class acres inside the AOIs, pixel map, first map -> new map** (`report/compare/stage4_matrix.csv`):
+
+| class | first map | new map | where the difference went |
+|---|---|---|---|
+| rice (1) | 42,741 | 45,308 | +2,967 from "harvested", +2,699 from "not rice", +1,845 from class 3; -3,086 to class 3, -2,292 to "not rice" |
+| young rice (6) | 6,072 | 8,405 | +3,411 from "not rice", +531 from "young" |
+| **delivered (1 + 6)** | **48,812** | **53,714** | |
+| rice-like, water not confirmed (3) | 11,454 | 12,535 | |
+| harvested (4) | 7,021 | 588 | 2,967 to rice, 1,468 to class 3, 1,419 to "not rice", 494 to class 8 |
+| young (2) | 3,629 | 2,155 | |
+| never bare (5) | 3,998 | 2,478 | 2,862 to "not rice" (haze troughs gone with the mask) |
+| flooded, not yet green (7, new) | - | 5,081 | 4,862 from "not rice" |
+| cut crop, water not confirmed (8, new) | - | 716 | |
+| not rice (0) | 38,491 | 36,141 | |
+
+Field labels inside the AOIs (refined delineation): rice 47,056 ac, young rice 7,857 ac
+(delivered 54,913; first map 49,586), class 3 11,584, flooded not green 5,028, harvested 481,
+never bare 1,892, not rice 37,394.
+
+**Surveyed plots** (share of plot-interior pixels delivered as rice, three established regions):
+
+| | delta | region B | region N |
+|---|---|---|---|
+| first map, field labels | 96.9 | 94.8 | 98.3 |
+| new map, pixel map | 97.9 | 95.2 | 93.6 |
+| new map, field labels | 98.9 | 97.7 | 96.7 |
+
+Negatives: evergreen, water, bare / built and "cut before the map date" pixels are delivered as
+rice in 0 % of cases in the rule map; the 4-pixel minimum mapping unit then absorbs isolated tree
+pixels inside rice fields (31 of 221 evergreen pixels in the delta plot AOIs, all of them created
+by the sieve, as in the first map). Region N is 1.6 points under the first map at field level: its
+remaining misses are fields whose water is shallower than the thresholds (VH -17.5 to -18.5 dB,
+3-4 dB drop); accepting them would also accept dark dry soils in the dry-zone AOIs, so they stay
+in class 3.
+
+**Reviewed fields** (432 fields judged by eye in 20 AOIs, final field labels): of the fields the
+reviewers called right, 198 of 216 decidable keep a label that agrees with them (first map 213); of
+the fields called wrong, 127 of 148 now agree (first map 38); of the uncertain ones 20 of 34 (14).
+Agreement over all decidable fields: 89 % against 69 % for the first map.
+
+**Refined delineation**: 428,349 polygons -> 422,763 fields; 123,279 attribute acres -> 112,618
+UTM acres -> 101,204 refined field acres (overlaps and tails removed, 597 ac of monster outlines
+dropped and 193 ac cut, 232 ac of strips flagged).

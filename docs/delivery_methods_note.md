@@ -86,9 +86,13 @@ last 45 days"). One GeoPackage per AOI in `fields/`; `field_acres_by_class.csv` 
 acres of each class on the pixel map and on the field-labelled map inside the AOI (field polygons
 can extend past the AOI edge; their full area is in `area_acres`).
 
-**Accuracy.** TODO (stage 4): plot recall per region at pixel and field level, negatives, the
-reviewed-field agreement (about 430 fields judged by eye: 90 % agreement against 71 % for the first
-map). Dates of the crop events are accurate to about one to two weeks. Where plots were transplanted
+**Accuracy.** Checked against the field plots reported as standing rice: 97-99 % of plot-interior
+pixels in the three established regions are mapped as rice on the field-labelled map (94-98 % on
+the pixel map). Areas known not to be rice (evergreen cover, permanent water, bare and built
+ground, fields cut before the map date) are mapped as rice in 0 % of pixels by the rule; the
+4-pixel minimum mapping unit then absorbs isolated tree pixels inside rice fields. About 430
+fields judged by eye during the review of the first map agree with this map in 89 % of cases
+(69 % for the first map). Dates of the crop events are accurate to about one to two weeks. Where plots were transplanted
 late (late August) the crop is young on the map date: class 6 when the canopy is visible (optical or
 radar), class 2 or 7 otherwise.
 
