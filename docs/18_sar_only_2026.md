@@ -135,6 +135,36 @@ not-rice acres called rice (2,902 of 26,730), young 47 %. Not better than the pi
 6.8 %): the per-pass flood test already averages 5 x 5 pixels, and a field mean blurs the flood of
 a partly flooded field. Map per pixel, then label fields by majority, as the validated method does.
 
+## Does smoothing the radar series in time help? (user question)
+
+The NDVI series is fitted (upper-envelope Whittaker); the radar series above is not: 5 x 5
+spatial means per pass, nothing along time. Two temporal smoothers were tried on the merged
+series before any feature was computed (`sar_only features --smoothing`): a running median over
+three passes (~18 days) and a light Whittaker (lambda 1, second differences, in linear power).
+On the delta's rice pixels they blunt the flood dip by 1.6-2 dB (VH minimum -27.6 -> -26 dB).
+
+| | none | median3 | Whittaker |
+|---|---|---|---|
+| **radar rule** plot interiors, delta / B / N | 94.9 / 84.4 / 70.7 | 92.2 / 74.0 / 56.6 | 90.8 / 71.5 / 56.4 |
+| radar rule evergreen called rice, delta / B / N / 4th | 12.8 / 12.9 / 0 / 3.2 | 3.7 / 0 / 0 / 2.1 | 1.8 / 0 / 0 / 0 |
+| **model, whole AOIs held out**, plot interiors | 97.6 / 97.1 / 95.6 | 97.8 / 97.4 / 97.0 | 97.6 / 96.8 / 96.6 |
+| model evergreen called rice | 14.2 / 19.4 / 12.1 / 3.4 | 13.2 / 6.4 / 12.1 / 4.3 | 14.2 / 3.2 / 12.1 / 3.1 |
+| model, one region held out, plot interiors | 97.1 / 95.3 / 94.5 | 97.4 / 96.4 / 94.3 | 97.2 / 96.3 / 95.4 |
+| teacher rice recalled on held-out AOIs (ac) | 43,548 (92.2 %) | 43,266 (91.6 %) | 43,212 (91.5 %) |
+| teacher not-rice called rice (ac) | 2,339 (6.8 %) | 2,998 (8.7 %) | 3,117 (9.1 %) |
+| teacher class 3 called rice (ac) | 2,709 | 3,731 | 3,845 |
+| out-of-fold agreement, not rice / rice | 86.4 / 87.9 % | 82.9 / 86.4 % | 82.2 / 86.6 % |
+
+Reading: for the **rule**, smoothing removes nearly all evergreen false alarms (a single dark
+pass no longer counts) but costs 10-14 points of recall in regions B and N, whose shallow floods
+are exactly the short dips that smoothing blunts. For the **model**, smoothing is close to a
+wash: plot recall moves by at most +1.4 points (region N, median3), while agreement with the
+teacher on 132 AOIs falls (3.5 points on not-rice) and the model calls 28-33 % more of the
+teacher's not-rice and of its class 3 rice. The model already averages passes where that helps
+(the flood test's support count, the dark-pass counts, the 6-day grid), so a smoother adds little
+and takes some of the dip. Decision: no temporal smoothing by default; `median3` is kept as an
+option for a landscape where tree-line false alarms matter more than shallow floods.
+
 ## What the radar cannot do here
 
 * **Young rice and fields still under water** (teacher classes 2 and 7): the radar sees the water
