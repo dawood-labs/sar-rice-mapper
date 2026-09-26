@@ -154,9 +154,11 @@ name, so two AOIs or two versions opened together in QGIS are told apart.
 | cut crop, water not confirmed (8, new) | - | 642 | |
 | not rice (0) | 38,491 | 34,386 | |
 
-Field labels inside the AOIs (refined delineation): rice 48,824 ac, young rice 6,939 ac
-(delivered 55,763; first map 49,586), class 3 11,042, flooded not green 5,859, young 2,126,
-never bare 1,899, harvested 520, cut crop 576, not rice 35,639.
+Field labels inside the AOIs (refined delineation, geometry hygiene of 26 September): rice
+48,936 ac, young rice 6,933 ac (delivered 55,869; first map 49,586), class 3 10,992, flooded not
+green 5,857, young 2,051, never bare 1,739, harvested 513, cut crop 574, not rice 35,829. Geometry
+audit of the 132 delivered fields files: 202,177 polygons, 0 invalid, 0 non-polygon, 280 in pieces
+(strips), 123 under 4 pixels, 59 line-shaped holes, 4 overlapping pairs over one pixel.
 
 **Surveyed plots** (share of plot-interior pixels delivered as rice, three established regions):
 
@@ -178,9 +180,11 @@ field level: its remaining misses are fields whose water is shallower than the t
 dry-zone AOIs, so they stay in class 3.
 
 **Reviewed fields** (432 fields judged by eye in 20 AOIs, final field labels): of the fields the
-reviewers called right, 197 of 216 decidable keep a label that agrees with them (first map 213); of
-the fields called wrong, 128 of 148 now agree (first map 38); of the uncertain ones 21 of 34 (14).
-Agreement over the right and wrong fields: 89 % against 69 % for the first map. The last two
+reviewers called right, 164 of 180 decidable delivered polygons keep a label that agrees with them
+(first map 177); of the fields called wrong, 107 of 127 now agree (first map 32); of the uncertain
+ones 18 of 27 (10). Reviewed polygons that the refinement turned into records (dropped monster
+outlines, merged crumbs) are no longer scored: their acres are counted by the fields they covered.
+Agreement over the right and wrong fields: 88 % against 68 % for the first map. The last two
 rule changes (flood pick among all passes, no other-polarisation test) moved 12 reviewed fields:
 4 towards the reviewers, 5 against them (a 5-acre polygon over trees and paddies labelled by
 plurality, a 0.3-acre tree strip, and three "non-paddy / dry-land / stream bed" fields that carry

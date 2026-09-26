@@ -116,7 +116,11 @@ def verdict_scores(fields_dir=f"{SRC}/fields") -> tuple[pd.DataFrame, pd.DataFra
     for aoi in sorted(v["aoi"].unique(), key=lambda s: int(s[3:])):
         path = Path(fields_dir) / f"{aoi}_fields_monsoon2026.gpkg"
         if path.exists():
-            g = pyogrio.read_dataframe(path, read_geometry=False, columns=["field_id", "label"])
+            g = pyogrio.read_dataframe(path, read_geometry=False, columns=["field_id", "label", "is_field", "refine_flag"])
+            if "is_field" in g:
+                # judge the delivered polygons only: a dropped monster or a merged crumb is a record,
+                # its acres are counted by the fields it covered
+                g = g[g["is_field"] | g["refine_flag"].isin(("strip", "pond"))][["field_id", "label"]]
             frames.append(g[g["field_id"].isin(v["field_id"])])
     labels = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["field_id", "label"])
     per_field = v.merge(labels.rename(columns={"label": "new_label"}), on="field_id", how="left")
