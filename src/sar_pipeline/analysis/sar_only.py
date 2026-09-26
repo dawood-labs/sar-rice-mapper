@@ -140,16 +140,49 @@ def time_grid():
     return pd.date_range(GRID_START, GRID_END, freq=f"{GRID_STEP_DAYS}D")
 
 
+#: Temporal smoothing of the merged series before any feature is computed (user question: the
+#: NDVI series was fitted, the radar series was not). ``none`` = per-pass values (5 x 5 spatial
+#: mean only); ``median3`` = running median over three consecutive passes (~18 days); ``whit<lam>``
+#: = Whittaker smoother (second differences, in linear power as ``analysis/smoothing`` advises)
+#: with roughness penalty lam on the pass index. Why test at all: a flood is a short, sharp dip,
+#: which smoothing can blunt; speckle is a per-pass noise, which smoothing removes. Only the
+#: held-out scores can say which effect wins.
+SMOOTHING = ("none", "median3", "whit1", "whit4")
+
+
+def smooth_series(values: np.ndarray, method: str = "none") -> np.ndarray:
+    """(n_dates, n) dB values smoothed along time by ``method`` (see :data:`SMOOTHING`)."""
+    if method == "none":
+        return values
+    v = fill_gaps(values)
+    if method == "median3":
+        pad = np.concatenate([v[:1], v, v[-1:]], axis=0)
+        return np.median(np.stack([pad[:-2], pad[1:-1], pad[2:]]), axis=0).astype("float32")
+    if method.startswith("whit"):
+        from . import seasonal_stats as ss
+        from .smoothing import difference_matrix
+
+        lam = float(method[4:])
+        t = v.shape[0]
+        D = difference_matrix(t, 2).toarray()
+        A = np.eye(t) + lam * D.T @ D
+        power = ss.to_linear(v.astype("float64"))
+        z = np.linalg.solve(A, power)
+        return ss.to_db(np.maximum(z, 1e-12)).astype("float32")
+    raise ValueError(f"unknown smoothing {method!r}; one of {SMOOTHING}")
+
+
 # --------------------------------------------------------------------------- features
 
 def _doy(dates) -> np.ndarray:
     return pd.DatetimeIndex(dates).dayofyear.to_numpy().astype("float32")
 
 
-def pixel_features(aoi_id: int, window: int = 5, inside_only: bool = True) -> dict:
+def pixel_features(aoi_id: int, window: int = 5, inside_only: bool = True, smoothing: str = "none") -> dict:
     """Per-pixel radar features of one AOI: the merged series on the fixed grid (VH, VV, VH-VV)
     and season summaries. Returns ``X`` (n, F) float32, ``names``, ``pixels`` (flat grid indices),
-    ``shape``. Only pixels inside the AOI with a complete series are kept."""
+    ``shape``. Only pixels inside the AOI with a complete series are kept. With ``smoothing`` the
+    merged series is smoothed along time first and the per-pass drops are recomputed on it."""
     from . import ndvi_5day as nd
 
     s = merged_series(aoi_id, window)
@@ -161,6 +194,9 @@ def pixel_features(aoi_id: int, window: int = 5, inside_only: bool = True) -> di
     pix = np.flatnonzero(keep)
     vh, vv = vh[:, pix], vv[:, pix]
     d_vh, d_vv = s["drop_VH"][:, pix], s["drop_VV"][:, pix]
+    if smoothing != "none":
+        vh, vv = smooth_series(vh, smoothing), smooth_series(vv, smoothing)
+        d_vh, d_vv = rw.local_drops(dates, vh), rw.local_drops(dates, vv)
     grid = time_grid()
     g_vh, g_vv = resample(dates, vh, grid), resample(dates, vv, grid)
     cols, names = [g_vh.T, g_vv.T, (g_vh - g_vv).T], []
@@ -241,7 +277,7 @@ def feature_path(aoi_id: int, out_dir=OUT) -> Path:
     return Path(out_dir) / f"aoi{aoi_id}_features.npz"
 
 
-def build_features(aoi_ids, out_dir=OUT, overwrite: bool = False) -> pd.DataFrame:
+def build_features(aoi_ids, out_dir=OUT, overwrite: bool = False, smoothing: str = "none") -> pd.DataFrame:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     rows = []
     for a in aoi_ids:
@@ -249,7 +285,7 @@ def build_features(aoi_ids, out_dir=OUT, overwrite: bool = False) -> pd.DataFram
         if p.exists() and not overwrite:
             continue
         try:
-            f = pixel_features(a)
+            f = pixel_features(a, smoothing=smoothing)
         except Exception as exc:  # keep the batch going
             rows.append({"aoi": f"aoi{a}", "error": f"{type(exc).__name__}: {exc}"[:160]})
             print(f"aoi{a}: FAILED {type(exc).__name__}: {exc}"[:200])
@@ -488,11 +524,11 @@ def field_table(aoi_id: int, out_dir=OUT, fields_dir=f"{SRC}/delivery/fields") -
     return t
 
 
-def field_training_table(aoi_ids, per_class: int = 1500, seed: int = 0) -> pd.DataFrame:
+def field_training_table(aoi_ids, per_class: int = 1500, seed: int = 0, out_dir=OUT) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     parts = []
     for a in aoi_ids:
-        t = field_table(a)
+        t = field_table(a, out_dir)
         if t.empty:
             continue
         keep = []
@@ -542,23 +578,29 @@ def main(argv=None) -> int:
     p.add_argument("--folds", type=int, default=5)
     p.add_argument("--model", default=f"{OUT}/model_xgb.json")
     p.add_argument("--tag", default="")
+    p.add_argument("--smoothing", default="none", choices=SMOOTHING, help="features: temporal smoothing of the series")
+    p.add_argument("--features-dir", default=None, help="feature files to use (default sar_only/, or sar_only/<smoothing>/)")
     args = p.parse_args(argv)
+    fdir = args.features_dir or (OUT if args.smoothing == "none" else f"{OUT}/{args.smoothing}")
     ids = args.ids or sorted(int(q.parent.name[3:]) for q in Path(SRC).glob(f"aoi*/aoi*_{SEASON_KEY}_final.tif"))
     Path(OUT).mkdir(parents=True, exist_ok=True)
     if args.step == "features":
-        print(build_features(ids).to_string(index=False))
+        print(build_features(ids, out_dir=fdir, smoothing=args.smoothing).to_string(index=False))
         return 0
+    Path(fdir).mkdir(parents=True, exist_ok=True)
+    model_path = args.model if args.features_dir or args.smoothing == "none" else str(Path(fdir) / Path(args.model).name)
     plots = load_plots()
     plot_ids = [a for a in PLOT_AOIS if a in ids] or list(PLOT_AOIS)
     if args.step == "rule":
         pred = lambda F, a: radar_rule(F)
         print("== reference sets (radar rule; delivered = class 1)")
-        print(score_reference(pred, plot_ids, plots).to_string(index=False))
+        print(score_reference(pred, plot_ids, plots, out_dir=fdir).to_string(index=False))
         print("== agreement with the teacher map, acres (rows teacher, columns rule)")
-        print(teacher_agreement(pred, ids).to_string())
+        print(teacher_agreement(pred, ids, out_dir=fdir).to_string())
         return 0
     if args.step == "train":
-        table = field_training_table(ids, args.per_class) if args.level == "field" else training_table(ids, args.per_class)
+        table = (field_training_table(ids, args.per_class, out_dir=fdir) if args.level == "field"
+                 else training_table(ids, args.per_class, out_dir=fdir))
         drop_cols = ("y", "teacher", "aoi", "pixel", "pixels", "field_id")
         print(f"training rows {len(table)} from {table['aoi'].nunique()} AOIs; classes {table['y'].value_counts().to_dict()}")
         oof, imp = cross_validate(table, args.by, args.folds)
@@ -582,10 +624,10 @@ def main(argv=None) -> int:
             return m.classes_[m.predict_proba(F[feats].to_numpy(dtype="float32")).argmax(axis=1)].astype("uint8")
         if args.level == "pixel":
             print("== reference sets (model, held-out fold; delivered = class 1)")
-            print(score_reference(pred, plot_ids, plots).to_string(index=False))
+            print(score_reference(pred, plot_ids, plots, out_dir=fdir).to_string(index=False))
             if args.by == "aoi":       # by region only the plot AOIs are ever held out: no held-out model elsewhere
                 print("== agreement with the teacher map on held-out AOIs, acres (rows teacher, columns model)")
-                print(teacher_agreement(pred, ids).to_string())
+                print(teacher_agreement(pred, ids, out_dir=fdir).to_string())
         else:
             # field level: agreement in acres over the held-out fields themselves
             oof["acres"] = oof["pixels"] * 0.0247105
@@ -593,22 +635,22 @@ def main(argv=None) -> int:
             print(oof.pivot_table(index="y", columns="pred", values="acres", aggfunc="sum", fill_value=0).round(0).to_string())
         full = make_model()
         full.fit(table[feats].to_numpy(dtype="float32"), table["y"].to_numpy())
-        full.save_model(args.model)
-        json.dump({"features": feats, "classes": [int(c) for c in full.classes_], "by": args.by, "rows": len(table)},
-                  open(str(args.model).replace(".json", "_meta.json"), "w"))
-        oof.to_parquet(Path(OUT) / f"oof_{args.by}{args.tag}.parquet")
+        full.save_model(model_path)
+        json.dump({"features": feats, "classes": [int(c) for c in full.classes_], "by": args.by, "rows": len(table),
+                   "features_dir": fdir}, open(str(model_path).replace(".json", "_meta.json"), "w"))
+        oof.to_parquet(Path(fdir) / f"oof_{args.by}{args.tag}.parquet")
         return 0
     if args.step == "map":
         import xgboost as xgb
 
-        meta = json.load(open(str(args.model).replace(".json", "_meta.json")))
+        meta = json.load(open(str(model_path).replace(".json", "_meta.json")))
         m = xgb.XGBClassifier()
-        m.load_model(args.model)
+        m.load_model(model_path)
         for a in ids:
-            f = load_features(a)
+            f = load_features(a, meta.get("features_dir", fdir))
             pr_ = m.predict_proba(frame(f)[meta["features"]].to_numpy(dtype="float32"))
             cls = np.array(meta["classes"])[pr_.argmax(axis=1)].astype("uint8")
-            write_map(a, cls, f["pixels"], f["shape"], Path(OUT) / f"aoi{a}_sar_only.tif", pr_[:, meta["classes"].index(1)])
+            write_map(a, cls, f["pixels"], f["shape"], Path(fdir) / f"aoi{a}_sar_only.tif", pr_[:, meta["classes"].index(1)])
             print(f"aoi{a}: rice {mr.acres(int((cls == 1).sum())):.0f} ac, young {mr.acres(int((cls == 2).sum())):.0f} ac")
         return 0
     return 0

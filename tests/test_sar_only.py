@@ -59,3 +59,14 @@ def test_folds_leave_whole_aois_out():
     folds = so.folds_by(table, "aoi", n_folds=5)
     held = [a for _, aois in folds for a in aois]
     assert sorted(held) == sorted(table["aoi"].unique()) and len(folds) == 5
+
+
+def test_smooth_series_keeps_a_three_pass_flood_and_removes_a_one_pass_spike():
+    v = np.full((20, 2), -15.0, dtype="float32")
+    v[8:11, 0] = -24.0                         # a flood seen on three passes
+    v[9, 1] = -24.0                            # a single-pass spike (speckle, an artefact)
+    med = so.smooth_series(v, "median3")
+    assert med[9, 0] <= -23.9 and med[9, 1] > -16          # the flood stays, the spike goes
+    whit = so.smooth_series(v, "whit1")
+    assert whit[9, 0] < -21 and whit[9, 1] > whit[9, 0]      # light Whittaker blunts a little, keeps the dip
+    assert np.allclose(so.smooth_series(v, "none"), v)
