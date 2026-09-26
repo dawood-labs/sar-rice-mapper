@@ -1,6 +1,6 @@
 # 18. Rice from radar alone: how far Sentinel-1 gets without an optical series (September 2026)
 
-*Status: E1 and E2 measured on 26 September 2026; E3 (field level) below.*
+*Status: E1, E2, E2b and E3 measured on 26 September 2026 (all 132 AOIs). Code: `analysis/sar_only.py`.*
 
 ## The question
 
@@ -111,10 +111,66 @@ or below -18 dB (0.07), the VH minimum (0.06), VH at the end (0.05), the flood d
 flood found at all, the longest dark run, and the September VH values. The season's second half
 carries the decision: a map from radar alone is a map made after the canopy closed.
 
+## E2b. A whole region held out: the closest thing to a new, unseen area
+
+The same model, trained on every AOI outside one region's plot AOIs and tested on that region:
+
+| plot interiors called rice | delta | region B | region N | fourth region (young) |
+|---|---|---|---|---|
+| region held out | 97.1 % | 95.3 % | 94.5 % | 27.0 % |
+| (whole AOIs held out, E2) | 97.6 | 97.1 | 95.6 | 29.9 |
+| evergreen called rice | 12.8 | 9.7 | 9.1 | 3.3 |
+
+Moving to a region the model has never seen costs one to two points of plot recall. The feature
+ranking is the same (canopy rise from the flood, VH minimum, dark passes, VH at the end, flood
+date, September VH). This is the number to expect on the cloudy AOIs, provided they grow paddy
+the same way: flooded transplanting, a canopy by September.
+
 ## E3. Field level
 
-*(filled after E2)*
+The same features averaged over each delivered field polygon (speckle falls with the square root
+of the pixel count), teacher labels = the delivered field labels, five folds of whole AOIs:
+92.6 % of the teacher's rice acres recalled (35,329 of 38,133 held-out acres), 10.9 % of its
+not-rice acres called rice (2,902 of 26,730), young 47 %. Not better than the pixel model (92 % /
+6.8 %): the per-pass flood test already averages 5 x 5 pixels, and a field mean blurs the flood of
+a partly flooded field. Map per pixel, then label fields by majority, as the validated method does.
+
+## What the radar cannot do here
+
+* **Young rice and fields still under water** (teacher classes 2 and 7): the radar sees the water
+  but not whether a canopy will follow; 44-66 % recalled as young, the rest split between rice
+  and not rice. On the map date these are reported classes, not delivered, so the delivered map
+  loses little; the *timing* matters: a radar-only map is a map made after the canopy closed
+  (September here), not in July.
+* **Rice without a radar flood**: the AOI whose rice rests on the user's class-3 relabel scores
+  33 % recall, because its water was never confirmed by the radar; where the water is not in the
+  radar, no radar method will find it. The teacher's class 3 as a whole (rice-like optical cycle,
+  no radar water) is 23 % model rice: a quarter of it has weaker radar evidence the model accepts.
+* **Tree lines beside paddies** (5 x 5 radar box): 9-14 % of the evergreen reference pixels are
+  called rice, against 1-2 % for the validated method before its sieve. A 4-pixel minimum mapping
+  unit and field-majority labelling absorb most of these, as they do for the validated map, but
+  a radar-only map will carry more tree-line noise at field edges.
+* **Harvested fields**: the radar fall at harvest is weak (docs/17); a field cut in early
+  September is still "rice" for the radar. The validated method reads the cut from clear optical
+  dates; a radar-only map cannot, so it should be dated close to the harvest, not after it.
 
 ## Recommendation for the cloudy AOIs
 
-*(filled after E2 and E3)*
+1. **Map rice from the radar with the pixel model of E2**, trained on all 132 teacher AOIs
+   (`sar_only train --by aoi` saves it as `model_xgb.json`), then the same 4-pixel sieve and field
+   majority labels as the validated map. Expect, on paddy land like the four surveyed regions:
+   95-97 % of standing rice recalled, 7 % of non-rice called rice per AOI (median), more at
+   tree lines. Deliver the rice probability raster with the classes so a reviewer can tighten the
+   threshold where the landscape is unusual.
+2. **Two things to add before trusting it on the new AOIs**: (a) run the radar rule (E1) beside
+   the model and look at where they disagree; the rule is explainable pixel by pixel; (b) a few
+   dozen surveyed rice and non-rice fields in the new AOIs, scored the same way as here. Without
+   (b) every number above is a transfer estimate from these regions.
+3. **Do not expect** a map before the canopy closes (September for a June-August transplanting),
+   young rice as a delivered class, or rice whose transplanting water never showed in the radar.
+4. The radar-only maps of six AOIs made with the all-AOI model (`sar_only/aoi<N>_sar_only.tif`
+   and `_prob.tif`: 116, 110, 28, 20, 25, 36) are for looking at next to the validated map; the
+   honest numbers are the held-out ones above, not those maps.
+
+Everything here is agreement with plots and with a validated map, measured on held-out AOIs and
+regions; it is not ground-truth accuracy on the cloudy AOIs, which have no ground data yet.

@@ -583,8 +583,9 @@ def main(argv=None) -> int:
         if args.level == "pixel":
             print("== reference sets (model, held-out fold; delivered = class 1)")
             print(score_reference(pred, plot_ids, plots).to_string(index=False))
-            print("== agreement with the teacher map on held-out AOIs, acres (rows teacher, columns model)")
-            print(teacher_agreement(pred, ids).to_string())
+            if args.by == "aoi":       # by region only the plot AOIs are ever held out: no held-out model elsewhere
+                print("== agreement with the teacher map on held-out AOIs, acres (rows teacher, columns model)")
+                print(teacher_agreement(pred, ids).to_string())
         else:
             # field level: agreement in acres over the held-out fields themselves
             oof["acres"] = oof["pixels"] * 0.0247105
