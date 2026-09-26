@@ -329,6 +329,24 @@ few before trusting a change to the geometry rules. Delivered polygons carry `re
 (`strip`, `pond`, `monster_cut`, `split_part` or empty), `holes_filled`, `crumbs_dropped_share`,
 `overlap_lost_share` and `tail_removed_share`, so nothing that was changed is hidden.
 
+## Rice from radar alone (for AOIs without an optical series)
+
+`analysis/sar_only.py` asks how far Sentinel-1 gets without any optical data, and answers it
+where the answer can be checked: the surveyed plots, the optical-derived negatives, and the
+validated optical+radar map used as a *teacher* (training labels, and the agreement reference on
+AOIs a model never saw). Cross-validation always leaves whole AOIs out.
+
+```bash
+python -m sar_pipeline.analysis.sar_only features --ids 116      # merged ASC+DSC series on a 6-day grid + season summaries
+python -m sar_pipeline.analysis.sar_only rule                    # E1: the radar rule (flood, canopy, standing), scored
+python -m sar_pipeline.analysis.sar_only train --by aoi          # E2: XGBoost on teacher labels, 5 folds of whole AOIs
+python -m sar_pipeline.analysis.sar_only train --by region       # leave-one-region-out: the closest thing to a new area
+python -m sar_pipeline.analysis.sar_only map --ids 116           # class + rice-probability rasters from the saved model
+```
+
+Outputs live in `processed/_batch/s2_2026/sar_only/`; results and the recommendation for the
+cloudy AOIs are in `docs/18_sar_only_2026.md`.
+
 ## Sentinel-2 reference images for checking a map by eye
 
 `sar_pipeline.optical_export` exports, for each AOI and month, the **one date whose Sentinel-2

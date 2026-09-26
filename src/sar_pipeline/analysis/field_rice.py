@@ -281,13 +281,16 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refin
             from .field_level import MIN_PX
 
             fl = pd.read_parquet(fl_path)
+            # positions refer to the rows BEFORE the label stage (the refined file's order, which
+            # field_level read); rows the label stage appended (split pieces) come after them
+            n0 = len(labels0)
             owner = np.where(classes.ravel() != NODATA, idx0.ravel(), -1)
-            keep = np.bincount(owner[owner >= 0], minlength=len(fields)) >= MIN_PX
+            keep = np.bincount(owner[owner >= 0], minlength=n0)[:n0] >= MIN_PX
             rule = np.full(len(fields), -1)
             note = np.full(len(fields), "", dtype=object)
             if int(keep.sum()) == len(fl) and (fl["label"].to_numpy() == labels0[keep]).all():
-                rule[keep] = fl["field_rule_label"].to_numpy()
-                note[keep] = confidence_notes(fl, fields["label"].to_numpy()[keep], relabelled_aoi=f"aoi{aoi_id}" in overrides)
+                rule[:n0][keep] = fl["field_rule_label"].to_numpy()
+                note[:n0][keep] = confidence_notes(fl, fields["label"].to_numpy()[:n0][keep], relabelled_aoi=f"aoi{aoi_id}" in overrides)
             fields["field_rule_label"] = rule
             fields["confidence_note"] = note
             fields["label_confidence"] = np.where(fields["field_rule_label"] < 0, "not checked (small field)",
