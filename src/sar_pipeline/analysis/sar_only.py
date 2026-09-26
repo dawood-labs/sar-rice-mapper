@@ -373,7 +373,7 @@ def folds_by(table: pd.DataFrame, by: str = "aoi", n_folds: int = 5, seed: int =
 def cross_validate(table: pd.DataFrame, by: str = "aoi", n_folds: int = 5, seed: int = 0) -> tuple[pd.DataFrame, np.ndarray]:
     """Out-of-fold class and rice probability for every row of ``table``; returns (table with
     ``pred`` / ``p_rice``, feature importances averaged over folds)."""
-    feats = [c for c in table.columns if c not in ("y", "teacher", "aoi", "pixel")]
+    feats = [c for c in table.columns if c not in ("y", "teacher", "aoi", "pixel", "pixels", "field_id")]
     X, y = table[feats].to_numpy(dtype="float32"), table["y"].to_numpy()
     pred = np.full(len(table), -1)
     prob = np.full(len(table), np.nan, dtype="float32")
@@ -452,6 +452,59 @@ def teacher_agreement(predict, aoi_ids, out_dir=OUT) -> pd.DataFrame:
     return t.pivot_table(index="teacher", columns="pred", values="acres", aggfunc="sum", fill_value=0.0).round(0)
 
 
+# --------------------------------------------------------------------------- E3: field level
+
+def field_table(aoi_id: int, out_dir=OUT, fields_dir=f"{SRC}/delivery/fields") -> pd.DataFrame:
+    """One row per delivered field polygon: the mean of the pixel features over the field's
+    pixels (speckle falls with the square root of the pixel count) and the teacher's field label
+    (``label`` of the delivered fields file). Fields under 4 owned pixels are dropped."""
+    import geopandas as gpd
+    import rasterio
+    from rasterio.features import rasterize
+
+    files = sorted(Path(fields_dir).glob(f"aoi{aoi_id}_fields_*.gpkg"))
+    if not files or not feature_path(aoi_id, out_dir).exists():
+        return pd.DataFrame()
+    f = load_features(aoi_id, out_dir)
+    g = gpd.read_file(files[0])
+    with rasterio.open(Path(SRC) / f"aoi{aoi_id}" / f"aoi{aoi_id}_{SEASON_KEY}_final.tif") as ds:
+        g = g.to_crs(ds.crs)
+        order = np.argsort(-g.geometry.area.to_numpy())
+        idx = rasterize(((geom, int(i)) for i, geom in zip(order, g.geometry.to_numpy()[order])),
+                        out_shape=ds.shape, transform=ds.transform, fill=-1, dtype="int32").ravel()
+    owner = idx[f["pixels"]]
+    ok = owner >= 0
+    n = np.bincount(owner[ok], minlength=len(g))
+    sums = np.zeros((len(g), f["X"].shape[1]), dtype="float64")
+    np.add.at(sums, owner[ok], f["X"][ok])
+    keep = n >= 4
+    X = (sums[keep] / n[keep, None]).astype("float32")
+    t = pd.DataFrame(X, columns=f["names"])
+    t["pixels"] = n[keep]
+    t["teacher"] = g["label"].to_numpy()[keep]
+    t["y"] = [TEACHER_TO_TRAIN.get(int(c), -1) if TEACHER_TO_TRAIN.get(int(c)) is not None else -1 for c in t["teacher"]]
+    t["field_id"] = g["field_id"].to_numpy()[keep]
+    t["aoi"] = f"aoi{aoi_id}"
+    return t
+
+
+def field_training_table(aoi_ids, per_class: int = 1500, seed: int = 0) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    parts = []
+    for a in aoi_ids:
+        t = field_table(a)
+        if t.empty:
+            continue
+        keep = []
+        for k in TRAIN_CLASSES:
+            idx = np.flatnonzero(t["y"].to_numpy() == k)
+            if len(idx):
+                keep.append(rng.choice(idx, size=min(per_class, len(idx)), replace=False))
+        if keep:
+            parts.append(t.iloc[np.concatenate(keep)])
+    return pd.concat(parts, ignore_index=True)
+
+
 # --------------------------------------------------------------------------- maps
 
 def write_map(aoi_id: int, classes: np.ndarray, pixels: np.ndarray, shape, path, prob: np.ndarray | None = None):
@@ -482,6 +535,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.sar_only", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("step", choices=["features", "rule", "train", "map"])
+    p.add_argument("--level", default="pixel", choices=["pixel", "field"], help="train: pixel features or field means (E3)")
     p.add_argument("--ids", nargs="*", type=int, default=None, help="default: every AOI with a final map")
     p.add_argument("--by", default="aoi", choices=["aoi", "region"])
     p.add_argument("--per-class", type=int, default=3000)
@@ -504,7 +558,8 @@ def main(argv=None) -> int:
         print(teacher_agreement(pred, ids).to_string())
         return 0
     if args.step == "train":
-        table = training_table(ids, args.per_class)
+        table = field_training_table(ids, args.per_class) if args.level == "field" else training_table(ids, args.per_class)
+        drop_cols = ("y", "teacher", "aoi", "pixel", "pixels", "field_id")
         print(f"training rows {len(table)} from {table['aoi'].nunique()} AOIs; classes {table['y'].value_counts().to_dict()}")
         oof, imp = cross_validate(table, args.by, args.folds)
         print("== out-of-fold agreement with the teacher (whole AOIs held out)")
@@ -512,7 +567,7 @@ def main(argv=None) -> int:
         print("== top features"); print(imp.head(25).round(4).to_string())
         # reference sets, each plot AOI scored by the fold that held it out
         folds = folds_by(table, args.by, args.folds)
-        feats = [c for c in table.columns if c not in ("y", "teacher", "aoi", "pixel")]
+        feats = [c for c in table.columns if c not in drop_cols]
         models = {}
         for name, held in folds:
             train = ~table["aoi"].isin(held).to_numpy()
@@ -525,10 +580,16 @@ def main(argv=None) -> int:
             if m is None:
                 return np.zeros(len(F), dtype="uint8")
             return m.classes_[m.predict_proba(F[feats].to_numpy(dtype="float32")).argmax(axis=1)].astype("uint8")
-        print("== reference sets (model, held-out fold; delivered = class 1)")
-        print(score_reference(pred, plot_ids, plots).to_string(index=False))
-        print("== agreement with the teacher map on held-out AOIs, acres (rows teacher, columns model)")
-        print(teacher_agreement(pred, ids).to_string())
+        if args.level == "pixel":
+            print("== reference sets (model, held-out fold; delivered = class 1)")
+            print(score_reference(pred, plot_ids, plots).to_string(index=False))
+            print("== agreement with the teacher map on held-out AOIs, acres (rows teacher, columns model)")
+            print(teacher_agreement(pred, ids).to_string())
+        else:
+            # field level: agreement in acres over the held-out fields themselves
+            oof["acres"] = oof["pixels"] * 0.0247105
+            print("== held-out fields, acres (rows teacher class, columns model)")
+            print(oof.pivot_table(index="y", columns="pred", values="acres", aggfunc="sum", fill_value=0).round(0).to_string())
         full = make_model()
         full.fit(table[feats].to_numpy(dtype="float32"), table["y"].to_numpy())
         full.save_model(args.model)
