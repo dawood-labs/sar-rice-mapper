@@ -92,6 +92,20 @@ the first map (`analysis/compare_runs`).
   beside bright bunds showed a 12-16 dB "rise" in the 5 x 5 radar box and were delivered as rice).
 * **Fit ceiling**: the fitted NDVI may not exceed the pixel's highest observation by more than 0.05
   (a peak invented across a gap made "harvested" fields).
+* **A 140-day lookback as a fallback** (28 September, user review of aoi160): the 110-day window
+  missed crops sown in the first half of May (their bare period lies before 3 June); the wider
+  window is tried only where the 110-day one found no cycle at all, because applied everywhere it
+  shifts the water anchor and ~3 % of the confirmed rice loses its flood.
+* **Class 3 -> rice where it is the same crop** (`analysis/class3_phenology`): per AOI, the class-3
+  pixels' green-up date, canopy peak, leaf water (LSWI at the peak) and fall by the map date are
+  compared with those of the AOI's own confirmed rice; where they match (canopy within 0.06 NDVI /
+  0.06 LSWI / 0.08 fall, green-up not more than 45 days earlier or 15 later, both looking like the
+  surveyed rice) class 3 is relabelled rice through a generated override file, with
+  `label_confidence = low` and a note. Why: in many AOIs rice is sown dry or into water too shallow
+  for the radar; its class 3 followed exactly the calendar of the confirmed rice (aoi160: green-up
+  8 vs 18 July, peak 0.80 vs 0.80, LSWI 0.35 vs 0.37) while true dry-land crops green up 20-80 days
+  earlier with a lower canopy. On the surveyed plots the relabel raised region B by 3 points and
+  region N by 2-3 points with no change in the negatives.
 * **Flood support** from either polarisation of any track; a very dark, very deep pass (VH <= -24,
   drop >= 8 dB) needs no second pass.
 * **Never bare** applied to every rice-like class unless a flood was confirmed.

@@ -40,6 +40,8 @@ dark). The mask was chosen by scoring seven alternatives on the surveyed plots.
    within the last 110 days, the field was low (NDVI at most 0.40) for at least 40 days, then
    climbed by at least 0.30 to a canopy of at least 0.50, and is still standing on the map date
    (last value at least 0.40 and not more than 0.35 below the peak: a ripening crop is standing).
+   Where the last 110 days show no cycle at all, the last 140 days are tried, so a crop sown in the
+   first half of May counts as well.
 2. *Water.* Rice is transplanted into standing water, which shows in radar as a sharp fall in
    backscatter in both polarisations. The water is confirmed when the radar falls at least 3 dB
    below the field's own dry level around the optical trough and ends dark, or when, anywhere in
@@ -49,6 +51,13 @@ dark). The mask was chosen by scoring seven alternatives on the surveyed plots.
    supported by a second pass in either polarisation (a very dark, very deep pass needs none).
    Every pass is tested on its own and the flood is the largest drop that passes the test: on a
    double-cropped plain the season's largest drop is the summer crop's harvest, not the water.
+   Where no flood is seen, the crop is still counted as rice when, within the same area, it follows
+   the calendar and canopy of that area's water-confirmed rice (green-up not more than six weeks
+   earlier or two weeks later, the same canopy peak, leaf water and ripening): rice sown dry or in
+   water too shallow for the radar. These fields carry `label_confidence = low` and a note saying
+   the water was not seen, so they can be kept or dropped by the reader. Where the crop does not
+   follow the area's rice calendar, or the area has too little confirmed rice to compare with, it
+   stays "rice-like, water not confirmed" (class 3).
 3. *Radar-defined start.* Where cloud hid the weeks around transplanting, the fitted curve runs
    straight across the gap and shows no trough. A confirmed radar flood then stands in for it: the
    pixel is rice when a canopy of at least 0.50 follows the flood and is still standing, provided
