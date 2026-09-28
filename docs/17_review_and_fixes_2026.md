@@ -151,62 +151,58 @@ polygons in pieces 862 -> 8 (all strips), polygons under 4 pixels 1,495 -> 1, ov
 acres unchanged (rice 4,904 + young rice 60). The delivered GeoPackage layer now carries the file
 name, so two AOIs or two versions opened together in QGIS are told apart.
 
-## Measurements (final re-run of all 132 AOIs, 25 September 2026, "stage 7")
+## Measurements (final re-run of all 132 AOIs, 28 September 2026, "stage 10")
 
-**Class acres inside the AOIs, pixel map, first map -> final map** (`report/compare/stage7_matrix.csv`):
+The map of 25 September ("stage 7", pixel rule) plus the delineation hygiene of 26 September
+("stage 8") and the two rules of 28 September (140-day fallback; class 3 -> rice where it is the
+AOI's own crop). `report/compare/stage10_*.csv`; the earlier stages' numbers are in the log of
+the plan file.
 
-| class | first map | final map | where the difference went |
+**Class acres inside the AOIs, pixel map, first map -> final map:**
+
+| class | first map | stage 7 | final (stage 10) |
 |---|---|---|---|
-| rice (1) | 42,740 | 47,206 | +3,064 from "harvested", +3,219 from "not rice", +2,032 from class 3; -2,649 to class 3, -1,843 to "not rice" |
-| young rice (6) | 6,072 | 7,419 | +2,512 from "not rice", +483 from "young" |
-| **delivered (1 + 6)** | **48,812** | **54,626** | |
-| rice-like, water not confirmed (3) | 11,454 | 11,870 | |
-| harvested (4) | 7,020 | 628 | 3,064 to rice, 1,419 to class 3, 1,359 to "not rice", 444 to class 8 |
-| young (2) | 3,630 | 2,878 | |
-| never bare (5) | 3,998 | 2,476 | 2,861 to "not rice" (haze troughs gone with the mask) |
-| flooded, not yet green (7, new) | - | 5,901 | 5,632 from "not rice" |
-| cut crop, water not confirmed (8, new) | - | 642 | |
-| not rice (0) | 38,491 | 34,386 | |
+| rice (1) | 42,741 | 47,206 | 57,311 |
+| young rice (6) | 6,072 | 7,419 | 7,477 |
+| **delivered (1 + 6)** | **48,812** | **54,625** | **64,788** |
+| rice-like, water not confirmed (3) | 11,454 | 11,870 | 8,095 |
+| harvested (4) | 7,020 | 628 | 953 |
+| young (2) | 3,630 | 2,878 | 3,404 |
+| never bare (5) | 3,998 | 2,476 | 3,369 |
+| flooded, not yet green (7) | - | 5,901 | 5,642 |
+| cut crop, water not confirmed (8) | - | 642 | 879 |
+| not rice (0) | 38,491 | 34,386 | 25,172 |
 
-Field labels inside the AOIs (refined delineation, geometry hygiene of 26 September): rice
-48,936 ac, young rice 6,933 ac (delivered 55,869; first map 49,586), class 3 10,992, flooded not
-green 5,857, young 2,051, never bare 1,739, harvested 513, cut crop 574, not rice 35,829. Geometry
-audit of the 132 delivered fields files: 202,177 polygons, 0 invalid, 0 non-polygon, 280 in pieces
-(strips), 123 under 4 pixels, 59 line-shaped holes, 4 overlapping pairs over one pixel.
+Field labels inside the AOIs (refined delineation): rice 58,975 ac, young rice 6,969 ac
+(delivered 65,944; first map 49,586; stage 8 55,869), class 3 7,743, flooded not green 5,918,
+young 2,606, never bare 2,493, harvested 811, cut crop 1,731, not rice 26,176. Of the delivered
+rice, 11,767 ac come from the class-3 relabel in 59 AOIs (`label_confidence = low`, note "water
+not seen; same crop cycle as the area's confirmed rice"); the 140-day fallback alone added 424 ac
+in the other AOIs. The largest changes against stage 8: one AOI without plots 350 -> 2,123 ac
+(its class 3 greens up 25 days before its confirmed rice with the same canopy), aoi160 714 -> 1,352,
+then 500-550 ac in three AOIs. The dry-zone AOIs (class 3 greening 55-80 days before the rice, or
+with a lower canopy) were not relabelled and keep their class 3.
 
 **Surveyed plots** (share of plot-interior pixels delivered as rice, three established regions):
 
 | | delta | region B | region N |
 |---|---|---|---|
 | first map, field labels | 96.9 | 94.8 | 98.3 |
-| final map, pixel map | 98.0 | 97.0 | 94.4 |
-| final map, field labels | 99.0 | 98.0 | 96.8 |
+| stage 7, field labels | 99.0 | 98.0 | 96.8 |
+| final, pixel map | 98.6 | 99.5 | 96.4 |
+| final, field labels | 99.3 | 99.4 | 98.4 |
 
-Negatives (rule map, before the 4-pixel sieve): water and bare / built pixels 0 %; "cut before the
-map date" 0 % in the delta and 1.2 % in the fourth region (3 of 249 pixels; the 12-pixel set of
-region B is 7 fields last seen clear in July whose radar canopy grew afterwards); evergreen 1.4 %
-in the delta (3 of 221) and 0.7 % in the fourth region (6 of 853): tree lines beside paddies whose
-5 x 5 radar box floods and whose clear views once read 0.36-0.45 (first map and stage 5: 0 %).
-The 4-pixel minimum mapping unit then absorbs isolated tree pixels inside rice fields (17 % of
-the delta evergreen pixels, as in the first map). Region N is 1.5 points under the first map at
-field level: its remaining misses are fields whose water is shallower than the thresholds
-(VH -17.5 to -18.5 dB, 3-4 dB drop); accepting them would also accept dark dry soils in the
-dry-zone AOIs, so they stay in class 3.
+Negatives (final, field labels): "cut before the map date" 6.7 % (15 px) / 75 % (12 px) / 2.8 %;
+evergreen 24.0 / 6.4 / 12.1 / 2.4 % (pixel map 18.6 / 6.4 / 3.0 / 0.8): the relabel added a
+handful of tree-line pixels in two regions (1 and 10 pixels), the rest is the 4-pixel sieve
+filling isolated tree pixels inside rice fields, as before. Water and bare / built: 0 %.
 
-**Reviewed fields** (432 fields judged by eye in 20 AOIs, final field labels): of the fields the
-reviewers called right, 164 of 180 decidable delivered polygons keep a label that agrees with them
-(first map 177); of the fields called wrong, 107 of 127 now agree (first map 32); of the uncertain
-ones 18 of 27 (10). Reviewed polygons that the refinement turned into records (dropped monster
-outlines, merged crumbs) are no longer scored: their acres are counted by the fields they covered.
-Agreement over the right and wrong fields: 88 % against 68 % for the first map. The last two
-rule changes (flood pick among all passes, no other-polarisation test) moved 12 reviewed fields:
-4 towards the reviewers, 5 against them (a 5-acre polygon over trees and paddies labelled by
-plurality, a 0.3-acre tree strip, and three "non-paddy / dry-land / stream bed" fields that carry
-a -19.6 to -22 dB flood on 3-4 passes and a full optical cycle, which the data cannot refuse).
-
-**Double-crop check** (aoi110, the AOI the round-2 review found worse): 6 of the 7 fields named
-by the reviewer are delivered (the seventh has a 3.3 dB water drop, too weak); the AOI gained
-65 ac against stage 5 and no AOI lost delivered area.
+**Reviewed fields** (432 fields judged by eye in 20 AOIs, delivered polygons only): right
+158 of 180 (first map 177), wrong 100 of 127 (32), uncertain 19 of 27 (10). The relabel costs
+five "right" and five "wrong" agreements against stage 8: reviewers had judged those class-3
+fields "dry-land" by eye; the phenology test puts them with the AOI's rice, and the user's
+decision was to count them. Geometry audit of the 132 delivered fields files unchanged
+(0 invalid, 4 overlapping pairs over one pixel).
 
 **Refined delineation**: 428,349 polygons -> 422,763 fields; 123,279 attribute acres -> 112,618
 UTM acres -> 101,204 refined field acres (overlaps and tails removed, 597 ac of monster outlines
