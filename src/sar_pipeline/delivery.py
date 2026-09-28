@@ -114,6 +114,9 @@ def package(out_dir, map_date: str | None = None, src_root=SRC) -> pd.DataFrame:
             deliver_fields(f, out_fields / f.name.replace("monsoon2026", f"standing_rice_{map_date}"))
         if (fields_dir / "field_acres_by_class.csv").exists():
             shutil.copy2(fields_dir / "field_acres_by_class.csv", Path(out_dir) / "field_acres_by_class.csv")
+    guide = Path(__file__).resolve().parents[2] / "docs" / "class_guide.md"
+    if guide.exists():
+        (Path(out_dir) / "CLASS_GUIDE.md").write_text(guide.read_text())     # one page: what each class means
     note = Path(__file__).resolve().parents[2] / "docs" / "delivery_methods_note.md"
     if note.exists():
         (Path(out_dir) / "METHODS.md").write_text(note.read_text())
