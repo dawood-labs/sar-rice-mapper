@@ -70,3 +70,27 @@ def test_smooth_series_keeps_a_three_pass_flood_and_removes_a_one_pass_spike():
     whit = so.smooth_series(v, "whit1")
     assert whit[9, 0] < -21 and whit[9, 1] > whit[9, 0]      # light Whittaker blunts a little, keeps the dip
     assert np.allclose(so.smooth_series(v, "none"), v)
+
+
+def test_field_labels_from_map_uses_the_pixel_majority(tmp_path):
+    import geopandas as gpd
+    import rasterio
+    from rasterio.transform import from_origin
+    from shapely.geometry import box
+
+    transform = from_origin(500000, 4000100, 10, 10)
+    classes = np.zeros((10, 10), dtype="uint8")
+    classes[:, :5] = 1                                        # west half rice, east half not rice
+    tif = tmp_path / "map.tif"
+    with rasterio.open(tif, "w", driver="GTiff", width=10, height=10, count=1, dtype="uint8", crs="EPSG:32630",
+                       transform=transform, nodata=255) as ds:
+        ds.write(classes, 1)
+    fields = gpd.GeoDataFrame({"field_id": ["a", "b"], "is_field": [True, True], "refine_flag": ["", ""],
+                               "area_acres": [1.0, 1.0]},
+                              geometry=[box(500000, 4000000, 500050, 4000100), box(500050, 4000000, 500100, 4000100)],
+                              crs="EPSG:32630").to_crs(4326)
+    gp = tmp_path / "fields.gpkg"
+    fields.to_file(gp, driver="GPKG")
+    out = so.field_labels_from_map(0, tif, gp, tmp_path / "out" / "labelled.gpkg")
+    assert out["label"].tolist() == [1, 0] and out["class_name"].tolist() == ["rice", "not rice"]
+    assert (tmp_path / "out" / "labelled.gpkg").exists()

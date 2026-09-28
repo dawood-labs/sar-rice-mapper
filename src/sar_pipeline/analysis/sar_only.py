@@ -31,6 +31,7 @@ Steps (``python -m sar_pipeline.analysis.sar_only <step>``)::
     rule --ids ...              # E1: radar rule classes per pixel, scored on plots / negatives / teacher
     train --ids ... --by aoi    # E2: XGBoost on teacher labels, leave-AOIs-out CV, scores -> report
     map --ids ... --model ...   # class + probability rasters from a saved model
+    fields --ids ...            # the delivered field polygons labelled from the radar-only map (for QGIS, side by side)
 """
 from __future__ import annotations
 
@@ -561,6 +562,29 @@ def write_map(aoi_id: int, classes: np.ndarray, pixels: np.ndarray, shape, path,
             dst.write(pfull.reshape(shape), 1)
 
 
+# --------------------------------------------------------------------------- field labels from a radar-only map
+
+def field_labels_from_map(aoi_id: int, map_path, fields_path, out_path) -> pd.DataFrame:
+    """Label the delivered field polygons (the refined delineation, same geometry as the
+    optical+radar delivery) by pixel majority of a radar-only class raster, so the two versions
+    can be compared field by field in QGIS. Classes: 0 not rice, 1 rice, 2 young."""
+    import geopandas as gpd
+    import rasterio
+
+    from .field_rice import label_frame
+
+    fields = gpd.read_file(fields_path)
+    with rasterio.open(map_path) as ds:
+        classes = ds.read(1)
+        out, _ = label_frame(fields, classes, ds.transform, ds.crs, aoi_id)
+    out["class_name"] = out["label"].map({0: "not rice", 1: "rice", 2: "young"})
+    out["source"] = "radar only"
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).unlink(missing_ok=True)
+    out.to_file(out_path, layer=Path(out_path).stem, driver="GPKG")
+    return out
+
+
 # --------------------------------------------------------------------------- CLI
 
 def main(argv=None) -> int:
@@ -570,7 +594,7 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.sar_only", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["features", "rule", "train", "map"])
+    p.add_argument("step", choices=["features", "rule", "train", "map", "fields"])
     p.add_argument("--level", default="pixel", choices=["pixel", "field"], help="train: pixel features or field means (E3)")
     p.add_argument("--ids", nargs="*", type=int, default=None, help="default: every AOI with a final map")
     p.add_argument("--by", default="aoi", choices=["aoi", "region"])
@@ -652,6 +676,19 @@ def main(argv=None) -> int:
             cls = np.array(meta["classes"])[pr_.argmax(axis=1)].astype("uint8")
             write_map(a, cls, f["pixels"], f["shape"], Path(fdir) / f"aoi{a}_sar_only.tif", pr_[:, meta["classes"].index(1)])
             print(f"aoi{a}: rice {mr.acres(int((cls == 1).sum())):.0f} ac, young {mr.acres(int((cls == 2).sum())):.0f} ac")
+        return 0
+    if args.step == "fields":
+        # radar-only labels on the delivered (refined) field polygons, beside the radar-only map
+        for a in ids:
+            src = sorted(Path(SRC, "delivery", "fields").glob(f"aoi{a}_fields_*.gpkg"))
+            if not src:
+                print(f"aoi{a}: no delivered fields file")
+                continue
+            out = field_labels_from_map(a, Path(fdir) / f"aoi{a}_sar_only.tif", src[0],
+                                        Path(fdir) / "fields" / f"aoi{a}_fields_sar_only.gpkg")
+            f = out[out["is_field"]] if "is_field" in out else out
+            print(f"aoi{a}: {len(out)} polygons; radar-only field labels rice {f.loc[f['label'] == 1, 'area_acres'].sum():.0f} ac, "
+                  f"young {f.loc[f['label'] == 2, 'area_acres'].sum():.0f} ac, not rice {f.loc[f['label'] == 0, 'area_acres'].sum():.0f} ac")
         return 0
     return 0
 
