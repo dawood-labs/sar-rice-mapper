@@ -73,6 +73,11 @@ SEASON = ("2026-05-01", "2026-09-24")
 #: (transplanting to harvest is 100-120 days), so its trough is looked for in this many days
 #: before the last window and not earlier.
 LOOKBACK_DAYS = 110
+#: Where the 110-day window finds no cycle at all (class 0), the window is widened to this so that a
+#: crop sown in the first half of May counts (the deliverable says "planted May 2026 or later").
+#: Only as a fallback: applied everywhere, the earlier trough shifts the water anchor and ~3 % of
+#: the confirmed rice loses its flood (user review of aoi160, 28 Sep 2026; docs/17).
+LOOKBACK_FALLBACK_DAYS = 140
 #: A standing crop may have lost this much NDVI from its peak (haze, early senescence) and still be
 #: standing; a harvested field has lost far more.
 STANDING_FALL_MAX = 0.35
@@ -341,7 +346,8 @@ def classify(events: pd.DataFrame, trough_max=TROUGH_MAX, rise_min=RISE_MIN, you
 
 
 def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
-               radar_season: str | None = "monsoon2026", water: str = WATER_DEFAULT):
+               radar_season: str | None = "monsoon2026", water: str = WATER_DEFAULT,
+               lookback_days: int = LOOKBACK_DAYS):
     """The per-pixel evidence the rule decides on: ``(series, events, radar)``.
 
     ``events`` holds, per grid pixel, the optical events of :func:`pixel_events` and, when the
@@ -354,7 +360,7 @@ def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
     d = nd.load(aoi_id, out_root=out_root)
     ndvi = d["ndvi5d"].reshape(d["ndvi5d"].shape[0], -1)
     lswi = d["lswi5d"].reshape(d["lswi5d"].shape[0], -1)
-    events = pixel_events(ndvi, lswi, d["windows"], season)
+    events = pixel_events(ndvi, lswi, d["windows"], season, lookback_days=lookback_days)
     radar = bool(radar_season) and radar_water.season_run_exists(aoi_id, radar_season)
     if radar:
         trough = np.where(events["valid"].to_numpy(), events["trough_date"].to_numpy().astype("datetime64[D]"),
@@ -380,7 +386,7 @@ def aoi_events(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON,
 
 def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, inside_only: bool = True,
             radar_season: str | None = "monsoon2026", water: str = WATER_DEFAULT, suffix: str = "",
-            radar_trough: bool = RADAR_TROUGH_DEFAULT) -> dict:
+            radar_trough: bool = RADAR_TROUGH_DEFAULT, fallback_days: int | None = LOOKBACK_FALLBACK_DAYS) -> dict:
     """Classify one AOI, write ``<aoi>_monsoon2026.tif``, return the acres per class.
 
     ``radar_season`` names the Sentinel-1 season run used to confirm the water; when that run does
@@ -394,6 +400,18 @@ def run_aoi(aoi_id: int, out_root="processed/_batch/s2_2026", season=SEASON, ins
     classes = classify(events, radar_wet=events["radar_wet"] if radar else None,
                        never_bare=events["never_bare"] if radar and "never_bare" in events else None,
                        radar_trough=radar_trough and radar, map_date=pd.DatetimeIndex(d["windows"])[-1])
+    if fallback_days and fallback_days > LOOKBACK_DAYS and (classes == 0).any():
+        # second pass with the wider window, taken only where the first found nothing
+        import gc
+
+        none = classes == 0
+        del events
+        gc.collect()
+        _, events, _ = aoi_events(aoi_id, out_root, season, radar_season, water, lookback_days=fallback_days)
+        classes2 = classify(events, radar_wet=events["radar_wet"] if radar else None,
+                            never_bare=events["never_bare"] if radar and "never_bare" in events else None,
+                            radar_trough=radar_trough and radar, map_date=pd.DatetimeIndex(d["windows"])[-1])
+        classes = np.where(none, classes2, classes).astype("uint8")
     if inside_only:
         classes[~nd.inside_aoi(aoi_id)] = 255
     grid = d["loc"]["grid"]

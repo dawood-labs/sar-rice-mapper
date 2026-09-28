@@ -426,3 +426,40 @@ def wait_for_tasks(task_ids, poll_seconds: float = 30, status_of=None, sleep=Non
         if not running:
             return states
         sleep(poll_seconds)
+
+
+def main(argv=None) -> int:
+    """Command line: ``dates`` exports every Sentinel-2 acquisition date of a period for the given AOI
+    configs (unmasked, with the QA60 / SCL mask bands) into ``<base_folder>/s2_dates_masks`` on GCS,
+    skipping files already there, then waits for the tasks. Used to add the newest dates to the
+    chips and, after a series rebuild, to the map. Starts Earth Engine exports: run it only when the
+    user has asked for them."""
+    import argparse
+    import glob
+
+    from . import auth
+    from . import config as config_mod
+
+    p = argparse.ArgumentParser(prog="python -m sar_pipeline.optical_export", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("step", choices=["dates"])
+    p.add_argument("--configs", nargs="*", default=None, help="config files (default: config/aoi*_monsoon2026.yaml)")
+    p.add_argument("--start", required=True, help="first date, YYYY-MM-DD (inclusive)")
+    p.add_argument("--end", required=True, help="last date, YYYY-MM-DD (exclusive)")
+    p.add_argument("--no-wait", action="store_true", help="do not wait for the tasks to finish")
+    args = p.parse_args(argv)
+    configs = args.configs or sorted(glob.glob("config/aoi*_monsoon2026.yaml"))
+    cfg = config_mod.load_config(configs[0])
+    auth.init_ee(cfg)
+    rows = export_all_dates(configs, args.start, args.end, bucket=cfg["gcs"]["bucket"],
+                            prefix=cfg["gcs"]["base_folder"] + "/s2_dates_masks", bands=BANDS_WITH_MASKS)
+    started = [r for r in rows if r.get("task_id")]
+    print(f"{len(rows)} rows, {len(started)} exports started, {sum(1 for r in rows if r.get('error'))} errors")
+    if started and not args.no_wait:
+        summary = wait_for_tasks([r["task_id"] for r in started])
+        print(summary)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

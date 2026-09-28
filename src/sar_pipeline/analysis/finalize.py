@@ -28,11 +28,22 @@ SRC = "processed/_batch/s2_2026"
 SIEVE_PX = 4            # ~0.1 acre: 10 % of the field plots are smaller (docs/13)
 
 
-def load_overrides(path="config/class_overrides_monsoon2026.yaml") -> dict:
+#: A second, generated file: class 3 -> rice where the AOI's class 3 is the same crop as its
+#: confirmed rice (``analysis/class3_phenology``). Kept apart from the hand-decided file.
+PHENOLOGY_OVERRIDES = "config/class_overrides_phenology.yaml"
+
+
+def load_overrides(path="config/class_overrides_monsoon2026.yaml", generated=PHENOLOGY_OVERRIDES) -> dict:
+    """Hand-decided overrides, then the generated ones appended per AOI (hand rules apply first)."""
     import yaml
 
-    p = Path(path)
-    return (yaml.safe_load(p.read_text()) or {}) if p.exists() else {}
+    out = {}
+    for f in (path, generated):
+        p = Path(f)
+        if p and p.exists():
+            for aoi, rules in (yaml.safe_load(p.read_text()) or {}).items():
+                out.setdefault(aoi, []).extend(rules or [])
+    return out
 
 
 def relabel(classes, rules) -> np.ndarray:

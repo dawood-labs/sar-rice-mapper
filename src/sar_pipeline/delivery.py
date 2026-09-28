@@ -91,12 +91,15 @@ def deliver_fields(src, dst) -> int:
     return len(g)
 
 
-def package(out_dir, map_date: str | None = None, src_root=SRC) -> pd.DataFrame:
-    """Every AOI with a map; writes the GeoTIFFs, ``acres_by_class.csv`` and ``legend.csv``."""
+def package(out_dir, map_date: str | None = None, src_root=SRC, aoi_ids=None) -> pd.DataFrame:
+    """Every AOI with a map (or only ``aoi_ids``: a preview package); writes the GeoTIFFs,
+    ``acres_by_class.csv`` and ``legend.csv``."""
     if map_date is None:
         map_date = latest_window(src_root)
     aois = sorted({p.parent.name for p in Path(src_root).glob("aoi*/aoi*_monsoon2026.tif")},
                   key=lambda s: int(s[3:]))
+    if aoi_ids:
+        aois = [a for a in aois if int(a[3:]) in set(aoi_ids)]
     rows = [package_aoi(a, out_dir, map_date, src_root) for a in aois]
     table = pd.DataFrame(rows)
     total = table.drop(columns=["aoi", "file"]).sum().round(1)
@@ -111,6 +114,8 @@ def package(out_dir, map_date: str | None = None, src_root=SRC) -> pd.DataFrame:
         out_fields = Path(out_dir) / "fields"
         out_fields.mkdir(parents=True, exist_ok=True)
         for f in sorted(fields_dir.glob("aoi*_fields_monsoon2026.gpkg")):
+            if aoi_ids and int(f.name.split("_")[0][3:]) not in set(aoi_ids):
+                continue
             deliver_fields(f, out_fields / f.name.replace("monsoon2026", f"standing_rice_{map_date}"))
         if (fields_dir / "field_acres_by_class.csv").exists():
             shutil.copy2(fields_dir / "field_acres_by_class.csv", Path(out_dir) / "field_acres_by_class.csv")
@@ -137,8 +142,9 @@ def main(argv=None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", default=f"{SRC}/delivery")
     p.add_argument("--map-date", default=None, help="YYYY-MM-DD (default: the last 5-day window)")
+    p.add_argument("--ids", nargs="*", type=int, default=None, help="only these AOIs (a preview package)")
     args = p.parse_args(argv)
-    t = package(args.out, args.map_date)
+    t = package(args.out, args.map_date, aoi_ids=args.ids)
     print(t.tail(1).T.to_string())
     return 0
 
