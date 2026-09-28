@@ -35,6 +35,7 @@ OUT = f"{SRC}/report/class3_phenology.csv"
 RICE = (1, 6)
 MATCH = {"greenup_doy": 15.0, "peak_ndvi": 0.06, "lswi_at_peak": 0.06, "fall_from_peak": 0.08}
 MIN_PIXELS = 200
+REFERENCE_SETS = ("rice_plot_interior", "rice_plot_edge", "evergreen", "water", "bare_or_built", "cut_before_map_date")
 SAMPLE = 3000
 
 
@@ -111,14 +112,101 @@ def run(aoi_ids, out_path=OUT) -> pd.DataFrame:
     return pd.read_csv(out_path)
 
 
+def matching_aois(csv_path=OUT, plot_like: bool = True) -> set:
+    """AOIs whose class 3 is the same crop as their confirmed rice (from :func:`run`'s table); with
+    ``plot_like`` both classes must also look like the surveyed rice (peak >= 0.70, LSWI >= 0.26)."""
+    t = pd.read_csv(csv_path).dropna(subset=["match"])
+    ok = t["match"] == True
+    if plot_like:
+        ok &= ((t["rice_peak_ndvi"] >= 0.70) & (t["rice_lswi_at_peak"] >= 0.26)
+               & (t["class3_peak_ndvi"] >= 0.70) & (t["class3_lswi_at_peak"] >= 0.26))
+    return set(t.loc[ok, "aoi"])
+
+
+def experiment(aoi_ids, plots, lookback: int = 140, csv_path=OUT) -> pd.DataFrame:
+    """Score three variants on the given AOIs without touching any file: the current rule
+    (110-day lookback), the longer lookback alone (A: sowing from early May counts), and the
+    longer lookback plus class 3 relabelled to rice where the AOI's class 3 matches its rice (B).
+    Reports class acres inside the AOI and the share of every reference set delivered as rice
+    (classes 1 + 6), rule map before the sieve."""
+    import functools
+    import gc
+
+    from . import validation as va
+
+    match = matching_aois(csv_path)
+    orig = mr.pixel_events
+    out_csv = Path(SRC) / "report" / f"class3_experiment_lookback{lookback}.csv"
+    done = set(pd.read_csv(out_csv)["aoi"]) if out_csv.exists() else set()
+    rows = []
+    for a in aoi_ids:
+        if f"aoi{a}" in done:
+            continue
+        out = {}
+        for name, lb in (("baseline_110", mr.LOOKBACK_DAYS), (f"A_lookback_{lookback}", lookback)):
+            mr.pixel_events = functools.partial(orig, lookback_days=lb)
+            try:
+                d, ev, _ = mr.aoi_events(a)
+            finally:
+                mr.pixel_events = orig
+            cls = mr.classify(ev, radar_wet=ev["radar_wet"], never_bare=ev["never_bare"], radar_trough=True,
+                              map_date=d["windows"][-1])
+            out[name] = cls
+            del ev, d                       # the evidence tables of a large AOI are several GB; the pod has 20
+            gc.collect()
+        # the longer lookback as a FALLBACK only: where the 110-day rule found no cycle at all
+        base, longer = out["baseline_110"], out[f"A_lookback_{lookback}"]
+        out["A2_fallback"] = np.where(base == 0, longer, base).astype(base.dtype)
+        for src, name in ((f"A_lookback_{lookback}", "AB_relabel_class3"), ("A2_fallback", "A2B_fallback_relabel"),
+                          ("baseline_110", "B_only_relabel")):
+            relabel = out[src].copy()
+            if f"aoi{a}" in match:
+                relabel[relabel == 3] = 1
+            out[name] = relabel
+        inside = nd.inside_aoi(a)
+        here = plots[plots["aoi"] == f"aoi{a}"] if plots is not None and "aoi" in plots else None
+        refs = va.reference_sets(a, here if here is not None and len(here) else None)
+        aoi_rows = []
+        for name, cls in out.items():
+            row = {"aoi": f"aoi{a}", "variant": name, "class3_matches_rice": f"aoi{a}" in match}
+            for k in (0, 1, 2, 3, 6, 7):
+                row[f"c{k}_ac"] = round(mr.acres(int(((cls == k) & inside).sum())), 0)
+            row["delivered_ac"] = row["c1_ac"] + row["c6_ac"]
+            for s_name, g in refs.groupby("set"):
+                pix = g["pixel"].to_numpy()
+                row[f"{s_name}_pct"] = round(100 * float(np.isin(cls[pix], (1, 6)).mean()), 1)
+                row[f"{s_name}_n"] = len(pix)
+            aoi_rows.append(row)
+        rows += aoi_rows
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        # a fixed column set: an AOI without plots has fewer reference sets, and rows appended to a
+        # CSV must line up with its header
+        cols = (["aoi", "variant", "class3_matches_rice"] + [f"c{k}_ac" for k in (0, 1, 2, 3, 6, 7)] + ["delivered_ac"]
+                + [f"{s}_{x}" for s in REFERENCE_SETS for x in ("pct", "n")])
+        pd.DataFrame(aoi_rows).reindex(columns=cols).to_csv(out_csv, mode="a", header=not out_csv.exists(), index=False)
+        nd.forget()
+        gc.collect()
+    return pd.read_csv(out_csv) if out_csv.exists() else pd.DataFrame(rows)
+
+
 def main(argv=None) -> int:
     import argparse
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.class3_phenology", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ids", nargs="*", type=int, default=None, help="default: every AOI with a final map")
+    p.add_argument("--experiment", action="store_true", help="score baseline / longer lookback / + class-3 relabel on the ids")
+    p.add_argument("--lookback", type=int, default=140)
     args = p.parse_args(argv)
     ids = args.ids or sorted(int(q.parent.name[3:]) for q in Path(SRC).glob("aoi*/aoi*_monsoon2026_final.tif"))
+    if args.experiment:
+        from .compare_runs import load_plots
+
+        t = experiment(ids, load_plots(), args.lookback)
+        pd.set_option("display.width", 300)
+        pd.set_option("display.max_columns", 40)
+        print(t.to_string(index=False))
+        return 0
     t = run(ids)
     pd.set_option("display.width", 250)
     both = t.dropna(subset=["match"]) if "match" in t else t
