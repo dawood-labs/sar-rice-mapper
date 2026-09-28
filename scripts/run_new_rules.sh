@@ -7,7 +7,7 @@
 # Why a script: seven steps in a fixed order; JOBS defaults to 2 because the pod now has 4 CPUs and
 # 20 GB (one rule process peaks at ~4-6 GB on a large AOI).
 #
-# Usage: [JOBS=n] scripts/run_new_rules.sh <stage_name> <out_dir> <id> [<id> ...]
+# Usage: [JOBS=n] [SKIP_RULE=1] scripts/run_new_rules.sh <stage_name> <out_dir> <id> [<id> ...]
 set -eu
 STAGE=$1; OUT=$2; shift 2
 IDS="$*"
@@ -16,8 +16,12 @@ JOBS=${JOBS:-2}
 mkdir -p logs
 t0=$(date +%s); stamp() { echo "[$(( ($(date +%s) - t0) / 60 )) min] $*"; }
 
-stamp "rule (110-day window, 140-day fallback), $JOBS at a time"
-echo $IDS | tr ' ' '\n' | xargs -P "$JOBS" -I{} sh -c "$PY -u -m sar_pipeline.monsoon_batch rule --ids {} --out processed/_batch/s2_2026/${STAGE}_parts/aoi{}.csv > logs/${STAGE}_rule_aoi{}.log 2>&1 || echo 'aoi{} rule FAILED'"
+if [ "${SKIP_RULE:-0}" = "1" ]; then       # SKIP_RULE=1: the rule maps on disk are current (only the later steps changed)
+  stamp "rule step skipped (SKIP_RULE=1)"
+else
+  stamp "rule (110-day window, 140-day fallback), $JOBS at a time"
+  echo $IDS | tr ' ' '\n' | xargs -P "$JOBS" -I{} sh -c "$PY -u -m sar_pipeline.monsoon_batch rule --ids {} --out processed/_batch/s2_2026/${STAGE}_parts/aoi{}.csv > logs/${STAGE}_rule_aoi{}.log 2>&1 || echo 'aoi{} rule FAILED'"
+fi
 stamp "class-3 phenology on the rule maps -> overrides"
 rm -f processed/_batch/s2_2026/report/class3_phenology.csv
 $PY -m sar_pipeline.analysis.class3_phenology --ids $IDS --map-suffix "" --write-overrides > logs/${STAGE}_phenology.log 2>&1; tail -3 logs/${STAGE}_phenology.log

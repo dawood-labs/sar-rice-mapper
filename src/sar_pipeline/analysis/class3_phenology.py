@@ -18,7 +18,8 @@ Descriptors per pixel, on the fitted 5-day series from 1 May:
 * ``lswi_at_peak``: leaf / soil water at the canopy peak;
 * ``fall_from_peak``: peak minus the last value.
 
-A class matches the AOI's rice when the medians agree within ``MATCH`` (days, NDVI, LSWI).
+A class matches the AOI's rice when the canopy medians agree within ``MATCH`` (NDVI, LSWI, fall) and
+the green-up is not more than ``GREENUP_EARLIER_MAX`` days earlier or ``GREENUP_LATER_MAX`` days later.
 """
 from __future__ import annotations
 
@@ -33,7 +34,12 @@ from . import ndvi_5day as nd
 SRC = "processed/_batch/s2_2026"
 OUT = f"{SRC}/report/class3_phenology.csv"
 RICE = (1, 6)
-MATCH = {"greenup_doy": 15.0, "peak_ndvi": 0.06, "lswi_at_peak": 0.06, "fall_from_peak": 0.08}
+MATCH = {"peak_ndvi": 0.06, "lswi_at_peak": 0.06, "fall_from_peak": 0.08}
+#: Green-up: class 3 may green up EARLIER than the AOI's confirmed rice by up to this many days (rice
+#: sown dry in early May greens six weeks before transplanted rice; user decision 28 Sep 2026) and
+#: later by at most ``GREENUP_LATER_MAX`` (a much later green-up with no water is another crop).
+GREENUP_EARLIER_MAX = 45.0
+GREENUP_LATER_MAX = 15.0
 MIN_PIXELS = 200
 REFERENCE_SETS = ("rice_plot_interior", "rice_plot_edge", "evergreen", "water", "bare_or_built", "cut_before_map_date")
 SAMPLE = 3000
@@ -85,8 +91,10 @@ def compare(aoi_id: int, seed: int = 0, map_suffix: str = "_final") -> dict:
             out[f"{name}_{k}"] = round(float(v), 2)
     if "rice" in med and "class3" in med:
         diffs = {k: abs(float(med["class3"][k] - med["rice"][k])) for k in MATCH}
-        out["match"] = all(diffs[k] <= MATCH[k] for k in MATCH)
-        out["greenup_diff_days"] = round(diffs["greenup_doy"], 1)
+        shift = float(med["class3"]["greenup_doy"] - med["rice"]["greenup_doy"])      # negative = earlier
+        greenup_ok = -GREENUP_EARLIER_MAX <= shift <= GREENUP_LATER_MAX
+        out["match"] = bool(all(diffs[k] <= MATCH[k] for k in MATCH) and greenup_ok)
+        out["greenup_diff_days"] = round(shift, 1)
     else:
         out["match"] = None
     return out
