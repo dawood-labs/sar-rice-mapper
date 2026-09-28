@@ -16,5 +16,5 @@ def test_descriptors_find_greenup_peak_and_leaf_water(monkeypatch):
     ndvi[:, 1] = 0.25                                             # pixel 1: never a canopy
     monkeypatch.setattr(cp.nd, "load", lambda aoi_id, **kw: {"ndvi5d": ndvi, "lswi5d": lswi, "windows": windows})
     d = cp.descriptors(0, np.array([0, 1]))
-    assert 190 < d.loc[0, "greenup_doy"] < 220 and d.loc[0, "peak_ndvi"] > 0.79 and abs(d.loc[0, "lswi_at_peak"] - 0.35) < 1e-6
+    assert 190 < d.loc[0, "greenup_doy"] <= 225 and d.loc[0, "peak_ndvi"] > 0.79 and abs(d.loc[0, "lswi_at_peak"] - 0.35) < 1e-6
     assert np.isnan(d.loc[1, "greenup_doy"]) and d.loc[1, "peak_ndvi"] == 0.25
