@@ -189,6 +189,67 @@ def experiment(aoi_ids, plots, lookback: int = 140, csv_path=OUT) -> pd.DataFram
     return pd.read_csv(out_csv) if out_csv.exists() else pd.DataFrame(rows)
 
 
+def write_variant(aoi_ids, lookback: int = 140, csv_path=OUT, out_dir=f"{SRC}/report/class3_variant",
+                  fields_dir=f"{SRC}/delivery/fields") -> list:
+    """Write the recommended variant (110-day rule, 140-day fallback where it found nothing, class 3
+    relabelled to rice where the AOI's class 3 matches its rice) as a class raster and as labels on
+    the delivered field polygons, for a look in QGIS before it is adopted for every AOI."""
+    import functools
+    import gc
+
+    import geopandas as gpd
+    import rasterio
+
+    from .field_rice import label_frame
+
+    match = matching_aois(csv_path)
+    orig = mr.pixel_events
+    made = []
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    for a in aoi_ids:
+        cls = {}
+        for lb in (mr.LOOKBACK_DAYS, lookback):
+            mr.pixel_events = functools.partial(orig, lookback_days=lb)
+            try:
+                d, ev, _ = mr.aoi_events(a)
+            finally:
+                mr.pixel_events = orig
+            cls[lb] = mr.classify(ev, radar_wet=ev["radar_wet"], never_bare=ev["never_bare"], radar_trough=True,
+                                  map_date=d["windows"][-1])
+            shape = d["ndvi5d"].shape[1:]
+            del ev, d
+            gc.collect()
+        out = np.where(cls[mr.LOOKBACK_DAYS] == 0, cls[lookback], cls[mr.LOOKBACK_DAYS]).astype("uint8")
+        relabelled = np.zeros(out.shape, dtype=bool)
+        if f"aoi{a}" in match:
+            relabelled = out == 3
+            out[relabelled] = 1
+        src = Path(SRC) / f"aoi{a}" / f"aoi{a}_monsoon2026_final.tif"
+        with rasterio.open(src) as ds:
+            profile = ds.profile.copy()
+            transform, crs = ds.transform, ds.crs
+        tif = Path(out_dir) / f"aoi{a}_variant_A2B.tif"
+        with rasterio.open(tif, "w", **profile) as dst:
+            dst.write(out.reshape(shape), 1)
+        made.append(tif)
+        files = sorted(Path(fields_dir).glob(f"aoi{a}_fields_*.gpkg"))
+        if files:
+            fields = gpd.read_file(files[0])
+            lab, _ = label_frame(fields, out.reshape(shape), transform, crs, a)
+            lab["class_name"] = lab["label"].map(mr.CLASSES)
+            # how much of each field's rice came from the class-3 relabel (water not seen)
+            rel_lab, _ = label_frame(fields, np.where(relabelled, 1, 0).astype("uint8").reshape(shape), transform, crs, a)
+            lab["relabelled_share"] = rel_lab["rice_share"].to_numpy()
+            lab["previous_label"] = fields["label"].to_numpy() if "label" in fields else -1
+            gp = Path(out_dir) / f"aoi{a}_fields_variant_A2B.gpkg"
+            gp.unlink(missing_ok=True)
+            lab.to_file(gp, layer=gp.stem, driver="GPKG")
+            made.append(gp)
+        nd.forget()
+        gc.collect()
+    return made
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -196,9 +257,14 @@ def main(argv=None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ids", nargs="*", type=int, default=None, help="default: every AOI with a final map")
     p.add_argument("--experiment", action="store_true", help="score baseline / longer lookback / + class-3 relabel on the ids")
+    p.add_argument("--write-variant", action="store_true", help="write the recommended variant (raster + field labels) for the ids")
     p.add_argument("--lookback", type=int, default=140)
     args = p.parse_args(argv)
     ids = args.ids or sorted(int(q.parent.name[3:]) for q in Path(SRC).glob("aoi*/aoi*_monsoon2026_final.tif"))
+    if args.write_variant:
+        for f in write_variant(ids, args.lookback):
+            print(f)
+        return 0
     if args.experiment:
         from .compare_runs import load_plots
 
