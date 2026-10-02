@@ -35,12 +35,51 @@ from pathlib import Path
 META = "_handover"
 
 
-def _client(key: str | None):
+def _client(key: str | None, pool: int = 10):
+    """A storage client whose HTTP pool holds ``pool`` connections: the default 10 made 32 upload threads queue for a
+    connection (2 Oct: 16-23 MB/s on small files)."""
+    import requests
     from google.cloud import storage
 
-    if key:
-        return storage.Client.from_service_account_json(key)
-    return storage.Client()
+    client = storage.Client.from_service_account_json(key) if key else storage.Client()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=pool, pool_maxsize=pool, max_retries=3)
+    client._http.mount("https://", adapter)
+    return client
+
+
+def _upload_part(args):
+    """One process's share of the upload (its own client and thread pool); returns (sent bytes, failed list)."""
+    root, bucket, dest, key, workers, items, part = args
+    root_p = Path(root)
+    b = _client(key, pool=workers).bucket(bucket)
+    sent, failed, t0 = 0, [], time.time()
+
+    def one(item):
+        rel, size = item
+        blob = b.blob(f"{dest}/{rel}")
+        if size > 100 * 2 ** 20:
+            blob.chunk_size = 64 * 2 ** 20
+        err = None
+        for attempt in range(4):
+            try:
+                blob.upload_from_filename(str(root_p / rel), timeout=600)
+                return item, None
+            except Exception as e:
+                err = e
+                time.sleep(2 ** attempt)
+        return item, err
+
+    with ThreadPoolExecutor(workers) as pool:
+        for n, f in enumerate(as_completed([pool.submit(one, it) for it in items]), 1):
+            (rel, size), err = f.result()
+            if err:
+                failed.append((rel, repr(err)))
+            else:
+                sent += size
+            if n % 2000 == 0 or n == len(items):
+                print(f"[part {part}] {n}/{len(items)} files, {sent / 1e9:.1f} GB, "
+                      f"{sent / max(time.time() - t0, 1) / 1e6:.0f} MB/s, {len(failed)} failed", flush=True)
+    return sent, failed
 
 
 def scan(root: Path) -> tuple[list[tuple[str, int]], list[dict]]:
@@ -68,7 +107,7 @@ def _existing(bucket, prefix: str) -> dict:
 
 
 def upload(root: str, bucket: str, prefix: str, key: str | None = None, workers: int = 32,
-           log_every: int = 2000) -> dict:
+           processes: int = 8) -> dict:
     """Upload ``root`` (see the module docstring); returns counts and bytes."""
     root_p = Path(root).resolve()
     dest = f"{prefix.strip('/')}/{root_p.name}"
@@ -88,35 +127,19 @@ def upload(root: str, bucket: str, prefix: str, key: str | None = None, workers:
     total = sum(s for _, s in todo)
     print(f"{len(files)} files ({sum(s for _, s in files) / 1e9:.1f} GB), {len(links)} links; "
           f"{len(files) - len(todo)} already there; uploading {len(todo)} ({total / 1e9:.1f} GB)", flush=True)
-    t0, done, sent, failed = time.time(), 0, 0, []
+    # spread over processes (each with its own threads and connections); big files dealt round-robin first so every
+    # process gets a fair share of bytes, small files after
+    todo.sort(key=lambda it: -it[1])
+    parts = [todo[i::processes] for i in range(processes)]
+    from concurrent.futures import ProcessPoolExecutor
 
-    def one(item):
-        rel, size = item
-        blob = b.blob(f"{dest}/{rel}")
-        if size > 100 * 2 ** 20:
-            blob.chunk_size = 64 * 2 ** 20
-        for attempt in range(4):
-            try:
-                blob.upload_from_filename(str(root_p / rel), timeout=600)
-                return item, None
-            except Exception as e:                 # network hiccup: retry, then report
-                err = e
-                time.sleep(2 ** attempt)
-        return item, err
-
-    with ThreadPoolExecutor(workers) as pool:
-        futs = [pool.submit(one, it) for it in todo]
-        for f in as_completed(futs):
-            (rel, size), err = f.result()
-            done += 1
-            if err:
-                failed.append((rel, repr(err)))
-            else:
-                sent += size
-            if done % log_every == 0 or done == len(todo):
-                el = time.time() - t0
-                print(f"{done}/{len(todo)} files, {sent / 1e9:.1f}/{total / 1e9:.1f} GB, "
-                      f"{sent / max(el, 1) / 1e6:.0f} MB/s, {len(failed)} failed", flush=True)
+    failed, sent = [], 0
+    with ProcessPoolExecutor(processes) as pp:
+        for s_, f_ in pp.map(_upload_part, [(str(root_p), bucket, dest, key, workers, part, i)
+                                           for i, part in enumerate(parts)]):
+            sent += s_
+            failed += f_
+    print(f"done: {sent / 1e9:.1f} GB sent, {len(failed)} failed", flush=True)
     if failed:
         (meta_dir / "failed.json").write_text(json.dumps(failed, indent=1))
     return {"files": len(files), "uploaded": len(todo) - len(failed), "failed": len(failed), "links": len(links)}
@@ -152,7 +175,7 @@ def download(root: str, bucket: str, prefix: str, key: str | None = None, worker
     """Download the uploaded folder into ``root`` (its parent is created), then recreate the links."""
     root_p = Path(root)
     dest = f"{prefix.strip('/')}/{root_p.name}"
-    b = _client(key).bucket(bucket)
+    b = _client(key, pool=workers).bucket(bucket)
     blobs = list(b.list_blobs(prefix=dest + "/"))
 
     def one(blob):
@@ -175,11 +198,12 @@ def main(argv=None) -> int:
     p.add_argument("--bucket", required=True)
     p.add_argument("--prefix", required=True, help="folder inside the bucket; the root's own name is appended")
     p.add_argument("--key", help="service-account key file (default: application default credentials)")
-    p.add_argument("--workers", type=int, default=32)
+    p.add_argument("--workers", type=int, default=32, help="upload threads per process")
+    p.add_argument("--processes", type=int, default=8)
     a = p.parse_args(argv)
     key = a.key if a.key and Path(a.key).exists() else None
     if a.step == "upload":
-        print(upload(a.root, a.bucket, a.prefix, key, a.workers))
+        print(upload(a.root, a.bucket, a.prefix, key, a.workers, a.processes))
     elif a.step == "verify":
         print(verify(a.root, a.bucket, a.prefix, key))
     elif a.step == "download":
