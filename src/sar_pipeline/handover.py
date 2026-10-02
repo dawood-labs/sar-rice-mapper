@@ -122,6 +122,13 @@ def upload(root: str, bucket: str, prefix: str, key: str | None = None, workers:
         w.writerow(["path", "size"])
         w.writerows(files)
     files, links = scan(root_p)                     # now including the two metadata files
+    # the manifest cannot hold its own final size: it is uploaded but not listed (verify skips it too)
+    files_listed = [f for f in files if f[0] != f"{META}/manifest.csv"]
+    with open(meta_dir / "manifest.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["path", "size"])
+        w.writerows(files_listed)
+    files, links = scan(root_p)
     have = _existing(b, dest)
     todo = [(r, s) for r, s in files if have.get(f"{dest}/{r}") != s]
     total = sum(s for _, s in todo)
