@@ -747,6 +747,88 @@ def lock(aoi: int, sliver_acres: float, fresh: str = "processed/_batch/s2_2026/r
     return man
 
 
+def compare_outputs(aoi: int, new_dir, ref_dir, sliver_acres: float = 0.15) -> dict:
+    """Compares one AOI's rule outputs in ``new_dir`` with those in ``ref_dir`` (both folders holding
+    ``aoi<N>_rel_*`` files): the raw and sieved class rasters pixel by pixel, the field layer of ``sliver_acres`` by
+    polygon count and acres per class. A file missing on either side is reported, not compared.
+
+    Why (2 Oct 2026, handover to a new machine): "the restore is exact" must be shown with numbers, not assumed; a
+    missing input (e.g. the radar artefact-pass list) changes results silently."""
+    import geopandas as gpd
+    import rasterio
+
+    new_dir, ref_dir = Path(new_dir), Path(ref_dir)
+    out = {"aoi": aoi}
+    for kind, name in (("raw", f"aoi{aoi}_rel_class.tif"), ("sieved", f"aoi{aoi}_rel_class_sieved.tif")):
+        a, b = new_dir / name, ref_dir / name
+        if not (a.exists() and b.exists()):
+            out[kind] = "missing: " + ", ".join(str(p) for p in (a, b) if not p.exists())
+            continue
+        with rasterio.open(a) as da, rasterio.open(b) as db:
+            x, y = da.read(1), db.read(1)
+            same_grid = x.shape == y.shape and da.transform == db.transform and da.crs == db.crs
+        diff = int((x != y).sum()) if x.shape == y.shape else -1
+        out[kind] = {"identical": bool(same_grid and diff == 0), "pixels_differing": diff, "same_grid": same_grid}
+    name = f"aoi{aoi}_rel_fields_sliver{int(round(sliver_acres * 100)):03d}.gpkg"
+    a, b = new_dir / name, ref_dir / name
+    if a.exists() and b.exists():
+        fa, fb = gpd.read_file(a), gpd.read_file(b)
+        acres_a = fa.groupby("class_name")["acres"].sum().round(2)
+        acres_b = fb.groupby("class_name")["acres"].sum().round(2)
+        acres_diff = float((acres_a.sub(acres_b, fill_value=0)).abs().max()) if len(fa) or len(fb) else 0.0
+        out["fields"] = {"polygons": len(fa), "polygons_ref": len(fb), "max_class_acres_diff": round(acres_diff, 3),
+                         "acres": acres_a.to_dict(),
+                         "identical": len(fa) == len(fb) and acres_diff == 0.0}
+    else:
+        out["fields"] = "missing: " + ", ".join(str(p) for p in (a, b) if not p.exists())
+    return out
+
+
+def manifest_mismatches(ref, man: dict) -> list[str]:
+    """Files of a locked folder whose sha256 differs from MANIFEST.json (``"<name> (missing)"`` when absent). aoi160 was
+    locked by hand before :func:`lock` existed: its manifest names the code files without the ``code/`` folder they
+    sit in, so a name not found at the top is looked up in ``code/``."""
+    import hashlib
+
+    ref = Path(ref)
+    bad = []
+    for name, digest in man["files"].items():
+        path = ref / name if (ref / name).exists() else ref / "code" / name
+        if not path.exists():
+            bad.append(f"{name} (missing)")
+        elif hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            bad.append(name)
+    return bad
+
+
+def reproduce(aoi: int, scratch, fresh: str = "processed/_batch/s2_2026/rice_fresh",
+              series_root: str = "processed/_batch/s2_2026_hyb40m1late") -> dict:
+    """Rebuilds a LOCKED AOI from zero in ``scratch`` (raw rule, sieve, fields with its own rules) and compares it with
+    the frozen copy in ``rice_fresh/locked/aoi<N>/`` (:func:`compare_outputs`); also re-checks the frozen files'
+    sha256 against MANIFEST.json. Only ``scratch`` is written; the real folder and the locked copy are read only.
+
+    Why (2 Oct 2026, handover): a restored project must prove it reproduces the accepted results exactly before work
+    continues; the rule reads many inputs (series, radar stacks, artefact passes, delineation) that a copy can miss."""
+    import json
+    import shutil
+
+    ref = Path(fresh) / "locked" / f"aoi{aoi}"
+    scratch = Path(scratch)
+    if scratch.resolve() == Path(fresh).resolve() or Path(fresh).resolve() in scratch.resolve().parents:
+        raise ValueError("scratch must lie outside the real rice_fresh folder")
+    man = json.loads((ref / "MANIFEST.json").read_text())
+    bad = manifest_mismatches(ref, man)
+    (scratch / f"aoi{aoi}").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(Path(fresh) / f"aoi{aoi}" / f"aoi{aoi}_step1_cover.tif", scratch / f"aoi{aoi}")
+    # force: the guard keys on the AOI number, but nothing outside ``scratch`` is written here
+    run(aoi, series_root=series_root, fresh=str(scratch), force=True)
+    sieve(aoi, fresh=str(scratch), force=True)
+    fields(aoi, fresh=str(scratch), force=True)
+    out = compare_outputs(aoi, scratch / f"aoi{aoi}", ref, man["sliver_acres"])
+    out["manifest_files_changed"] = bad
+    return out
+
+
 def _guard(aoi: int, force: bool) -> None:
     if aoi in LOCKED_AOIS and not force:
         raise PermissionError(f"aoi{aoi} is locked (accepted by the user); its outputs are not rewritten. "

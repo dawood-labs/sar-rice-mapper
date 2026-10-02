@@ -302,6 +302,7 @@ fields of different classes is cut by a straight line along its own axis when th
 polygon gets a field-shaped polygon; same-label polygons that touch, overlap or nest are merged
 (`_rel_fields_pieces.gpkg` with each piece's origin and decision; `_rel_fields_sliver005|010|015.gpkg`, the final layer per sliver threshold: slivers join the neighbour with the longest shared edge, a piece of the same field first; different fields are never dissolved together and no polygons overlap).
 Notebook 08 shows the rule's live class and features on every curve.
+A LOCKED AOI can be rebuilt from zero to prove a copy of the project is complete: `curve_rules.reproduce(<N>, <scratch folder>)` runs the rule, sieve and fields in the scratch folder only and compares them with `rice_fresh/locked/aoi<N>/` (raw and sieved rasters pixel by pixel, field count and acres per class, sha256 of the frozen files); `curve_rules.compare_outputs(<N>, <folder>, <reference folder>)` compares any two sets of outputs.
 
 **Factor breakdown (a check map, not a product).** `python -m sar_pipeline.analysis.factor_breakdown --aoi <N>
 --root <series folder>` gives every pixel a short code made of the factors behind a season: sowing period (S1 May,

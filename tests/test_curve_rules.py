@@ -155,6 +155,39 @@ def test_fields_take_the_majority_class_of_the_sieved_map(tmp_path, monkeypatch)
     assert list(res["sliver_acres"]) == [0.05, 0.10, 0.15] and (res["overlap_acres"] == 0).all()
 
 
+def test_compare_outputs_finds_a_changed_pixel_and_reports_missing_files(tmp_path):
+    import shutil
+
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    a = np.full((10, 10), 1, dtype="uint8")
+    prof = {"driver": "GTiff", "width": 10, "height": 10, "count": 1, "dtype": "uint8", "nodata": 255,
+            "crs": "EPSG:32633", "transform": from_origin(500000, 100, 10, 10)}
+    new, ref = tmp_path / "new", tmp_path / "ref"
+    for d in (new, ref):
+        d.mkdir()
+        with rasterio.open(d / "aoi1_rel_class.tif", "w", **prof) as ds:
+            ds.write(a[None])
+    shutil.copy(new / "aoi1_rel_class.tif", new / "aoi1_rel_class_sieved.tif")
+    b = a.copy()
+    b[3, 3] = 5
+    with rasterio.open(ref / "aoi1_rel_class_sieved.tif", "w", **prof) as ds:
+        ds.write(b[None])
+    res = cr.compare_outputs(1, new, ref)
+    assert res["raw"]["identical"] and res["raw"]["pixels_differing"] == 0
+    assert not res["sieved"]["identical"] and res["sieved"]["pixels_differing"] == 1
+    assert res["fields"].startswith("missing")
+
+
+def test_reproduce_refuses_to_write_inside_the_real_folder(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError):
+        cr.reproduce(1, tmp_path / "rice_fresh" / "check", fresh=str(tmp_path / "rice_fresh"))
+
+
 def test_a_locked_aoi_is_never_rewritten_and_overrides_stay_inside_their_aoi(monkeypatch):
     import pytest
 
@@ -168,3 +201,16 @@ def test_a_locked_aoi_is_never_rewritten_and_overrides_stay_inside_their_aoi(mon
     assert cr.LOW_NOW == 0.6 and fl.MIN_CUT_GAIN == 0.08
     with cr.rules_for(160):
         assert cr.LOW_NOW == 0.6
+
+
+def test_manifest_check_finds_code_files_in_code_folder_and_flags_changes(tmp_path):
+    import hashlib
+
+    (tmp_path / "code").mkdir()
+    (tmp_path / "a.tif").write_bytes(b"raster")
+    (tmp_path / "code" / "rule.py").write_text("x = 1")
+    man = {"files": {"a.tif": hashlib.sha256(b"raster").hexdigest(),
+                     "rule.py": hashlib.sha256(b"x = 1").hexdigest(), "gone.csv": "0"}}
+    assert cr.manifest_mismatches(tmp_path, man) == ["gone.csv (missing)"]
+    (tmp_path / "a.tif").write_bytes(b"changed")
+    assert cr.manifest_mismatches(tmp_path, man) == ["a.tif", "gone.csv (missing)"]
