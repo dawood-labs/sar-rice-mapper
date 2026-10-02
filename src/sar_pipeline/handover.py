@@ -18,7 +18,7 @@ Use (from ``sar-rice-mapper/``; the service account key in ``secrets/`` must exi
 
     python -m sar_pipeline.handover upload   --root <base folder> --bucket <bucket> --prefix <folder in bucket>
     python -m sar_pipeline.handover verify   --root ... --bucket ... --prefix ...
-    python -m sar_pipeline.handover download --root <base folder> --bucket ... --prefix ... --key <key.json>
+    python -m sar_pipeline.handover download --root <base folder> --bucket ... --prefix ... --key <key.json> [--processes 8 --workers 32]
 
 The private handover note names the real bucket, folder and key.
 """
@@ -178,24 +178,75 @@ def restore_links(root: str) -> int:
     return n
 
 
-def download(root: str, bucket: str, prefix: str, key: str | None = None, workers: int = 32) -> dict:
-    """Download the uploaded folder into ``root`` (its parent is created), then recreate the links."""
+def _deal(items: list[tuple[str, int]], parts: int) -> list[list[tuple[str, int]]]:
+    """Split (name, size) items over ``parts`` processes: biggest first, dealt round-robin, so every process gets a
+    similar mix of large and small files and none is left alone with the slow tail."""
+    items = sorted(items, key=lambda it: -it[1])
+    return [items[i::parts] for i in range(parts)]
+
+
+def _download_part(args):
+    """One process's share of the download (its own client and thread pool); returns (got files, failed list).
+
+    Each file goes to ``<name>.part`` first and is renamed when complete, so an interrupted run never leaves a
+    truncated file under the real name."""
+    root, bucket, dest, key, workers, items, part = args
+    root_p = Path(root)
+    b = _client(key, pool=workers).bucket(bucket)
+    got, nbytes, failed, t0 = 0, 0, [], time.time()
+
+    def one(item):
+        name, size = item
+        target = root_p / name[len(dest) + 1:]
+        if target.exists() and target.stat().st_size == size:
+            return item, 0, None
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".part")
+        err = None
+        for attempt in range(4):
+            try:
+                b.blob(name).download_to_filename(str(tmp), timeout=600)
+                os.replace(tmp, target)
+                return item, 1, None
+            except Exception as e:
+                err = e
+                time.sleep(2 ** attempt)
+        return item, 0, err
+
+    with ThreadPoolExecutor(workers) as pool:
+        for n, f in enumerate(as_completed([pool.submit(one, it) for it in items]), 1):
+            (name, size), done, err = f.result()
+            if err:
+                failed.append((name, repr(err)))
+            got += done
+            nbytes += size * done
+            if n % 5000 == 0 or n == len(items):
+                print(f"[part {part}] {n}/{len(items)} files, {nbytes / 1e9:.1f} GB new, "
+                      f"{nbytes / max(time.time() - t0, 1) / 1e6:.0f} MB/s, {len(failed)} failed", flush=True)
+    return got, failed
+
+
+def download(root: str, bucket: str, prefix: str, key: str | None = None, workers: int = 32,
+             processes: int = 8) -> dict:
+    """Download the uploaded folder into ``root`` (its parent is created), then recreate the links.
+
+    Like ``upload`` the work is spread over processes: one process with 64 threads reached only ~44 MB/s on the
+    ~160k mostly small files (2 Oct, 40% of one core busy, the rest waiting on single requests)."""
+    from concurrent.futures import ProcessPoolExecutor
+
     root_p = Path(root)
     dest = f"{prefix.strip('/')}/{root_p.name}"
     b = _client(key, pool=workers).bucket(bucket)
-    blobs = list(b.list_blobs(prefix=dest + "/"))
-
-    def one(blob):
-        target = root_p / blob.name[len(dest) + 1:]
-        if target.exists() and target.stat().st_size == blob.size:
-            return 0
-        target.parent.mkdir(parents=True, exist_ok=True)
-        blob.download_to_filename(str(target))
-        return 1
-
-    with ThreadPoolExecutor(workers) as pool:
-        got = sum(pool.map(one, blobs))
-    return {"objects": len(blobs), "downloaded": got, "links": restore_links(root)}
+    items = [(bl.name, bl.size) for bl in b.list_blobs(prefix=dest + "/")]
+    print(f"{len(items)} objects, {sum(s for _, s in items) / 1e9:.1f} GB listed", flush=True)
+    got, failed = 0, []
+    with ProcessPoolExecutor(processes) as pp:
+        for g, f in pp.map(_download_part, [(str(root_p), bucket, dest, key, workers, part, i)
+                                            for i, part in enumerate(_deal(items, processes))]):
+            got += g
+            failed += f
+    return {"objects": len(items), "downloaded": got, "failed": len(failed), "failed_examples": failed[:10],
+            "links": restore_links(root)}
 
 
 def main(argv=None) -> int:
@@ -205,7 +256,7 @@ def main(argv=None) -> int:
     p.add_argument("--bucket", required=True)
     p.add_argument("--prefix", required=True, help="folder inside the bucket; the root's own name is appended")
     p.add_argument("--key", help="service-account key file (default: application default credentials)")
-    p.add_argument("--workers", type=int, default=32, help="upload threads per process")
+    p.add_argument("--workers", type=int, default=32, help="threads per process (upload and download)")
     p.add_argument("--processes", type=int, default=8)
     a = p.parse_args(argv)
     key = a.key if a.key and Path(a.key).exists() else None
@@ -214,7 +265,7 @@ def main(argv=None) -> int:
     elif a.step == "verify":
         print(verify(a.root, a.bucket, a.prefix, key))
     elif a.step == "download":
-        print(download(a.root, a.bucket, a.prefix, key, a.workers))
+        print(download(a.root, a.bucket, a.prefix, key, a.workers, a.processes))
     else:
         print({"links": restore_links(a.root)})
     return 0
