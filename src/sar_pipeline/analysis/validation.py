@@ -117,7 +117,7 @@ def event_table(aoi_id: int, refs: pd.DataFrame, season=mr.SEASON, radar_season=
     gaps = d["gapdays5d"].reshape(d["gapdays5d"].shape[0], -1)
     windows = pd.DatetimeIndex(d["windows"])
     pix = refs["pixel"].to_numpy()
-    ev = mr.pixel_events(ndvi[:, pix], lswi[:, pix], windows, season)
+    ev = mr.pixel_events(ndvi[:, pix], lswi[:, pix], windows, mr.season_to_series(season, windows))
     tidx = np.searchsorted(windows.to_numpy(), ev["trough_date"].to_numpy().astype("datetime64[ns]"))
     tidx = np.clip(tidx, 0, len(windows) - 1)
     ev["trough_gap_days"] = gaps[:, pix][tidx, np.arange(len(pix))]

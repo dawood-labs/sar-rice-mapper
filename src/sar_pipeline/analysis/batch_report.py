@@ -110,7 +110,7 @@ def aoi_evidence(aoi_id: int, out_dir=OUT, sample: int = SAMPLE, seed: int = 0) 
         classes = ds.read(1).ravel()
     windows = pd.DatetimeIndex(d["windows"])
     earliest = max(pd.Timestamp(mr.SEASON[0]), windows[-1] - pd.Timedelta(days=mr.LOOKBACK_DAYS))
-    idx = np.flatnonzero((windows >= earliest) & (windows < mr.SEASON[1]))
+    idx = np.flatnonzero((windows >= earliest) & (windows < pd.Timestamp(mr.season_to_series(mr.SEASON, windows)[1])))
     ndvi = d["ndvi5d"].reshape(d["ndvi5d"].shape[0], -1)
     gaps = d["gapdays5d"].reshape(d["gapdays5d"].shape[0], -1)
     sub = ndvi[idx]

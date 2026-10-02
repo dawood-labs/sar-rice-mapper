@@ -26,6 +26,13 @@ from .sieve import NODATA, sieve_classes
 
 SRC = "processed/_batch/s2_2026"
 SIEVE_PX = 4            # ~0.1 acre: 10 % of the field plots are smaller (docs/13)
+#: Round 3 (user 30 Sep, aoi160_004992): the generated "class 3 -> rice" relabel skips the pixels whose radar brightened
+#: right after sowing with no sign of water (``<aoi>_monsoon2026_c3_radar_against.tif`` from the rule); those pixels
+#: become class 9 "rice-like, no sign of water" (reported, not delivered) so the client sees them apart from the rice
+#: and from the plain class 3. Off by default: the user decides when the delivery switches it on.
+PER_PIXEL_RELABEL = False
+#: The class the flagged class-3 pixels take when ``PER_PIXEL_RELABEL`` is on.
+NO_WATER_CLASS = 9
 
 
 #: A second, generated file: class 3 -> rice where the AOI's class 3 is the same crop as its
@@ -46,11 +53,23 @@ def load_overrides(path="config/class_overrides_monsoon2026.yaml", generated=PHE
     return out
 
 
-def relabel(classes, rules) -> np.ndarray:
-    """Apply ``[{from, to}, ...]`` in order."""
-    out = np.asarray(classes).copy()
+def relabel(classes, rules, keep=None, keep_to=None) -> np.ndarray:
+    """Apply ``[{from, to}, ...]`` in order; pixels in ``keep`` (bool, same shape) are left out of the class-3 rules.
+
+    With ``keep_to`` (a class code) the class-3 pixels in ``keep`` that a class-3 rule would have
+    moved are written as ``keep_to`` instead of staying 3. Why only those: in an AOI without a
+    class-3 relabel nothing would have turned them into rice, so there is nothing to report apart.
+    """
+    c = np.asarray(classes)
+    out = c.copy()
     for r in rules or []:
-        out[np.asarray(classes) == int(r["from"])] = int(r["to"])
+        hit = c == int(r["from"])
+        if keep is not None and int(r["from"]) == 3:
+            held = hit & np.asarray(keep, dtype=bool)
+            hit &= ~held
+            if keep_to is not None:
+                out[held] = int(keep_to)
+        out[hit] = int(r["to"])
     return out
 
 
@@ -63,7 +82,12 @@ def finalize_aoi(aoi_id: int, overrides: dict | None = None, sieve_px: int = SIE
     with rasterio.open(src) as ds:
         c = ds.read(1)
         profile = ds.profile.copy()
-    r = relabel(c, overrides.get(f"aoi{aoi_id}"))
+    keep = None
+    against = src.with_name(f"aoi{aoi_id}_monsoon2026_c3_radar_against.tif")
+    if PER_PIXEL_RELABEL and against.exists():
+        with rasterio.open(against) as ds:
+            keep = ds.read(1).astype(bool)
+    r = relabel(c, overrides.get(f"aoi{aoi_id}"), keep, keep_to=NO_WATER_CLASS if keep is not None else None)
     f = sieve_classes(r, sieve_px)
     with rasterio.open(src.with_name(f"aoi{aoi_id}_monsoon2026_final.tif"), "w", **profile) as dst:
         dst.write(f, 1)
@@ -82,11 +106,16 @@ def main(argv=None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ids", nargs="*", type=int, default=None, help="default: every AOI with a rule map")
     p.add_argument("--sieve-px", type=int, default=SIEVE_PX)
-    p.add_argument("--out", default=f"{SRC}/monsoon2026_final_acres.csv")
+    p.add_argument("--per-pixel-relabel", action="store_true", help="class 3 -> rice skips radar-against pixels; they become class 9 (rice-like, no sign of water)")
+    p.add_argument("--out", default=None, help="default: <src-root>/monsoon2026_final_acres.csv")
+    p.add_argument("--src-root", default=SRC, help="folder with <aoi>/<aoi>_monsoon2026.tif (a sandbox for tests)")
     args = p.parse_args(argv)
-    ids = args.ids or sorted(int(x.parent.name[3:]) for x in Path(SRC).glob("aoi*/aoi*_monsoon2026.tif"))
+    ids = args.ids or sorted(int(x.parent.name[3:]) for x in Path(args.src_root).glob("aoi*/aoi*_monsoon2026.tif"))
+    global PER_PIXEL_RELABEL
+    PER_PIXEL_RELABEL = PER_PIXEL_RELABEL or args.per_pixel_relabel
     ov = load_overrides()
-    t = pd.DataFrame([finalize_aoi(a, ov, args.sieve_px) for a in ids])
+    t = pd.DataFrame([finalize_aoi(a, ov, args.sieve_px, src_root=args.src_root) for a in ids])
+    args.out = args.out or f"{args.src_root}/monsoon2026_final_acres.csv"
     t.to_csv(args.out, index=False)
     cols = [c for c in t.columns if c.endswith("_rule") or c.endswith("_final")]
     print(t[cols].sum().round(0).to_string())

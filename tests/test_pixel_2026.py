@@ -54,3 +54,24 @@ def test_pixel_clear_chips_keeps_every_date_the_pixel_is_clear():
                           "pixel_clear": [59.0, 60.0, 95.0]})
     picked = px.pixel_clear_chips(table, clear_min=60)
     assert [d.strftime("%m-%d") for d in picked["date"]] == ["01-02", "01-20"]
+
+
+def test_read_window_matches_a_boundless_read(tmp_path):
+    """One read of several bands, zero-filled outside the raster, equals the per-band boundless reads."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+    from rasterio.windows import Window
+
+    from sar_pipeline.analysis import pixel_2026 as p26
+
+    data = np.arange(3 * 10 * 12, dtype="uint16").reshape(3, 10, 12) + 1
+    path = tmp_path / "x.tif"
+    with rasterio.open(path, "w", driver="GTiff", width=12, height=10, count=3, dtype="uint16",
+                       crs="EPSG:32633", transform=from_origin(500000, 5000000, 10, 10)) as ds:
+        ds.write(data)
+    with rasterio.open(path) as ds:
+        for win in (Window(-3, -2, 7, 7), Window(8, 6, 7, 7), Window(2, 2, 5, 5), Window(20, 20, 3, 3)):
+            got = p26.read_window(ds, [1, 3], win)
+            want = np.stack([ds.read(i, window=win, boundless=True, fill_value=0) for i in (1, 3)]).astype("float32")
+            np.testing.assert_array_equal(got, want)

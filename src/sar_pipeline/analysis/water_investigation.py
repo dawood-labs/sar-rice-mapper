@@ -28,6 +28,17 @@ import pandas as pd
 REL_DAYS = np.arange(-90, 121, 6)       # relative-day grid for the aligned curves (half the 12-day repeat)
 
 
+
+def ndvi_ylim(*arrays, top: float = 1.05) -> tuple[float, float]:
+    """NDVI axis limits that never hide a value: at least -0.3 .. ``top``, lower when a clear view is open water.
+
+    Why: open water reads NDVI -0.4 to -0.6; a fixed lower limit of -0.3 cut those points off the plot, so a reviewer
+    saw "no September value" on a field whose clear 13 Sep view (water) was in the series (aoi72_000025 / 000022)."""
+    vals = np.concatenate([np.ravel(np.asarray(a, dtype="float64")) for a in arrays]) if arrays else np.array([])
+    vals = vals[np.isfinite(vals)]
+    low = min(-0.3, float(vals.min()) - 0.05) if len(vals) else -0.3
+    return low, top
+
 def sample_pixels(ev: pd.DataFrame, classes, codes=(1, 3), n: int = 3000, seed: int = 0) -> pd.DataFrame:
     """Up to ``n`` random pixels of each class code, with their trough date and class."""
     ev = ev.assign(**{"class": np.asarray(classes)})
@@ -132,8 +143,19 @@ def plot_aligned(curves: pd.DataFrame, out_path=None, title: str = ""):
     return fig
 
 
+def view_window(season, dates) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """(start, end) of what a sheet shows. An end of None means "up to the newest local image" (inclusive).
+
+    Why (user, 30 Sep, aoi160_005366): the sheets had a fixed end of 24 Sep, so a clear 26 Sep image the user could
+    see in QGIS never appeared among the chips once the series ran past the old map date."""
+    t0 = pd.Timestamp(season[0])
+    if season[1] is not None:
+        return t0, pd.Timestamp(season[1])
+    return t0, pd.DatetimeIndex(dates).max() + pd.Timedelta(days=1)
+
+
 def pixel_sheet(aoi_id: int, pid: int, events: pd.DataFrame | None = None, out_dir=None,
-                season=("2026-03-15", "2026-09-24")):
+                season=("2026-03-15", None)):
     """One pixel, optical and radar on one time axis, plus its clear 5-3-2 chips.
 
     Top: every raw NDVI observation (filled = Cloud Score+ clear at the pixel, hollow = hazy but
@@ -155,7 +177,7 @@ def pixel_sheet(aoi_id: int, pid: int, events: pd.DataFrame | None = None, out_d
     table, chips, clear = p26.chip_stack(aoi_id, pid)
     raw = p["raw"].merge(table[["date", "pixel_clear"]], on="date", how="left")
     ser = p["series"]
-    t0, t1 = pd.Timestamp(season[0]), pd.Timestamp(season[1])
+    t0, t1 = view_window(season, table["date"])
     raw, ser = raw[(raw["date"] >= t0) & (raw["date"] < t1)], ser[(ser["window"] >= t0) & (ser["window"] < t1)]
     loc = pr.locate(aoi_id, pid, season_key="monsoon2026")
     fig, (a1, a2) = plt.subplots(2, 1, figsize=(15, 8.5), facecolor=SURFACE, sharex=True)
@@ -182,16 +204,17 @@ def pixel_sheet(aoi_id: int, pid: int, events: pd.DataFrame | None = None, out_d
                     a.axvline(pd.Timestamp(e[key]), color=colour, lw=1.2, ls="--")
                 a1.text(pd.Timestamp(e[key]), 1.02, label, color=colour, fontsize=8, ha="center")
         title += f" · class {int(e['class'])}" if "class" in e else ""
-    a1.set_ylim(-0.3, 1.05)
+    a1.set_ylim(*ndvi_ylim(raw["ndvi"], ser["ndvi_fit"]))
     a1.set_ylabel("NDVI / LSWI")
     a1.legend(frameon=False, fontsize=8, ncol=3, loc="lower left")
     a1.set_title(title, loc="left", fontsize=11, color=INK)
     styles = {"VV": "-", "VH": ":"}
     colours = ["#b45f06", "#2a78d6", "#7a3ab4"]
     for k, track in enumerate([t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]):
-        dates, cubes = sar_curve.read_track(loc, track)
+        g = loc["grid"]
+        dates, cubes = sar_curve.read_track_pixels(loc, track, [pid], int(g["width"]), int(g["height"]))
         for pol in ("VV", "VH"):
-            v = cubes[pol].reshape(len(dates), -1)[:, pid]
+            v = cubes[pol][:, 0]
             a2.plot(dates, v, styles[pol], marker="o", ms=3, color=colours[k % 3], label=f"{pol} {track}")
     a2.set_ylabel("dB (5x5 mean)")
     a2.legend(frameon=False, fontsize=8, ncol=4, loc="lower left")
@@ -373,13 +396,18 @@ def block_pids(center: int, width: int, height: int, block: int = 5) -> np.ndarr
 
 
 def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: str = "",
-                season=("2026-03-15", "2026-09-24"), pids=None, outline=None, file_stem: str | None = None):
+                season=("2026-03-15", None), pids=None, outline=None, file_stem: str | None = None,
+                series_root: str = "processed/_batch/s2_2026", sowing=None):
     """A block of pixels from the middle of a field, optical and radar on one time axis, plus chips.
 
     Top: per date the median raw NDVI of the block's QA60-clear pixels (filled when most of the
     block is Cloud Score+ clear, hollow when hazy), the block's median fitted NDVI and LSWI, and the
     trough and climb the rule finds on that median curve. Bottom: the block's median VV and VH per
     track. The chips show the whole block in the magenta square.
+
+    ``series_root``: the series folder to read (e.g. the latest sandbox). ``sowing`` (a date): the fresh-start sowing
+    (``sowing_fresh``, the last empty spell since 1 May) is drawn instead of the old rule's trough and climb, whose
+    110-day lookback could not see a May sowing (user, 30 Sep, aoi160 pixel 90542).
     """
     import matplotlib.pyplot as plt
 
@@ -390,7 +418,7 @@ def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: s
     from . import sar_curve
     from .curves import INK, INK_MUTED, SURFACE
 
-    d = nd.load(aoi_id)
+    d = nd.load(aoi_id, out_root=series_root)
     g = d["loc"]["grid"]
     if pids is None:
         pids = block_pids(center, int(g["width"]), int(g["height"]), block)
@@ -414,8 +442,9 @@ def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: s
     windows = pd.DatetimeIndex(d["windows"])
     fit = np.nanmedian(d["ndvi5d"].reshape(len(windows), -1)[:, pids], axis=1)
     lswi = np.nanmedian(d["lswi5d"].reshape(len(windows), -1)[:, pids], axis=1)
-    ev = mr.pixel_events(fit[:, None], lswi[:, None], windows).iloc[0]
-    t0, t1 = pd.Timestamp(season[0]), pd.Timestamp(season[1])
+    ev = mr.pixel_events(fit[:, None], lswi[:, None], windows).iloc[0] if sowing is None \
+        else pd.Series({"sowing_date": pd.Timestamp(sowing) if pd.notna(sowing) else pd.NaT})
+    t0, t1 = view_window(season, table["date"])
     fig, (a1, a2) = plt.subplots(2, 1, figsize=(15, 8.5), facecolor=SURFACE, sharex=True)
     for a in (a1, a2):
         a.set_facecolor(SURFACE)
@@ -429,21 +458,23 @@ def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: s
     w = (windows >= t0) & (windows < t1)
     a1.plot(windows[w], fit[w], color="#2a78d6", lw=2, label="median fitted NDVI")
     a1.plot(windows[w], lswi[w], color="#6aa6e8", lw=1, ls="--", label="median fitted LSWI")
-    for key, colour, name in (("trough_date", "#b45f06", "trough"), ("climb_date", "#1f7a3a", "climb")):
+    lines = (("trough_date", "#b45f06", "trough"), ("climb_date", "#1f7a3a", "climb")) if sowing is None \
+        else (("sowing_date", "#b45f06", "sowing (last empty spell)"),)
+    for key, colour, name in lines:
         if pd.notna(ev[key]):
             for a in (a1, a2):
                 a.axvline(pd.Timestamp(ev[key]), color=colour, lw=1.2, ls="--")
             a1.text(pd.Timestamp(ev[key]), 1.02, name, color=colour, fontsize=8, ha="center")
-    a1.set_ylim(-0.3, 1.05)
+    a1.set_ylim(*ndvi_ylim(raw[sel], fit[w]))
     a1.set_ylabel("NDVI / LSWI (block median)")
     a1.legend(frameon=False, fontsize=8, ncol=2, loc="lower left")
     a1.set_title(f"aoi{aoi_id} {len(pids)} px around {center} {label}", loc="left", fontsize=11, color=INK)
     loc = pr.locate(aoi_id, int(center), season_key="monsoon2026")
     colours = ["#b45f06", "#2a78d6", "#7a3ab4"]
     for k, track in enumerate([t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]):
-        rd, cubes = sar_curve.read_track(loc, track)
+        rd, cubes = sar_curve.read_track_pixels(loc, track, pids, int(g["width"]), int(g["height"]))
         for pol, style in (("VV", "-"), ("VH", ":")):
-            v = np.nanmedian(cubes[pol].reshape(len(rd), -1)[:, pids], axis=1)
+            v = np.nanmedian(cubes[pol], axis=1)
             a2.plot(rd, v, style, marker="o", ms=3, color=colours[k % 3], label=f"{pol} {track}")
     a2.set_ylabel("dB (block median of 5x5 means)")
     a2.legend(frameon=False, fontsize=8, ncol=4, loc="lower left")
@@ -662,7 +693,7 @@ def monsoon_flood_share(aoi_id: int, code: int = 3, n: int = 3000, seed: int = 0
             "flood_month_median": when.median().strftime("%d %b") if len(when) else None}
 
 
-def block_series(aoi_id: int, center: int, block: int = 5, season=("2026-03-15", "2026-09-24"),
+def block_series(aoi_id: int, center: int, block: int = 5, season=("2026-03-15", None),
                  tracks_cache: dict | None = None) -> dict:
     """Median series of one field-interior block: raw NDVI (QA60-clear), fitted NDVI, VV/VH per track.
 
@@ -697,7 +728,7 @@ def block_series(aoi_id: int, center: int, block: int = 5, season=("2026-03-15",
             if tracks_cache is not None:
                 tracks_cache[track] = (rd, cubes)
         radar[track] = (rd, {p: np.nanmedian(cubes[p].reshape(len(rd), -1)[:, pids], axis=1) for p in ("VV", "VH")})
-    t0, t1 = pd.Timestamp(season[0]), pd.Timestamp(season[1])
+    t0, t1 = view_window(season, dates)
     return {"dates": dates, "raw": raw, "windows": windows, "fit": fit, "radar": radar, "t0": t0, "t1": t1}
 
 
@@ -738,13 +769,16 @@ def gallery(aoi_id: int, code: int, n: int = 20, seed: int = 0, out_dir=None, co
         a1.scatter(s["dates"][m], s["raw"][m], s=6, color="#1f7a3a")
         w = (s["windows"] >= s["t0"]) & (s["windows"] < s["t1"])
         a1.plot(s["windows"][w], s["fit"][w], color="#2a78d6", lw=1.5)
-        a1.set_ylim(-0.3, 1.0)
+        a1.set_ylim(*ndvi_ylim(s["raw"][m], s["fit"][w], top=1.0))
         a1.set_title(f"{center}", fontsize=7, color=INK_MUTED, loc="left")
         for k, (track, (rd, v)) in enumerate(s["radar"].items()):
             a2.plot(rd, v["VV"], "-", color=colours[k % 3], lw=1)
             a2.plot(rd, v["VH"], ":", color=colours[k % 3], lw=1)
         a2.axhline(-19, color=INK_MUTED, lw=.6, ls="--")
-        a2.set_ylim(-28, -2)
+        db = np.concatenate([np.ravel(np.asarray(v[p], dtype="float64")) for _, (_, v) in s["radar"].items() for p in ("VV", "VH")]) \
+            if s["radar"] else np.array([])
+        db = db[np.isfinite(db)]
+        a2.set_ylim(min(-28.0, float(db.min()) - 1) if len(db) else -28.0, max(-2.0, float(db.max()) + 1) if len(db) else -2.0)
         a1.set_xticklabels([])
     for j in range(len(centers), rows * cols):
         axes[2 * (j // cols), j % cols].set_visible(False)

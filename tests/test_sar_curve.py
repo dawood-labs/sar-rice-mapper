@@ -117,3 +117,81 @@ def test_box_mean_does_not_spread_one_missing_pixel():
     assert np.isnan(out[:, 20:23]).all()
     assert np.isfinite(out[:, [19, 23]]).all()
     assert abs(out[5, 19] - np.nanmean(img[3:8, 17:22])) < 1e-6
+
+
+def test_read_track_pixels_matches_the_whole_aoi_read(tmp_path):
+    """The field sheets read only a box around the field (plus half a smoothing window): same values as the whole AOI."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from sar_pipeline.analysis import sar_curve as sc
+
+    rng = np.random.default_rng(0)
+    h, w, n = 20, 24, 4
+    stack = tmp_path / "stack" / "track_T1"
+    stack.mkdir(parents=True)
+    for pol in ("VH", "VV"):
+        data = rng.normal(-15, 2, (n, h, w)).astype("float32")
+        data[1, 5, 7] = -9999                                           # one missing value
+        path = stack / f"stack_{pol}.vrt"
+        with rasterio.open(path, "w", driver="GTiff", width=w, height=h, count=n, dtype="float32", nodata=-9999,
+                           crs="EPSG:32633", transform=from_origin(500000, 5000000, 10, 10)) as ds:
+            ds.write(data)
+            ds.descriptions = tuple(f"x_2026060{i + 1}" for i in range(n))
+    loc = {"run": str(tmp_path), "aoi": "aoiX"}
+    pids = np.array([0, 5 * w + 6, 6 * w + 8, 12 * w + 23, (h - 1) * w + 3])   # corners, edges, near the gap
+    d_all, all_ = sc.read_track(loc, "T1", drop_bad=False)
+    d_box, box = sc.read_track_pixels(loc, "T1", pids, w, h, drop_bad=False)
+    assert (d_all == d_box).all()
+    for pol in ("VH", "VV"):
+        np.testing.assert_allclose(box[pol], all_[pol].reshape(n, -1)[:, pids], rtol=1e-5)
+
+
+def test_single_chunk_reads_the_same_values_as_the_nested_vrts(tmp_path):
+    """The direct chunk read (one call, all bands) gives what the per-date VRTs give, missing values included."""
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from sar_pipeline.analysis import sar_curve as sc
+
+    rng = np.random.default_rng(1)
+    h, w, dates = 12, 10, ["20260601", "20260613", "20260625"]
+    chunk_dir = tmp_path / "raw_chunks" / "track_T1"
+    chunk_dir.mkdir(parents=True)
+    data = rng.normal(-15, 2, (2 * len(dates), h, w)).astype("float32")
+    data[3, 2, 2] = -9999
+    chunk = chunk_dir / "chunk_r00c00.tif"
+    with rasterio.open(chunk, "w", driver="GTiff", width=w, height=h, count=len(data), dtype="float32", nodata=-9999,
+                       crs="EPSG:32633", transform=from_origin(500000, 5000000, 10, 10), interleave="pixel",
+                       compress="lzw") as ds:
+        ds.write(data)
+        ds.descriptions = tuple(f"{p}_{d}" for d in dates for p in ("VV", "VH"))
+    gt = "500000.0, 10.0, 0.0, 5000000.0, 0.0, -10.0"
+
+    def source(path, band):
+        return (f'<ComplexSource><SourceFilename relativeToVRT="1">{path}</SourceFilename><SourceBand>{band}</SourceBand>'
+                f'<SrcRect xOff="0" yOff="0" xSize="{w}" ySize="{h}" /><DstRect xOff="0" yOff="0" xSize="{w}" ySize="{h}" />'
+                f'<NODATA>-9999</NODATA></ComplexSource>')
+
+    stack = tmp_path / "stack" / "track_T1"
+    for k, pol in enumerate(("VV", "VH")):
+        (stack / pol).mkdir(parents=True)
+        bands = []
+        for i, d in enumerate(dates):
+            (stack / pol / f"{pol}_{d}.vrt").write_text(
+                f'<VRTDataset rasterXSize="{w}" rasterYSize="{h}"><GeoTransform>{gt}</GeoTransform>'
+                f'<VRTRasterBand dataType="Float32" band="1"><NoDataValue>-9999</NoDataValue>'
+                f'{source("../../../raw_chunks/track_T1/chunk_r00c00.tif", 2 * i + k + 1)}</VRTRasterBand></VRTDataset>')
+            bands.append(f'<VRTRasterBand dataType="Float32" band="{i + 1}"><Description>{pol}_{d}</Description>'
+                         f'<NoDataValue>-9999</NoDataValue>{source(f"{pol}/{pol}_{d}.vrt", 1)}</VRTRasterBand>')
+        (stack / f"stack_{pol}.vrt").write_text(f'<VRTDataset rasterXSize="{w}" rasterYSize="{h}">'
+                                                f'<GeoTransform>{gt}</GeoTransform>{"".join(bands)}</VRTDataset>')
+    loc = {"run": str(tmp_path), "aoi": "aoiX"}
+    assert sc.single_chunk(stack / "stack_VH.vrt")[1] == [2, 4, 6]
+    d1, fast = sc._read(loc, "T1", 5, False)
+    d2, slow = sc._read(loc, "T1", 5, False, fast=False)
+    assert (d1 == d2).all()
+    for pol in ("VH", "VV"):
+        np.testing.assert_allclose(fast[pol], slow[pol], rtol=1e-6, equal_nan=True)

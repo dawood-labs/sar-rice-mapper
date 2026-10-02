@@ -34,7 +34,8 @@ VERSIONS = (("rule_v1", "_v1"), ("rule_current", ""), ("first_map", "baseline_v3
 COLOURS = {0: ("not rice", "#e6e6e6"), 1: ("rice, standing", "#008c3c"), 2: ("young", "#aadc78"),
            3: ("rice-like, water not confirmed", "#f5a028"), 4: ("harvested", "#96643c"),
            5: ("never bare (trees/houses)", "#8c5abe"), 6: ("young rice, standing", "#6ec83c"),
-           7: ("flooded, not yet green", "#3c78c8"), 8: ("cut crop, water not confirmed", "#c8aa78")}
+           7: ("flooded, not yet green", "#3c78c8"), 8: ("cut crop, water not confirmed", "#c8aa78"),
+           9: ("rice-like, no sign of water", "#009696")}
 
 
 def version_path(aoi: str, suffix: str, src_root=SRC) -> Path:
@@ -175,6 +176,42 @@ def field_at(aoi_id: int, lon: float, lat: float):
     return f, pids
 
 
+#: The series the sheets read (fresh start, 30 Sep: the latest images, M1 mask, series to 28 Sep) and the fresh-start
+#: step outputs (``vegetation_types`` step 1, ``sowing_fresh`` step 2), so notebook 08 shows what QGIS shows.
+SERIES_ROOT = "processed/_batch/s2_2026_hyb40m1late"
+FRESH = "processed/_batch/s2_2026/rice_fresh"
+
+
+def fresh_at(aoi_id: int, pids, fresh_root: str = FRESH) -> dict:
+    """The fresh-start results for these pixels (empty when the AOI has none yet): step-1 cover shares, step-2 sowing
+    period shares and the median sowing date (``sowing_date``, a Timestamp or NaT)."""
+    import numpy as np
+    import pandas as pd
+    import rasterio
+
+    from .analysis import sowing_fresh as sf
+    from .analysis import vegetation_types as vt
+
+    stem = Path(fresh_root) / f"aoi{aoi_id}" / f"aoi{aoi_id}_step"
+    out = {}
+    pids = np.asarray(pids, dtype=int)
+    if Path(f"{stem}1_cover.tif").exists():
+        with rasterio.open(f"{stem}1_cover.tif") as ds:
+            c = ds.read(1).ravel()[pids]
+        out["step1_cover"] = {vt.CLASSES[int(k)]: f"{100 * n / len(c):.0f} %" for k, n in zip(*np.unique(c, return_counts=True))}
+    if Path(f"{stem}2_sowing.tif").exists():
+        with rasterio.open(f"{stem}2_period.tif") as ds:
+            p = ds.read(1).ravel()[pids]
+        with rasterio.open(f"{stem}2_sowing.tif") as ds:
+            doy = ds.read(1).ravel()[pids].astype(float)
+        out["step2_sowing_period"] = {sf.PERIODS.get(int(k), "not crop ground"): f"{100 * n / len(p):.0f} %"
+                                      for k, n in zip(*np.unique(p, return_counts=True))}
+        doy = doy[doy > 0]
+        out["sowing_date"] = (pd.Timestamp("2026-01-01") + pd.Timedelta(days=float(np.median(doy)) - 1)).normalize() \
+            if len(doy) else pd.NaT
+    return out
+
+
 def classes_at(aoi_id: int, pid: int) -> dict:
     """The class of the pixel in every map version (``VERSIONS``)."""
     import rasterio
@@ -187,6 +224,81 @@ def classes_at(aoi_id: int, pid: int) -> dict:
                 v = int(ds.read(1).ravel()[pid])
             out[name] = f"{v} {COLOURS.get(v, ('no data', ''))[0]}"
     return out
+
+
+def rule_at(aoi_id: int, pids) -> dict:
+    """The CURRENT relative rule (``analysis.curve_rules``) computed live for these pixels, so the notebook always shows
+    what the rules say now, not an older map (user, 1 Oct). Returns the class of every pixel (shares for a block or a
+    field), the median of each measured feature, and the user's own label when the pixel has one
+    (``analysis.curve_labels``)."""
+    import numpy as np
+
+    from .analysis import curve_labels as cl
+    from .analysis import curve_rules as cr
+
+    pids = np.asarray(pids, dtype=int)
+    with cr.rules_for(aoi_id):                 # the AOI's own rules (curve_rules.AOI_OVERRIDES), as on its map
+        f = cr.own_range_features(aoi_id, pids, SERIES_ROOT)
+        cls = cr.classify_relative(f)
+    shares = (cls.value_counts(normalize=True) * 100).round(0)
+    feats = {c: round(float(f[c].median()), 2) for c in f.columns
+             if c not in ("pixel", "sowing_day") and f[c].notna().any()}
+    import pandas as pd
+
+    sd = f["sowing_day"].where(f["sowing_day"] >= 0) if "sowing_day" in f else pd.Series(dtype=float)
+    out = {"rule_class": shares.index[0], "rule_shares": {k: f"{v:.0f} %" for k, v in shares.items()},
+           "rule_features": feats,
+           "rule_set": ("aoi160 rules" + (" + this AOI's own: " + ", ".join(f"{k}={v}" for k, v in
+                                                                         cr.AOI_OVERRIDES[aoi_id].items())
+                                          if cr.AOI_OVERRIDES.get(aoi_id) else "")),
+           "rule_sowing": (pd.Timestamp("1970-01-01") + pd.Timedelta(days=float(sd.median()))).normalize()
+           if sd.notna().any() else pd.NaT}
+    lab = cl.load()
+    lab = lab[(lab["aoi"] == aoi_id) & lab["pixel"].isin(pids)]
+    if len(lab):
+        out["your_labels"] = {int(r.pixel): " / ".join(x for x in (r.label, r.state, r.establishment) if x)
+                              for r in lab.itertuples()}
+    return out
+
+
+#: Short names of the rule features shown on the curve plot, in reading order.
+RULE_FEATURE_NAMES = {
+    "vh_pos_end": "VH now in own range (0 low, 1 high)", "vv_pos_end": "VV now in own range",
+    "vh_slope_end": "VH change, last 3 passes", "vv_slope_end": "VV change, last 3 passes",
+    "vh_accel_end": "VH acceleration", "ndvi_low_peak": "NDVI low / peak (tree if high)",
+    "ndvi_left": "NDVI share of own rise left", "ndvi_slope_end": "NDVI change, last view",
+    "ndvi_rise_days": "days 10 -> 90 % green-up (fit)", "ndvi_rise_seen": "days 10 -> 90 % (clear views)",
+    "days_since_peak": "days since NDVI peak", "crop_age": "crop age, days since last at low", "days_at_top": "days held at top", "days_off_top": "days since last at top",
+    "vh_rise_recent": "VH rise since recent low", "vv_rise_recent": "VV rise since recent low",
+    "vv_step_end": "VV change, last pass", "water_spell": "water while crop small (1 = yes)"}
+
+
+def _sowing(rule: dict, fresh: dict):
+    """The sowing line on the plot: the current rule's own date (water spell start for a transplanted crop, end of the
+    empty spell otherwise), else step 2's (user, 2 Oct: the plot showed step 2's June trough for aoi28 pixel 4227)."""
+    import pandas as pd
+
+    d = rule.get("rule_sowing")
+    return d if d is not None and not pd.isna(d) else fresh.get("sowing_date")
+
+
+def annotate_rule(fig, rule: dict) -> None:
+    """Writes the rule's class (and the user's label) in the curve figure's title and the features in a box."""
+    if fig is None or not rule:
+        return
+    head = f"rule now: {rule['rule_class']}"
+    if len(rule.get("rule_shares", {})) > 1:
+        head += "  (" + ", ".join(f"{k} {v}" for k, v in rule["rule_shares"].items()) + ")"
+    if rule.get("your_labels"):
+        head += "   |   your label: " + "; ".join(rule["your_labels"].values())
+    if rule.get("rule_set"):
+        head += f"\nrules used: {rule['rule_set']}"
+    fig.suptitle(head, fontsize=11, fontweight="bold", y=0.995 if "\n" not in head else 1.02)
+    lines = [f"{RULE_FEATURE_NAMES[k]}: {rule['rule_features'][k]}" for k in RULE_FEATURE_NAMES
+             if k in rule.get("rule_features", {})]
+    ax = fig.axes[0]
+    ax.text(1.01, 1.0, "\n".join(lines), transform=ax.transAxes, va="top", ha="left", fontsize=8,
+            family="monospace", bbox=dict(boxstyle="round", fc="white", ec="#999999", alpha=0.9))
 
 
 def inspect(lon: float, lat: float, block: int = 3, out_dir=f"{OUT}/inspect") -> dict:
@@ -259,25 +371,74 @@ def field_by_id(field_id: str):
     return aoi_id, f, np.flatnonzero(mask.ravel())
 
 
-def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect") -> dict:
+def spread_sample(fields, labels, per_label: int = 10, min_acres: float = 0.5) -> list[str]:
+    """``field_id`` list: for each label, ``per_label`` fields spread over the AOI in all directions.
+
+    Why: checking a few random fields misses whole corners of an AOI. The AOI extent is cut into a 3 x 3
+    grid (north-west ... south-east, plus the centre); in each cell the field closest to the cell centre is
+    taken (only fields of at least ``min_acres`` that are real fields, so slivers are not picked), and the
+    largest remaining field fills up to ``per_label``. The result is deterministic: the same file gives the
+    same list. ``fields`` is a GeoDataFrame in a metric CRS with ``field_id``, ``label``, ``area_acres``.
+    """
+    import numpy as np
+
+    f = fields[fields["area_acres"] >= min_acres]
+    if "is_field" in f:
+        f = f[f["is_field"].astype(bool)]
+    x0, y0, x1, y1 = fields.total_bounds
+    cx, cy = f.geometry.centroid.x.to_numpy(), f.geometry.centroid.y.to_numpy()
+    f = f.assign(_cx=cx, _cy=cy)
+    centres = [(x0 + (i + 0.5) * (x1 - x0) / 3, y0 + (j + 0.5) * (y1 - y0) / 3) for j in (2, 1, 0) for i in (0, 1, 2)]
+    out: list[str] = []
+    for lab in labels:
+        g = f[f["label"] == lab]
+        chosen: list[str] = []
+        for (px, py) in centres:
+            rest = g[~g["field_id"].isin(chosen)]
+            if len(chosen) >= per_label or rest.empty:
+                continue
+            d = np.hypot(rest["_cx"] - px, rest["_cy"] - py)
+            chosen.append(rest.loc[d.idxmin(), "field_id"])
+        rest = g[~g["field_id"].isin(chosen)].sort_values("area_acres", ascending=False)
+        chosen += rest["field_id"].tolist()[: max(per_label - len(chosen), 0)]
+        out += chosen
+    return out
+
+
+def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect", keep_cache: bool = True) -> dict:
     """Curves and chips for a pixel block, by AOI and pixel id (the pixel id is the value of the AOI's
     ``grid/pixel_index.tif`` in QGIS)."""
     from .analysis import ndvi_5day as nd
     from .analysis import water_investigation as wi
 
     info = {"aoi": f"aoi{aoi_id}", "pixel_id": pid, "classes_at_pixel": classes_at(aoi_id, pid)}
+    g = nd.load(aoi_id, out_root=SERIES_ROOT)["loc"]["grid"]
+    block_pids = wi.block_pids(int(pid), int(g["width"]), int(g["height"]), block)
+    fresh = fresh_at(aoi_id, block_pids)
+    info.update({k: v for k, v in fresh.items() if k != "sowing_date"})
+    rule = rule_at(aoi_id, block_pids)
+    info.update(rule)
     figs = {}
     figs["curve"], figs["chips"], ev = wi.group_sheet(aoi_id, int(pid), block=block, out_dir=out_dir,
                                                       file_stem=f"aoi{aoi_id}_pid{pid}_{block}x{block}",
-                                                      label=f"({block}x{block} pixels)")
-    info["events"] = {k: str(ev[k]) for k in ("trough_date", "climb_date", "trough_ndvi", "peak_after", "last_ndvi")}
-    nd.forget()
+                                                      label=f"({block}x{block} pixels)", series_root=SERIES_ROOT,
+                                                      sowing=_sowing(rule, fresh))
+    annotate_rule(figs["curve"], rule)
+    if "sowing_date" in fresh:
+        info["sowing_date"] = str(ev.get("sowing_date", ""))
+    else:                                   # no fresh-start output for this AOI yet: the old rule's events
+        info["old_rule_events"] = {k: str(ev[k]) for k in ("trough_date", "climb_date", "trough_ndvi", "peak_after",
+                                                           "last_ndvi")}
+    if not keep_cache:
+        nd.forget()
     info["figures"] = figs
     return info
 
 
-def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = False) -> dict:
-    """Curves (averaged over all the field's pixels) and chips with the field outline, by ``field_id``."""
+def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = True) -> dict:
+    """Curves (averaged over all the field's pixels) and chips with the field outline, by ``field_id``.
+    ``keep_cache`` (default): the AOI's series stays in memory, so the next field of the same AOI plots in seconds
+    (``ndvi_5day.CACHE_AOIS`` bounds it to one AOI)."""
     import numpy as np
 
     from .analysis import ndvi_5day as nd
@@ -293,7 +454,7 @@ def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = Fa
     if not len(fpids):
         info["note"] = "the field is smaller than one pixel: no curve of its own"
         return info
-    d = nd.load(aoi_id)
+    d = nd.load(aoi_id, out_root=SERIES_ROOT)
     g = d["loc"]["grid"]
     rr, cc = np.divmod(fpids, int(g["width"]))
     centre = int(np.round(np.median(rr)) * int(g["width"]) + np.round(np.median(cc)))
@@ -303,11 +464,21 @@ def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = Fa
     ox = (np.asarray(xs) - g["x0"]) / g["res"] - 0.5 - (c0 - p26.HALF)
     oy = (g["y0"] - np.asarray(ys)) / g["res"] - 0.5 - (r0 - p26.HALF)
     info["classes_at_centre_pixel"] = classes_at(aoi_id, centre)
+    fresh = fresh_at(aoi_id, fpids)
+    info.update({k: v for k, v in fresh.items() if k != "sowing_date"})
+    rule = rule_at(aoi_id, fpids)
+    info.update(rule)
     figs = {}
     figs["curve"], figs["chips"], ev = wi.group_sheet(aoi_id, centre, out_dir=out_dir, file_stem=field_id,
                                                       label=f"field {field_id} ({len(fpids)} px)",
-                                                      pids=fpids, outline=(ox, oy))
-    info["events"] = {k: str(ev[k]) for k in ("trough_date", "climb_date", "trough_ndvi", "peak_after", "last_ndvi")}
+                                                      pids=fpids, outline=(ox, oy), series_root=SERIES_ROOT,
+                                                      sowing=_sowing(rule, fresh))
+    annotate_rule(figs["curve"], rule)
+    if "sowing_date" in fresh:
+        info["sowing_date"] = str(ev.get("sowing_date", ""))
+    else:                                   # no fresh-start output for this AOI yet: the old rule's events
+        info["old_rule_events"] = {k: str(ev[k]) for k in ("trough_date", "climb_date", "trough_ndvi", "peak_after",
+                                                           "last_ndvi")}
     if not keep_cache:
         nd.forget()
     info["figures"] = figs
@@ -326,10 +497,16 @@ def main(argv=None) -> int:
     b.add_argument("--review-ids", nargs="*", type=int, default=[])
     f = sub.add_parser("field", help="curves and chips of one field, by field_id")
     f.add_argument("field_id")
+    f.add_argument("--repeat", type=int, default=1, help="run it this many times and print the seconds of each "
+                   "(the second run shows the speed of the next field in a notebook session)")
     x = sub.add_parser("pixel", help="curves and chips of a pixel block, by AOI and pixel id")
     x.add_argument("--aoi", type=int, required=True)
     x.add_argument("--pid", type=int, required=True)
     x.add_argument("--block", type=int, default=3)
+    sm = sub.add_parser("sample", help="field_ids spread over an AOI in all directions, per label")
+    sm.add_argument("--aoi", type=int, required=True)
+    sm.add_argument("--labels", nargs="+", type=int, default=[1, 6])
+    sm.add_argument("--per-label", type=int, default=10)
     i = sub.add_parser("inspect", help="curves and chips at a lon/lat point (pixel block and its field)")
     i.add_argument("--lon", type=float, required=True)
     i.add_argument("--lat", type=float, required=True)
@@ -341,8 +518,19 @@ def main(argv=None) -> int:
         mosaic(), qml(), merge_fields()
         cfg = yaml.safe_load(next(Path("config").glob("aoi*_monsoon2026.yaml")).read_text())
         print(review_aois(args.review_ids, bucket_folder=f"{cfg['gcs']['bucket']}/{cfg['gcs']['base_folder']}"))
+    elif args.step == "sample":
+        import geopandas as gpd
+
+        fl = gpd.read_file(Path(SRC) / "fields" / f"aoi{args.aoi}_fields_monsoon2026.gpkg").to_crs("EPSG:32646")
+        print("\n".join(spread_sample(fl, args.labels, args.per_label)))
     elif args.step in ("field", "pixel"):
-        r = inspect_field(args.field_id) if args.step == "field" else inspect_pixel(args.aoi, args.pid, args.block)
+        import time
+
+        for i in range(getattr(args, "repeat", 1)):
+            t0 = time.perf_counter()
+            r = inspect_field(args.field_id) if args.step == "field" else inspect_pixel(args.aoi, args.pid, args.block)
+            if getattr(args, "repeat", 1) > 1:
+                print(f"run {i + 1}: {time.perf_counter() - t0:.1f} s")
         for k, v in r.items():
             if k != "figures":
                 print(f"{k}: {v}")

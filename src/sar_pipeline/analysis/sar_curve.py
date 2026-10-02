@@ -52,15 +52,87 @@ def read_track(loc: dict, track: str, window: int = 5, drop_bad: bool = True):
     readable at all. ``drop_bad`` blanks the recorded artefact passes; the pass audit itself reads
     with ``drop_bad=False``, otherwise a pass once marked bad could never be re-judged.
     """
+    return _read(loc, track, window, drop_bad)
+
+
+def single_chunk(stack_vrt: Path):
+    """``(chunk file, band numbers)`` when every band of a pass stack (``stack_<pol>.vrt``: one per-date VRT per band)
+    points at one band of the SAME raw chunk file covering the whole grid, else None.
+
+    Why (notebook 08, 30 Sep): the raw chunks hold every pass and both polarisations pixel-interleaved and compressed;
+    reading them band by band through the nested VRTs decodes the whole chunk once per band (1.4 s for a 20 x 20 box of
+    one track, 0.07 s when all bands are read from the chunk in one go). An AOI split over several chunks keeps the VRT
+    path."""
+    import xml.etree.ElementTree as ET
+
+    key = str(stack_vrt)
+    if key in _CHUNK_CACHE:
+        return _CHUNK_CACHE[key]
+    result = None
+    try:
+        files, bands = set(), []
+        root = ET.parse(stack_vrt).getroot()
+        size = (root.get("rasterXSize"), root.get("rasterYSize"))
+        for band in root.iter("VRTRasterBand"):
+            outer = _sources(band)
+            if len(outer) != 1 or not _plain(outer[0], size):
+                raise ValueError("not one plain source")
+            date_vrt = (stack_vrt.parent / outer[0].findtext("SourceFilename")).resolve()
+            inner = [x for b in ET.parse(date_vrt).getroot().iter("VRTRasterBand") for x in _sources(b)]
+            if len(inner) != 1 or not _plain(inner[0], size) or outer[0].findtext("SourceBand") != "1":
+                raise ValueError("mosaic")
+            files.add((date_vrt.parent / inner[0].findtext("SourceFilename")).resolve())
+            bands.append(int(inner[0].findtext("SourceBand")))
+        if len(files) == 1 and bands:
+            import rasterio
+
+            chunk = files.pop()
+            with rasterio.open(stack_vrt) as a, rasterio.open(chunk) as b:
+                if (a.width, a.height) == (b.width, b.height) and a.transform == b.transform and len(bands) == a.count:
+                    result = (chunk, bands)
+    except (ValueError, OSError, ET.ParseError, TypeError):
+        result = None
+    _CHUNK_CACHE[key] = result
+    return result
+
+
+_CHUNK_CACHE: dict = {}
+
+
+def _sources(band) -> list:
+    return [x for x in band if x.tag in ("SimpleSource", "ComplexSource")]
+
+
+def _plain(src, size) -> bool:
+    """A VRT source that copies the whole grid 1:1: same source and destination rectangle, full size, no scaling or
+    lookup table (only then can the file be read directly)."""
+    if any(src.find(t) is not None for t in ("ScaleOffset", "ScaleRatio", "LUT", "ColorTableComponent")):
+        return False
+    rects = [src.find("SrcRect"), src.find("DstRect")]
+    if any(r is None for r in rects):
+        return False
+    full = {"xOff": "0", "yOff": "0", "xSize": size[0], "ySize": size[1]}
+    return all(r.get(k) == v for r in rects for k, v in full.items())
+
+
+def _read(loc: dict, track: str, window: int, drop_bad: bool, win=None, fast: bool = True):
+    """Shared reader of :func:`read_track` and :func:`read_track_pixels`: the whole AOI, or the rasterio window ``win``."""
     import rasterio
 
     stack = Path(loc["run"]) / "stack" / f"track_{track}"
     out, dates = {}, None
     for pol in POLS:
         with rasterio.open(stack / f"stack_{pol}.vrt") as ds:
-            cube = ds.read().astype("float32")
-            if ds.nodata is not None:
-                cube[cube == ds.nodata] = np.nan
+            direct = single_chunk(stack / f"stack_{pol}.vrt") if fast else None
+            if direct is not None:
+                with rasterio.open(direct[0]) as ch:
+                    cube = ch.read(direct[1], window=win).astype("float32")
+                    nodata = ds.nodata if ds.nodata is not None else ch.nodata
+            else:
+                cube = ds.read(window=win).astype("float32")
+                nodata = ds.nodata
+            if nodata is not None:
+                cube[cube == nodata] = np.nan
             dates = [dt.datetime.strptime(d.rsplit("_", 1)[1], "%Y%m%d").date() for d in ds.descriptions]
         for i in (bad_pass_indices(loc, track, pol, dates) if drop_bad else []):
             cube[i] = np.nan                  # an artefact pass (docs/15): unusable, not a field event
@@ -68,6 +140,23 @@ def read_track(loc: dict, track: str, window: int = 5, drop_bad: bool = True):
         smoothed = np.stack([box_mean(p, window) for p in power])
         out[pol] = ss.to_db(smoothed)
     return pd.DatetimeIndex(pd.to_datetime(dates)), out
+
+
+def read_track_pixels(loc: dict, track: str, pids, width: int, height: int, window: int = 5, drop_bad: bool = True):
+    """Like :func:`read_track`, but only for the pixels ``pids`` (flat ids on the AOI grid): ``(dates, {pol: (dates,
+    len(pids))})``. Only the box around them, plus half a smoothing window on every side, is read and smoothed, so the
+    values are the same as from the whole AOI. Why (user, 30 Sep): the field sheets of notebook 08 read and smoothed the
+    whole AOI's stacks to plot one field (12 of 23 seconds)."""
+    from rasterio.windows import Window
+
+    pids = np.asarray(pids, dtype=int)
+    r, c = np.divmod(pids, int(width))
+    m = window // 2
+    r0, r1 = max(int(r.min()) - m, 0), min(int(r.max()) + m + 1, int(height))
+    c0, c1 = max(int(c.min()) - m, 0), min(int(c.max()) + m + 1, int(width))
+    dates, cubes = _read(loc, track, window, drop_bad, Window(c0, r0, c1 - c0, r1 - r0))
+    local = (r - r0) * (c1 - c0) + (c - c0)
+    return dates, {p: v.reshape(len(dates), -1)[:, local] for p, v in cubes.items()}
 
 
 #: A box mean keeps its value while at least this share of the window has data. Half: a pixel next
@@ -111,7 +200,16 @@ def bad_pass_indices(loc: dict, track: str, pol: str, dates) -> list[int]:
 
     path = config_mod.repo_root() / BAD_PASSES
     if "table" not in _BAD_CACHE:
-        _BAD_CACHE["table"] = pd.read_csv(path) if path.exists() else pd.DataFrame(columns=["aoi", "track", "pol", "date", "bad"])
+        if path.exists():
+            _BAD_CACHE["table"] = pd.read_csv(path)
+        else:
+            # without the list the artefact passes stay in and results change (found 2 Oct, handover test: aoi72
+            # moved 646 pixels): say so loudly instead of carrying on quietly
+            import warnings
+
+            warnings.warn(f"{path} is missing: radar artefact passes will NOT be dropped; results will differ "
+                          "from the delivered / locked maps", RuntimeWarning, stacklevel=2)
+            _BAD_CACHE["table"] = pd.DataFrame(columns=["aoi", "track", "pol", "date", "bad"])
     b = _BAD_CACHE["table"]
     if b.empty:
         return []

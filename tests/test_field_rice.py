@@ -7,8 +7,8 @@ def test_counts_and_plurality_label_with_fallback():
     idx = np.array([[0, 0, 0], [1, 1, -1]])
     cls = np.array([[1, 1, 3], [0, 255, 4]])
     counts = fr.counts_per_field(idx, cls, n_fields=3)
-    assert counts[0].tolist() == [0, 2, 0, 1, 0, 0, 0, 0, 0]
-    assert counts[1].tolist() == [1, 0, 0, 0, 0, 0, 0, 0, 0]
+    assert counts[0].tolist() == [0, 2, 0, 1, 0, 0, 0, 0, 0, 0]
+    assert counts[1].tolist() == [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     lab = fr.label_from_counts(counts, fallback=[9, 9, 4])
     assert lab["label"].tolist() == [1, 0, 4]          # field 2 has no pixel: takes its fallback
     assert lab["rice_share"].iloc[0] == round(2 / 3, 3)
@@ -46,3 +46,17 @@ def test_confidence_notes_flag_late_floods_after_a_crop_and_stale_views():
     assert notes.tolist() == ["late flood after an earlier crop", "no clear view in the last 45 days",
                               "no clear view in the last 45 days", "", "late flood after an earlier crop", ""]
     assert fr.confidence_notes(fl, [1, 6, 1, 0, 6, 1], relabelled_aoi=True)[5] == "rice by AOI relabel"
+
+
+def test_class9_rice_like_no_water_is_counted_labelled_and_named():
+    """Class 9 (finalize, rice-like with no sign of water) must survive the field majority and keep its name."""
+    from sar_pipeline.analysis import monsoon_rule as mr
+
+    idx = np.array([[0, 0, 0], [1, 1, 1]])
+    cls = np.array([[9, 9, 1], [3, 9, 3]])
+    counts = fr.counts_per_field(idx, cls, n_fields=2)
+    assert counts.shape == (2, mr.N_CLASSES) and counts[0, 9] == 2
+    lab = fr.label_from_counts(counts, fallback=[255, 255])
+    assert lab["label"].tolist() == [9, 3]
+    assert mr.CLASSES[9] == "rice_like_no_water"
+    assert fr.field_label_raster(idx, lab["label"].to_numpy(), cls).tolist() == [[9, 9, 9], [3, 3, 3]]

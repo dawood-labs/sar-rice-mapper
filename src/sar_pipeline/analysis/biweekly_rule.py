@@ -179,8 +179,8 @@ def panel(aoi_id: int, sar_only_dir=f"{SRC}/sar_only", out_dir=OUT) -> Path:
     with rasterio.open(path) as ds:
         rgb = np.dstack([_stretch(ds.read(band_index(ds, b)).astype("float32")) for b in ("B4", "B3", "B2")])
     colours = {0: "#d9d9d9", 1: "#1f77b4", 2: "#8ad5c8", 3: "#f5a028", 4: "#96643c", 5: "#a0c060", 6: "#e070c0",
-               7: "#3c78c8", 8: "#c8aa78"}
-    cmap = ListedColormap([colours[k] for k in range(9)])
+               7: "#3c78c8", 8: "#c8aa78", 9: "#009696"}
+    cmap = ListedColormap([colours[k] for k in range(len(colours))])
     panels = [("Sentinel-2 " + str(date.date()), None), ("validated map (optical + radar)", np.where(inside, teacher, np.nan)),
               ("15-day radar rule (colleague)", np.where(inside, np.where(res["rice"], 1.0, 0.0), np.nan))]
     so = Path(sar_only_dir) / f"aoi{aoi_id}_sar_only.tif"
@@ -193,7 +193,7 @@ def panel(aoi_id: int, sar_only_dir=f"{SRC}/sar_only", out_dir=OUT) -> Path:
     for ax, (title, arr) in zip(axes, panels):
         ax.imshow(rgb)
         if arr is not None:
-            ax.imshow(arr, cmap=cmap, vmin=-0.5, vmax=8.5, alpha=0.75, interpolation="nearest")
+            ax.imshow(arr, cmap=cmap, vmin=-0.5, vmax=len(colours) - 0.5, alpha=0.75, interpolation="nearest")
         ax.set_title(title, fontsize=9)
         ax.set_xticks([]), ax.set_yticks([])
     fig.suptitle(f"aoi{aoi_id}: blue = rice, pink = young rice, orange = rice-like no water, grey = not rice", fontsize=9)

@@ -9,6 +9,7 @@ map date (the last five-day window of the series, written in the file name and i
 | 1 | rice, standing, water confirmed | a rice-like crop cycle standing on the map date, whose transplanting water was confirmed by radar |
 | 6 | rice, standing, young | a young rice crop: transplanting water confirmed by radar and canopy already visible (NDVI at least 0.30); delivered as rice |
 | 3 | rice-like, water not confirmed | a rice-like cycle standing on the map date, but the radar saw no transplanting water |
+| 9 | rice-like, no sign of water | rice-like crop cycle, radar shows no water at sowing (dry-sown crop or direct-seeded rice); reported, not delivered |
 | 2 | young | a crop has started but is not yet visible as a canopy, or its water is not confirmed |
 | 7 | flooded, not yet green | under water on the map date: transplanting water confirmed by radar within the last 60 days, no crop visible yet (the next map's rice) |
 | 4 | harvested | a rice-like cycle with confirmed water, already cut before the map date |
@@ -19,6 +20,8 @@ map date (the last five-day window of the series, written in the file name and i
 
 The delivered rice is classes **1** and **6**. Class 3 is reported separately: it has the optical shape of rice
 but no radar evidence of the water rice is transplanted into; a field check is needed to name it.
+Class 9 is reported separately too: the crop follows the area's rice calendar, but the radar brightened right
+after sowing with no sign of water (a dry-sown crop or direct-seeded rice).
 Classes 2, 4 and 7 are reported so that a later map, with newer images, can pick up the young crop.
 
 **Data.** Sentinel-2 surface reflectance, every date from September of the previous year to the map

@@ -242,6 +242,74 @@ below) into `processed/_batch/s2_2026/figures/gallery/`. `python -m sar_pipeline
 **Final map.** `python -m sar_pipeline.analysis.finalize` applies the relabels the user decided
 (`config/class_overrides_monsoon2026.yaml`, local) and a 4-pixel sieve (docs/13) to every rule map,
 writing `<aoi>_monsoon2026_final.tif` and `monsoon2026_final_acres.csv`.
+With `--per-pixel-relabel` (off by default) the generated "class 3 -> rice" relabel skips the
+class-3 pixels whose radar brightened right after sowing with no sign of water
+(`<aoi>_monsoon2026_c3_radar_against.tif`); they become class 9 "rice-like, no sign of water"
+(reported, not delivered) so they can be seen apart from the rice and from class 3.
+
+**First clear view per pixel (fresh start, 30 Sep).** `python -m sar_pipeline.analysis.first_clear --aoi <N>
+--start 2026-09-01 --end 2026-09-30 [--scenes]` walks the scenes of the period in date order and keeps, per pixel, the
+first view that is clear: data, no opaque-cloud bit, no haze, and a Cloud Score+ close to that pixel's own best score of
+the period (within 2 x the score spread of clear pixels; no fixed score). Outputs in
+`processed/_batch/s2_2026/first_clear/aoi<N>/`: the image (B2-B12) + 4-3-2 style, the date raster + style, a table of
+acres per date, a PNG with 4-3-2 / 8-3-2 / 5-3-2 / dates; `--scenes` adds every scene with its Cloud Score+.
+
+**Fresh start, step 1: which September vegetation went bare since 1 May.** `python -m sar_pipeline.analysis.vegetation_types
+--aoi <N> --series-root <series folder>` takes the vegetated pixels of the first-clear image and splits them by the lowest
+NDVI each held for two windows since 1 May: crop ground (went bare or under water) vs trees / orchards / permanent cover
+(never bare). The split is Otsu's on this AOI's own values; the radar's second-darkest VH pass is written beside it for
+reference. Outputs in `processed/_batch/s2_2026/rice_fresh/aoi<N>/` (`_step1_cover.tif` + `.qml`, `_step1_vh_low.tif`,
+`_step1.csv`, `_step1.png`).
+
+**Fresh start, step 2: sowing date.** `python -m sar_pipeline.analysis.sowing_fresh --aoi <N> --series-root <series
+folder>`: for the crop ground of step 1, the sowing is the last trough of the smoothed NDVI curve since 1 May (a low
+followed by a real rise; a second crop's trough counts); a trough after 15 July counts only when the radar agrees (the
+nearest pass at the field's own radar low and clearly below its green level), else the last trough before it.
+`--explain <pixel id>` prints one pixel's windows, troughs and sowing. Outputs `_step2_sowing.tif` (day of
+year), `_step2_period.tif` + `.qml`, `_step2.csv`, `_step2.png` in `processed/_batch/s2_2026/rice_fresh/aoi<N>/`.
+
+**Fresh start, step 3: rice by the shape of the curve.** `python -m sar_pipeline.analysis.rice_shape reference` learns
+the rice shape from the surveyed plots (each plot-interior pixel's smoothed NDVI from its sowing on, on its own 0-1
+scale, per 5 days after sowing: median and spread) into `processed/_batch/s2_2026/rice_fresh/reference_shapes.csv`;
+`... check` judges each region's plots with the shape of the other regions; `... run --aoi <N>` writes
+`_step3_class.tif` + `.qml` (rice / other vegetation / older than 5 months / undecided / trees / not vegetation),
+`_step3_gap.tif`, `_step3.csv`, `_step3.png`. Rice = the root-mean-square gap to the rice shape within 2 combined
+spreads; a crop older than 5 months is not rice (user decision). In July-August a fall of the curve is left out of the
+comparison unless two clear views show it and the radar's VH fell too (a single hazy view makes false dips).
+`... run --aoi <N> --explain <pixel id>` prints one pixel's steps, gaps and left-out steps.
+
+**Fresh start: plot groups and learned rice traits.** `python -m sar_pipeline.analysis.plot_clusters --k 20` groups the
+surveyed plots by their NDVI curve into a sheet for the user to label (verdicts in
+`rice_fresh/plot_clusters/group_verdicts_k20.csv`); `--check --shifts 0 20 40` and `--aoi <N>` match fields to the
+labelled patterns (kept for the record: patterns are tied to the calendar). `python -m sar_pipeline.analysis.rice_features
+check` describes every curve by calendar-free traits (trough, rise, green-up speed, year low, radar drop and rise, ...),
+learns a small decision tree from the labelled plots, prints its rules and a leave-one-region-out check; `... run --aoi <N>`
+writes `_step3t_class.tif` + `.qml`. The traits use each AOI's curve up to its newest window. After the tree, simple
+rules: a crop that began to rise on or after 1 August is late rice (6); a crop still climbing over the last 15 days and
+not yet past its top is rice (sown before 1 August) or late rice (6), whatever the tree says (the tree learned only on
+grown curves); open water that never greened is "flooded, no crop yet" (7).
+
+**Second fresh start: labelled curves, relative rule, fields.** `python -m sar_pipeline.analysis.curve_labels add
+--aoi <N> --pixel <id> --label <rice|young rice|flooded|bare|other vegetation|tree/orchard> [--state standing|harvested]
+[--establishment "direct seeded"|"transplanted (water)"] [--sowing YYYY-MM-DD] [--note ...]` stores the user's pixel
+labels (`rice_fresh/labels_v2/curve_labels.csv`); `describe` and `colours` print / draw the numbers and 5-3-2 chips
+behind a label. `python -m sar_pipeline.analysis.curve_rules run --aoi <N>` applies the relative rule (every signal on
+the pixel's own season range; radar first, NDVI second: tree/orchard, young rice, flooded / bare, other vegetation,
+rice harvested, rice standing direct seeded / transplanted) and writes `aoi<N>_rel_class.tif` and the same map sieved
+at 0.5 ac (`_rel_class_sieved.tif`). `... fields --aoi <N>` turns the sieved map into fields
+(`analysis/field_polygons`; not the older `analysis/field_labels`): the delineation owns the geometry and the map only the label; a polygon holding two
+fields of different classes is cut by a straight line along its own axis when that raises purity; ground with no
+polygon gets a field-shaped polygon; same-label polygons that touch, overlap or nest are merged
+(`_rel_fields_pieces.gpkg` with each piece's origin and decision; `_rel_fields_sliver005|010|015.gpkg`, the final layer per sliver threshold: slivers join the neighbour with the longest shared edge, a piece of the same field first; different fields are never dissolved together and no polygons overlap).
+Notebook 08 shows the rule's live class and features on every curve.
+
+**Factor breakdown (a check map, not a product).** `python -m sar_pipeline.analysis.factor_breakdown --aoi <N>
+--root <series folder>` gives every pixel a short code made of the factors behind a season: sowing period (S1 May,
+S2 June-20 July, S3 later), water at sowing (W1 seen, W2 not seen, W3 radar brightened = dry sowing, W4 a radar dip only
+under a standing canopy), state on the latest view (full / young / cut / flooded / radar-only), cut period (H0-H2) and
+peak greenness against the AOI's rice (P1 / P2), or a non-crop code (N water / trees / built / empty / veg). Outputs in
+`<root>/aoi<N>/`: `aoi<N>_factors.tif` + `.qml`, `aoi<N>_factors.csv` (acres per code split by the final class, example
+fields) and `aoi<N>_factors_fields.gpkg`. A code that says "not rice" where the map says rice is the place to look.
 
 **Field labels (phase 7).** `python -m sar_pipeline.analysis.field_rice` labels every delineated
 field polygon (`../data/delineation/`, from the field-delineation run) from the final map: one

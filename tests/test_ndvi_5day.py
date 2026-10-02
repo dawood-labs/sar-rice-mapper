@@ -145,3 +145,20 @@ def test_upper_envelope_never_overshoots_the_observations_in_a_gap():
     y[30:] = [0.86, 0.8, 0.75, 0.7, 0.66, 0.63, 0.6, 0.6, 0.6, 0.6]   # ... seen again ripening
     fit, _ = nd.upper_envelope(y, 1.0)
     assert np.nanmax(fit) <= 0.86 + nd.FIT_CEILING_MARGIN + 1e-9
+
+
+def test_relative_cloud_score_drops_a_hazy_view_of_a_pixel_with_clear_ones():
+    """aoi160 pixel 50746: clear views 79-89, hazy 46-48, cloud below 35. The pixel's limit lies between haze and clear."""
+    import numpy as np
+
+    from sar_pipeline.analysis import ndvi_5day as nd
+
+    rng = np.random.default_rng(0)
+    n_pix = 50
+    clear = rng.uniform(79, 89, (6, n_pix))
+    cloud = rng.uniform(1, 35, (30, n_pix))
+    cs = np.vstack([clear, cloud])[:, None, :]
+    thr = nd.relative_cloud_score(cs, np.ones_like(cs, dtype=bool))[0]
+    assert (thr > 48).all()                                   # the hazy 46-48 views are out
+    kept = (clear >= thr[None, :]).sum(axis=0)
+    assert (kept >= 5).mean() > 0.9                           # nearly all of a pixel's clear views stay

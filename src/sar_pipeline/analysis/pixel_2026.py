@@ -76,6 +76,24 @@ def centered_window(row: int, col: int, half: int = HALF):
     return Window(col - half, row - half, 2 * half + 1, 2 * half + 1)
 
 
+def read_window(ds, indexes, win) -> np.ndarray:
+    """``indexes`` of ``ds`` in the window ``win`` as float32, 0 outside the raster, in ONE read.
+
+    Same result as ``ds.read(i, window=win, boundless=True, fill_value=0)`` per band, without its cost: a boundless read
+    builds a virtual raster on every call, and the chips read five bands of ~100 files per field (notebook 08, 30 Sep)."""
+    from rasterio.windows import Window
+
+    c0, r0 = int(win.col_off), int(win.row_off)
+    w, h = int(win.width), int(win.height)
+    rc0, rr0 = max(c0, 0), max(r0, 0)
+    rc1, rr1 = min(c0 + w, ds.width), min(r0 + h, ds.height)
+    out = np.zeros((len(indexes), h, w), dtype="float32")
+    if rc1 > rc0 and rr1 > rr0:
+        part = ds.read(list(indexes), window=Window(rc0, rr0, rc1 - rc0, rr1 - rr0)).astype("float32")
+        out[:, rr0 - r0:rr1 - r0, rc0 - c0:rc1 - c0] = part
+    return out
+
+
 def chip_stack(aoi_id: int, pid: int, half: int = HALF):
     """Every date's 5-3-2 chip around the pixel, plus a per-date table of how clear the chip is.
 
@@ -86,7 +104,6 @@ def chip_stack(aoi_id: int, pid: int, half: int = HALF):
 
     from ..optical_export import band_index, qa60_cloud
 
-    d = nd.load(aoi_id)
     loc = pr.locate(aoi_id, pid)
     folder = pr.sync_s2(loc, f"data/{nd.FOLDER}", nd.FOLDER)
     paths = sorted(folder.glob("*.tif"))
@@ -94,10 +111,8 @@ def chip_stack(aoi_id: int, pid: int, half: int = HALF):
     rows, chips, clears = [], [], []
     for path in paths:
         with rasterio.open(path) as ds:
-            read = lambda n: ds.read(band_index(ds, n), window=win, boundless=True,  # noqa: E731
-                                     fill_value=0).astype("float32")
-            rgb = np.stack([read(b) for b in RGB])
-            clear, qa = read("clear"), read("QA60")
+            bands = read_window(ds, [band_index(ds, n) for n in (*RGB, "clear", "QA60")], win)
+            rgb, clear, qa = bands[:3], bands[3], bands[4]
         data = rgb.min(axis=0) > 0
         clear = np.where(data, clear, 0)
         rows.append({

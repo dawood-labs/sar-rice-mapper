@@ -122,12 +122,22 @@ def sync_s2(loc: dict, cache_root="data/s2_reference", folder: str = "s2_referen
         local = config_mod.repo_root() / local
     local = local / loc["aoi"]
     local.mkdir(parents=True, exist_ok=True)
+    key = (cfg["gcs"]["bucket"], prefix, str(local))
+    if key in _SYNCED:
+        # already listed in this Python session (a notebook kernel): listing the bucket again costs ~1 s per call
+        return local
     client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
     for blob in client.list_blobs(cfg["gcs"]["bucket"], prefix=prefix):
         target = local / blob.name.rsplit("/", 1)[-1]
         if blob.name.endswith(".tif") and not target.exists():
             blob.download_to_filename(str(target))
+    _SYNCED.add(key)
     return local
+
+
+#: Bucket folders already listed and downloaded in this Python session (see :func:`sync_s2`); a new session lists again,
+#: so newly exported dates still arrive.
+_SYNCED: set = set()
 
 
 def s2_series(loc: dict, cache_root="data/s2_reference", clear_min: float = 60,

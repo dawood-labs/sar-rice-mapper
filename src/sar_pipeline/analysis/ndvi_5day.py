@@ -130,14 +130,66 @@ def clear_mask(data, qa60, cs, b8, ndvi, cs_min: float | None, bits: int, keep_d
     return ok
 
 
+def data_mask(b3, b4, b8, b8_zero_water: bool = False):
+    """Pixels with a usable optical value: B4 and B8 above 0; with ``b8_zero_water`` also B8 = 0 where B3 and B4 hold
+    values (open water on a clear view reflects almost no near-infrared; its NDVI is then -1)."""
+    data = (b4 > 0) & (b8 > 0)
+    if b8_zero_water:
+        data = data | ((b8 == 0) & (b4 > 0) & (b3 > 0))
+    return data
+
+
+def cloud_score_missing(cs, data) -> bool:
+    """True when a date's Cloud Score+ band is 0 on every pixel with data: the score did not exist yet when the image was
+    exported (the join wrote 0), which is "unknown", not "cloud"."""
+    return cs is not None and bool(np.any(data)) and not bool(np.any(cs[data] > 0))
+
+
+def relative_cloud_score(cs, data, k: float | None = None) -> np.ndarray:
+    """Per pixel, the lowest Cloud Score+ that still counts as clear, read from the pixel's own clear views.
+
+    ``cs`` / ``data``: (dates, rows, cols); dates without a score at all are left out by the caller. The AOI's scores
+    split into a cloud group and a clear group (Otsu's split of all of them); a pixel's clear level is the median of its
+    own views in the clear group, and a view counts as clear down to ``k`` x sqrt(its own spread^2 + the AOI's clear
+    spread^2) below it. Why (user, 30 Sep, aoi160 pixel 50746): the fixed 40 let a hazy 48 (7 Aug, NDVI 0.41 on a 0.6
+    crop) into the series and the smooth curve dipped; the same pixel's clear views score 79-89."""
+    import warnings
+
+    from .first_clear import otsu
+    from .radar_water import WATER_K
+
+    k = WATER_K if k is None else k
+    x = np.where(np.asarray(data, dtype=bool) & (np.asarray(cs) > 0), np.asarray(cs, dtype="float32"), np.nan)
+    split = otsu(x[np.isfinite(x)])
+    clear = np.where(x >= split, x, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        level = np.nanmedian(clear, axis=0)
+        own = 1.4826 * np.nanmedian(np.abs(clear - level[None]), axis=0)
+        v = clear[np.isfinite(clear)]
+        aoi = 1.4826 * float(np.median(np.abs(v - np.median(v)))) if v.size else 0.0
+    thr = level - k * np.sqrt(np.nan_to_num(own) ** 2 + aoi ** 2)
+    return np.where(np.isfinite(thr), thr, split).astype("float32")
+
+
 def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None, cs_min: float | None = None,
-               qa60_mode: str = QA60_MODE, keep_dark: bool = False, drop_haze: bool = False):
+               qa60_mode: str = QA60_MODE, keep_dark: bool = False, drop_haze: bool = False,
+               cs_missing_unknown: bool = False, b8_zero_water: bool = False, cs_relative: bool = False):
     """NDVI, NDWI, LSWI, QA60 cloud and SCL cloud for every exported date, shaped (dates, rows, cols).
 
     ``ok`` is True where the pixel has data and QA60 does not flag cloud (``qa60_mode``: cloud and
     cirrus, or opaque cloud only). With ``cs_min`` the Cloud Score+ ``clear`` band (0-100, per 10 m
     pixel) must also reach that value: the stricter mask used to test how much haze the light one
     lets through. ``scl_cloud`` is returned for comparison only.
+
+    Fix round 3, step M1 (both off by default, so the delivered series does not change):
+    ``cs_missing_unknown``: a date whose Cloud Score+ band is 0 on every pixel with data had no score when it was exported
+    (the score is produced days after the image; issue 32); the Cloud Score+ test is skipped for that date instead of
+    rejecting it as cloud (the opaque bit and the haze test still apply).
+    ``b8_zero_water``: B8 = 0 while B3 and B4 hold values is open water on a clear view (issue 25), not missing data; the
+    view is kept with NDVI -1 (water reflects almost no near-infrared).
+    ``cs_relative`` (fresh start, 30 Sep): the Cloud Score+ limit is per pixel, from its own clear views
+    (:func:`relative_cloud_score`), instead of ``cs_min``; dates without a score are judged without it.
     """
     import rasterio
 
@@ -152,19 +204,40 @@ def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None,
     if not paths:
         raise FileNotFoundError(f"no files for aoi{aoi_id} in {folder}")
     dates, ndvi, ndwi, lswi, ok, scl = [], [], [], [], [], []
+    rel_min = None
+    if cs_relative:
+        # first pass: every date's score, to read each pixel's own clear level
+        scores, datas = [], []
+        for path in paths:
+            with rasterio.open(path) as ds:
+                c = dict(zip(("B3", "B4", "B8", "clear"), ds.read([band_index(ds, n) for n in ("B3", "B4", "B8", "clear")])
+                             .astype("float32")))
+            dm = data_mask(c["B3"], c["B4"], c["B8"], b8_zero_water)
+            if not cloud_score_missing(c["clear"], dm):
+                scores.append(c["clear"])
+                datas.append(dm)
+        rel_min = relative_cloud_score(np.stack(scores), np.stack(datas)) if scores else None
+        del scores, datas
+        cs_min = cs_min if cs_min is not None else 0.0
     for path in paths:
         dates.append(pd.to_datetime(path.stem.rsplit("_S2_", 1)[1]))
         with rasterio.open(path) as ds:
-            read = lambda n: ds.read(band_index(ds, n)).astype("float32")  # noqa: E731
-            b3, b4, b8, b11, qa, sc = (read(n) for n in ("B3", "B4", "B8", "B11", "QA60", "SCL"))
-            cs = read("clear") if cs_min is not None else None
-            b2 = read("B2") if drop_haze else None
-        data = (b4 > 0) & (b8 > 0)
+            # all needed bands in ONE read: the files are pixel-interleaved, band-by-band reads decode them repeatedly
+            names = ["B3", "B4", "B8", "B11", "QA60", "SCL"] + (["clear"] if cs_min is not None else []) + \
+                (["B2"] if drop_haze else [])
+            cube = dict(zip(names, ds.read([band_index(ds, n) for n in names]).astype("float32")))
+            b3, b4, b8, b11, qa, sc = (cube[n] for n in ("B3", "B4", "B8", "B11", "QA60", "SCL"))
+            cs = cube.get("clear")
+            b2 = cube.get("B2")
+        data = data_mask(b3, b4, b8, b8_zero_water)
         with np.errstate(invalid="ignore", divide="ignore"):
             ndvi.append(np.where(data, (b8 - b4) / (b8 + b4), np.nan))
             ndwi.append(np.where(data & (b3 + b8 > 0), (b3 - b8) / (b3 + b8), np.nan))
             lswi.append(np.where(data & (b8 + b11 > 0), (b8 - b11) / (b8 + b11), np.nan))
-        ok.append(clear_mask(data, qa, cs, b8, ndvi[-1], cs_min, bits, keep_dark, drop_haze, b2, b4))
+        cs_min_date = None if (cs_missing_unknown and cloud_score_missing(cs, data)) else cs_min
+        if rel_min is not None and cs_min_date is not None:
+            cs_min_date = rel_min
+        ok.append(clear_mask(data, qa, cs, b8, ndvi[-1], cs_min_date, bits, keep_dark, drop_haze, b2, b4))
         scl.append(data & np.isin(sc.astype("int64"), SCL_CLOUD_CLASSES))
     order = np.argsort(dates)
     pick = lambda xs: np.stack(xs)[order]  # noqa: E731
@@ -297,7 +370,8 @@ def gap_days(observed, step: int = STEP_DAYS):
 
 def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd: float = LMBD,
           out_root="processed/_batch/s2_2026", folder: str = FOLDER, log=print, cs_min: float | None = None,
-          qa60_mode: str = QA60_MODE, keep_dark: bool = False, drop_haze: bool = False) -> dict:
+          qa60_mode: str = QA60_MODE, keep_dark: bool = False, drop_haze: bool = False,
+          cs_missing_unknown: bool = False, b8_zero_water: bool = False, cs_relative: bool = False) -> dict:
     """Read, composite, fit and write the 5-day series of one AOI. Returns a summary dict.
 
     ``cs_min`` adds the Cloud Score+ requirement to the mask and ``qa60_mode`` picks the QA60 bits
@@ -306,7 +380,9 @@ def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd:
     """
     t0 = time.time()
     dates, ndvi, ndwi, lswi, ok, scl, loc = read_dates(aoi_id, folder, cs_min=cs_min, qa60_mode=qa60_mode,
-                                                        keep_dark=keep_dark, drop_haze=drop_haze)
+                                                        keep_dark=keep_dark, drop_haze=drop_haze,
+                                                        cs_missing_unknown=cs_missing_unknown, b8_zero_water=b8_zero_water,
+                                                        cs_relative=cs_relative)
     h, w = ndvi.shape[1:]
     starts = window_starts(start, end)
     keep = (dates >= starts[0]) & (dates < pd.Timestamp(end))
@@ -336,7 +412,9 @@ def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd:
     import json
 
     (folder_out / f"{loc['aoi']}_series_mask.json").write_text(json.dumps(
-        {"cs_min": cs_min, "qa60_mode": qa60_mode, "keep_dark": keep_dark, "drop_haze": drop_haze}))
+        {"cs_min": cs_min, "qa60_mode": qa60_mode, "keep_dark": keep_dark, "drop_haze": drop_haze,
+         **({"cs_missing_unknown": True} if cs_missing_unknown else {}), **({"b8_zero_water": True} if b8_zero_water else {}),
+         **({"cs_relative": True} if cs_relative else {})}))
     summary = {
         "aoi": loc["aoi"], "dates_read": int(keep.sum()), "windows": len(starts),
         "observed_window_pct": round(100 * float(observed.mean()), 1),
@@ -383,6 +461,9 @@ def write_stack(cube, band_names, grid: dict, out_path, dtype="float32"):
 # ---------------------------------------------------------------------------------------------
 
 _CACHE: dict = {}
+#: Series kept in memory by :func:`load` at a time. One is enough to look at many fields of one AOI quickly (notebook 08)
+#: and keeps the memory bounded when another AOI is opened.
+CACHE_AOIS = 1
 
 
 def load(aoi_id: int, out_root="processed/_batch/s2_2026", folder: str = FOLDER) -> dict:
@@ -394,6 +475,9 @@ def load(aoi_id: int, out_root="processed/_batch/s2_2026", folder: str = FOLDER)
     key = (aoi_id, str(out_root))
     if key in _CACHE:
         return _CACHE[key]
+    if len(_CACHE) >= CACHE_AOIS:
+        # keep only the latest series in memory: a large AOI's raw dates alone can take gigabytes
+        _CACHE.clear()
     loc0 = pr.locate(aoi_id, 0)
     # the mask the series was built with (written by build); the raw dates are masked the same way,
     # so "clear" means the same thing to every reader of this series

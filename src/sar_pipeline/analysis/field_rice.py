@@ -240,7 +240,7 @@ def evaluate(aoi_ids, plots, map_suffix: str = "_final") -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refine: bool = True) -> pd.DataFrame:
+def run(aoi_ids=None, out_dir=None, map_suffix: str = "_final", refine: bool = True, src_root=SRC) -> pd.DataFrame:
     """Label the fields of every AOI; one GeoPackage per AOI and ``field_acres_by_class.csv``.
 
     With ``refine`` (and a refined delineation for the AOI) the label-aware refinement runs after
@@ -250,11 +250,12 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refin
     from .finalize import load_overrides
 
     overrides = load_overrides()
-    ids = aoi_ids or sorted(int(p.parent.name[3:]) for p in Path(SRC).glob(f"aoi*/aoi*_monsoon2026{map_suffix}.tif"))
+    out_dir = out_dir or f"{src_root}/fields"
+    ids = aoi_ids or sorted(int(p.parent.name[3:]) for p in Path(src_root).glob(f"aoi*/aoi*_monsoon2026{map_suffix}.tif"))
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     rows = []
     for aoi_id in ids:
-        fields, idx, classes = label_aoi(aoi_id, map_suffix)
+        fields, idx, classes = label_aoi(aoi_id, map_suffix, src_root=src_root)
         if fields.empty:
             rows.append({"aoi": f"aoi{aoi_id}", "fields": 0})
             continue
@@ -271,10 +272,10 @@ def run(aoi_ids=None, out_dir=f"{SRC}/fields", map_suffix: str = "_final", refin
                 # merged outlines own more pixels now: label them again from their final outline
                 import rasterio
 
-                with rasterio.open(Path(SRC) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026{map_suffix}.tif") as ds:
+                with rasterio.open(Path(src_root) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026{map_suffix}.tif") as ds:
                     fields, idx = label_frame(fields, classes, ds.transform, ds.crs, aoi_id)
         # second opinion (analysis/field_level): the rule re-run on the field's mean curves
-        fl_path = Path(SRC) / "report" / "field_level" / f"aoi{aoi_id}.parquet"
+        fl_path = Path(src_root) / "report" / "field_level" / f"aoi{aoi_id}.parquet"
         if fl_path.exists():
             # positional: field_level kept this AOI's fields with >= MIN_PX pixels inside the AOI, in
             # label_aoi's order (a uid is only unique within a tile, so no join on it)
@@ -323,8 +324,9 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.field_rice", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ids", nargs="*", type=int, default=None)
+    p.add_argument("--src-root", default=SRC, help="folder with <aoi>/<aoi>_monsoon2026_final.tif (a sandbox for tests)")
     args = p.parse_args(argv)
-    t = run(args.ids)
+    t = run(args.ids, src_root=args.src_root)
     print(t.drop(columns=["aoi"]).sum(numeric_only=True).round(0).to_string())
     return 0
 

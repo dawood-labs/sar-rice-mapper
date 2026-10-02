@@ -17,7 +17,8 @@ any difference between it and the baseline comes from the radar fixes, not the m
 is a plain Cloud Score+ mask (QA60 opaque only plus ``clear`` >= 60), kept for the record because it
 removes the flooded-field observations; ``hyb50`` / ``hyb60`` / ``hyb70`` are the hybrid: QA60
 opaque only, Cloud Score+ at that threshold for bright observations, dark observations always kept
-(``ndvi_5day.clear_mask``).
+(``ndvi_5day.clear_mask``). ``hyb40m1late`` is the M1 mask with the series run on to a later end
+(``SERIES_END``): the test of a map on the newest images, kept apart from the delivered series.
 
 Use::
 
@@ -45,9 +46,26 @@ VARIANTS = {
     "hyb50": {"qa60_mode": "opaque", "cs_min": 50, "keep_dark": True, "drop_haze": True},
     "hyb60": {"qa60_mode": "opaque", "cs_min": 60, "keep_dark": True, "drop_haze": True},
     "hyb70": {"qa60_mode": "opaque", "cs_min": 70, "keep_dark": True, "drop_haze": True},
+    # fix round 3, M1: hyb40 plus the two data-only fixes (missing Cloud Score+ = unknown; B8 = 0 over water = water)
+    "hyb40m1": {"qa60_mode": "opaque", "cs_min": 40, "keep_dark": True, "drop_haze": True, "cs_missing_unknown": True,
+                "b8_zero_water": True},
+    # fix round 3, M2: M1 without the blue-band haze test (user: mask less; the upper-envelope fit down-weights hazy lows)
+    "hyb40m2": {"qa60_mode": "opaque", "cs_min": 40, "keep_dark": True, "drop_haze": False, "cs_missing_unknown": True,
+                "b8_zero_water": True},
     # QA60 opaque cloud + the blue-band haze test only, no Cloud Score+: does the haze test do the work?
     "hazeonly": {"qa60_mode": "opaque", "cs_min": None, "keep_dark": False, "drop_haze": True},
 }
+#: M1 mask with the series run on to the newest local Sentinel-2 dates (test of a later map date, 29 Sep).
+VARIANTS["hyb40m1late"] = dict(VARIANTS["hyb40m1"])
+#: Fresh start test (30 Sep): as ``hyb40m1late`` but the Cloud Score+ limit per pixel from its own clear views
+#: (``ndvi_5day.relative_cloud_score``) instead of 40. NOT USED: it removed the hazy dip of aoi160 pixel 50746 but cut
+#: the observed pixel-windows from 57 to 49 % and moved many sowings; the user kept the 40 mask (fewer lost dates).
+VARIANTS["relm1late"] = dict(VARIANTS["hyb40m1"], cs_relative=True)
+#: Series end (exclusive) of the variants whose series does not end on ``ndvi_5day.build``'s default.
+#: Why a separate table: ``VARIANTS`` holds mask options only (they are also passed to ``read_dates``);
+#: the end is a property of the series, not of the mask. The rule needs no end of its own: the season
+#: follows the series (``monsoon_rule.season_to_series``) and the map date is the last window.
+SERIES_END = {"hyb40m1late": "2026-09-29", "relm1late": "2026-09-29"}      # includes the 26 and 28 Sep images
 OUT = f"{BASE}/report/mask_experiment"
 
 
@@ -56,8 +74,117 @@ OUT = f"{BASE}/report/mask_experiment"
 _INTO_STANDARD = False
 
 
+#: Pseudo-variant: the standard folder as it is now (the delivered series and rule maps), the control of a test.
+DELIVERED = "delivered"
+
+
 def root(variant: str) -> str:
-    return BASE if _INTO_STANDARD else f"{BASE}_{variant}"
+    return BASE if _INTO_STANDARD or variant == DELIVERED else f"{BASE}_{variant}"
+
+
+SERIES_FILES = ("ndvi5d", "lswi5d", "ndvi5d_raw", "gapdays5d")
+
+
+def link_series(aoi_id: int, variant: str) -> Path:
+    """Link the standard folder's series of one AOI into ``root(variant)``, so a changed RULE can be run
+    there (``rule`` step) and compared with the delivered map without rebuilding the series and
+    without touching the delivery. Only the inputs are links; the rule writes its map as a new file."""
+    src = Path(BASE) / f"aoi{aoi_id}"
+    dst = Path(root(variant)) / f"aoi{aoi_id}"
+    dst.mkdir(parents=True, exist_ok=True)
+    names = [f"aoi{aoi_id}_{k}.tif" for k in SERIES_FILES] + [f"aoi{aoi_id}_series_mask.json"]
+    for name in names:
+        target = dst / name
+        if not target.exists():
+            target.symlink_to((src / name).resolve())
+    old = dst / f"aoi{aoi_id}_monsoon2026.tif"
+    if old.is_symlink():
+        raise RuntimeError(f"{old} is a link into the standard folder; the rule would overwrite the delivery")
+    return dst
+
+
+FIELD_CLASSES = ("rice", "young_rice", "young", "rice_unconfirmed", "rice_like_no_water", "flooded_not_green",
+                 "harvested", "cut_unconfirmed", "never_bare", "not rice")
+
+
+def compare_delivered(ids, variant: str, baseline: str = "baseline_v4", noted=None,
+                      against: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Field labels of a sandbox against a frozen baseline: acres per class per AOI ("old -> new", field map inside the
+    AOI) and the label of every noted field. Why: the test of a rule change is what happens to the delivered acres and to
+    the fields the reviewers flagged, before anything reaches the delivery.
+
+    ``against`` names another sandbox (variant) to compare with instead of the baseline, e.g. the same mask with a
+    shorter series; ``noted`` replaces the reviewers' field list (``own_level_table.NOTED_FIELDS``)."""
+    import geopandas as gpd
+
+    from .own_level_table import NOTED_FIELDS
+
+    noted = NOTED_FIELDS if noted is None else noted
+    old_dir = Path(root(against)) if against else Path(BASE) / baseline
+    old = pd.read_csv(old_dir / "fields" / "field_acres_by_class.csv").set_index("aoi")
+    new = pd.read_csv(Path(root(variant)) / "fields" / "field_acres_by_class.csv").set_index("aoi")
+    rows = []
+    for a in [f"aoi{i}" for i in ids]:
+        r = {"aoi": a}
+        for c in FIELD_CLASSES:
+            k = f"{c}_acres_fieldmap"
+            # a table written before a class existed (class 9, 30 Sep) has no column for it: 0 acres
+            r[c] = f"{old.loc[a].get(k, 0.0):.0f} -> {new.loc[a].get(k, 0.0):.0f}"
+        d_old = old.loc[a, "rice_acres_fieldmap"] + old.loc[a, "young_rice_acres_fieldmap"]
+        d_new = new.loc[a, "rice_acres_fieldmap"] + new.loc[a, "young_rice_acres_fieldmap"]
+        r["delivered"] = f"{d_old:.0f} -> {d_new:.0f}"
+        rows.append(r)
+    fields = []
+    for a in [f"aoi{i}" for i in ids]:
+        mine = [f for f in noted if f.startswith(a + "_")]
+        if not mine:
+            continue
+        o = gpd.read_file(old_dir / "fields" / f"{a}_fields_monsoon2026.gpkg", ignore_geometry=True).set_index("field_id")
+        n = gpd.read_file(Path(root(variant)) / "fields" / f"{a}_fields_monsoon2026.gpkg", ignore_geometry=True).set_index("field_id")
+        for f in mine:
+            fields.append({"field_id": f, "old": int(o.loc[f, "label"]) if f in o.index else None,
+                           "new": int(n.loc[f, "label"]) if f in n.index else None})
+    return pd.DataFrame(rows), pd.DataFrame(fields)
+
+
+def field_changes(aoi_id: int, variant: str, control: str = DELIVERED) -> pd.DataFrame:
+    """Every delivered field of the AOI with the majority class of the raw rule map under two masks.
+
+    Why: the plots cover only a few AOIs; on the others the test of a new mask is which fields change
+    class, whether those are the fields the reviewers flagged, and whether the change looks right on
+    the chips. Both sides are raw rule maps (no overrides), so the comparison is like for like.
+    """
+    import geopandas as gpd
+    import rasterio
+    from rasterio.features import rasterize
+
+    from ..qgis_review import SRC
+
+    f = gpd.read_file(f"{SRC}/fields/aoi{aoi_id}_fields_monsoon2026.gpkg")
+    maps = {}
+    for name in (control, variant):
+        with rasterio.open(Path(root(name)) / f"aoi{aoi_id}" / f"aoi{aoi_id}_monsoon2026.tif") as ds:
+            maps[name] = ds.read(1)
+            shape, transform, crs = ds.shape, ds.transform, ds.crs
+    ids = rasterize([(g, i + 1) for i, g in enumerate(f.to_crs(crs).geometry)], out_shape=shape,
+                    transform=transform, fill=0, dtype="int32").ravel()
+    rows = []
+    order = np.argsort(ids, kind="stable")
+    bounds = np.searchsorted(ids[order], np.arange(1, len(f) + 2))
+    for i in range(len(f)):
+        pix = order[bounds[i]:bounds[i + 1]]
+        row = {"field_id": f["field_id"].iloc[i], "delivered_label": int(f["label"].iloc[i]), "pixels": len(pix)}
+        for name, m in maps.items():
+            c = m.ravel()[pix]
+            c = c[c != 255]
+            row[name] = int(np.bincount(c).argmax()) if len(c) else 255
+            row[f"{name}_rice_share"] = round(float(np.isin(c, (1, 6)).mean()), 3) if len(c) else np.nan
+        rows.append(row)
+    t = pd.DataFrame(rows)
+    from . import optical_phenology as op
+
+    t["acres"] = [op.acres(n) for n in t["pixels"]]
+    return t
 
 
 def build_one(args) -> dict:
@@ -67,9 +194,14 @@ def build_one(args) -> dict:
     marker = Path(root(variant)) / f"aoi{aoi_id}" / f"aoi{aoi_id}_ndvi5d.tif"
     if marker.exists() and not _INTO_STANDARD:
         return {"aoi": f"aoi{aoi_id}", "variant": variant, "skipped": True}
-    s = nd.build(aoi_id, out_root=root(variant), log=lambda *_: None, **VARIANTS[variant])
+    end = {"end": SERIES_END[variant]} if variant in SERIES_END else {}
+    s = nd.build(aoi_id, out_root=root(variant), log=lambda *_: None, **end, **VARIANTS[variant])
     nd.forget()
     return {"aoi": f"aoi{aoi_id}", "variant": variant, **{k: v for k, v in s.items() if not k.startswith("path_")}}
+
+
+#: Water test for the ``rule`` step (``--water``); None = the rule's default. Set before the worker pool starts.
+_WATER = None
 
 
 def rule_one(args) -> dict:
@@ -77,7 +209,7 @@ def rule_one(args) -> dict:
     from . import monsoon_rule as mr
     from . import ndvi_5day as nd
 
-    r = mr.run_aoi(aoi_id, out_root=root(variant))
+    r = mr.run_aoi(aoi_id, out_root=root(variant), **({"water": _WATER} if _WATER else {}))
     nd.forget()
     return {"variant": variant, **{k: v for k, v in r.items() if k != "path"}}
 
@@ -420,10 +552,15 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.mask_experiment", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["build", "rule", "score", "diagnose", "sidecars", "verdicts"])
+    p.add_argument("step", choices=["build", "rule", "score", "diagnose", "sidecars", "verdicts", "fields", "link", "compare"])
     p.add_argument("--ids", nargs="*", type=int, default=[])
-    p.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS))
+    p.add_argument("--variants", nargs="+", default=list(VARIANTS),
+                   help=f"'{DELIVERED}' = the standard folder as it is (score and fields steps only)")
     p.add_argument("--jobs", type=int, default=3)
+    p.add_argument("--water", choices=["v2", "v3"], help="rule step: water test (default: the rule's default)")
+    p.add_argument("--single-dip", action="store_true", help="rule step: radar_water.SINGLE_DIP_WATER on (a test)")
+    p.add_argument("--against", help="compare step: another sandbox to compare with instead of baseline_v4")
+    p.add_argument("--fields", nargs="+", help="compare step: field ids to list (default: the reviewers' noted fields)")
     p.add_argument("--into-standard", action="store_true",
                    help="build: write the series into the standard folder (the chosen mask, stage 4)")
     args = p.parse_args(argv)
@@ -443,6 +580,31 @@ def main(argv=None) -> int:
         print(f"wrong fields still wrong: {len(still)}")
         print(still[["field_id", "label", "new_label", "new_rice_share", "expected_rice", "true_class_text", "issue"]].to_string(index=False))
         return 0
+    if args.step == "compare":
+        # compare --ids ... --variants <sandbox> [--against <sandbox>] [--fields ...]: field acres and noted-field
+        # labels against baseline_v4 (or another sandbox); written into the first sandbox only
+        acres, noted = compare_delivered(args.ids, args.variants[0], noted=args.fields, against=args.against)
+        print(acres.to_string(index=False))
+        print(noted.to_string(index=False))
+        tag = f"_vs_{args.against}" if args.against else ""
+        acres.to_csv(Path(root(args.variants[0])) / f"compare_acres{tag}.csv", index=False)
+        noted.to_csv(Path(root(args.variants[0])) / f"compare_noted_fields{tag}.csv", index=False)
+        return 0
+    if args.step == "link":
+        # link --ids ... --variants <name>: a sandbox with the delivered series, for testing rule changes
+        if args.variants[0] in VARIANTS or args.variants[0] == DELIVERED:
+            p.error("link needs a new sandbox name, not an existing mask variant")
+        for a in args.ids:
+            print(link_series(a, args.variants[0]))
+        return 0
+    if args.step == "fields":
+        # fields --ids ... --variants <variant>: field classes under the delivered maps and the variant
+        t = pd.concat([field_changes(a, args.variants[0]).assign(aoi=f"aoi{a}") for a in args.ids], ignore_index=True)
+        Path(OUT).mkdir(parents=True, exist_ok=True)
+        t.to_csv(Path(OUT) / f"field_changes_{args.variants[0]}.csv", index=False)
+        moved = t[t[DELIVERED] != t[args.variants[0]]]
+        print(pd.crosstab(moved[DELIVERED], moved[args.variants[0]], values=moved["acres"], aggfunc="sum").round(0))
+        return 0
     if args.step == "sidecars":
         print(f"{write_sidecars(args.variants)} sidecars written")
         return 0
@@ -451,6 +613,13 @@ def main(argv=None) -> int:
             t = diagnose(a, args.variants[0])
             print(t[(t["date"] >= "2026-05-01")].to_string(index=False))
         return 0
+    if args.water:
+        global _WATER
+        _WATER = args.water
+    if args.single_dip:
+        from . import radar_water as rw
+
+        rw.SINGLE_DIP_WATER = True
     if args.step in ("build", "rule"):
         t = run_many(build_one if args.step == "build" else rule_one, args.ids, args.variants, args.jobs)
         t.to_csv(Path(OUT) / f"{args.step}_log.csv", mode="a", header=not (Path(OUT) / f"{args.step}_log.csv").exists(), index=False)

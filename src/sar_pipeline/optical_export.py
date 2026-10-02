@@ -357,6 +357,25 @@ def export_all_dates(configs, start: str, end: str, bucket: str, prefix: str, lo
     return rows
 
 
+def cloud_score_coverage(region_4326, start: str, end: str) -> dict:
+    """Per acquisition date over a region: how many Sentinel-2 images exist and how many already have a Cloud Score+
+    image. Metadata only (no pixels, no export).
+
+    Why (issue 32): Cloud Score+ is produced some days after the Sentinel-2 image; a date exported before its score
+    exists gets a ``clear`` band of 0. Re-export a date only when both counts are equal."""
+    import ee
+
+    region = ee.Geometry(region_4326)
+    out = {}
+    for name, coll in (("s2", S2_COLLECTION), ("cloud_score", CLOUD_SCORE_COLLECTION)):
+        times = ee.ImageCollection(coll).filterBounds(region).filterDate(start, end) \
+            .aggregate_array("system:time_start").getInfo()
+        for t in times:
+            day = dt.datetime.fromtimestamp(t / 1000, tz=dt.timezone.utc).strftime("%Y-%m-%d")
+            out.setdefault(day, {"s2": 0, "cloud_score": 0})[name] += 1
+    return dict(sorted(out.items()))
+
+
 def mask_summary(region_4326, start: str, end: str, scale: int = 20):
     """Per acquisition date over a region: data coverage, and cloud share by QA60 and by SCL.
 
@@ -442,7 +461,8 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.optical_export", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["dates"])
+    p.add_argument("step", choices=["dates", "coverage"],
+                   help="dates: export (Earth Engine tasks); coverage: read-only count of S2 vs Cloud Score+ images per date")
     p.add_argument("--configs", nargs="*", default=None, help="config files (default: config/aoi*_monsoon2026.yaml)")
     p.add_argument("--start", required=True, help="first date, YYYY-MM-DD (inclusive)")
     p.add_argument("--end", required=True, help="last date, YYYY-MM-DD (exclusive)")
@@ -451,6 +471,16 @@ def main(argv=None) -> int:
     configs = args.configs or sorted(glob.glob("config/aoi*_monsoon2026.yaml"))
     cfg = config_mod.load_config(configs[0])
     auth.init_ee(cfg)
+    if args.step == "coverage":
+        import geopandas as gpd
+        import pandas as pd
+
+        frames = [gpd.read_file(config_mod.aoi_path(config_mod.load_config(c))).to_crs(4326) for c in configs]
+        x0, y0, x1, y1 = pd.concat(frames).total_bounds
+        box = {"type": "Polygon", "coordinates": [[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]]]}
+        for day, c in cloud_score_coverage(box, args.start, args.end).items():
+            print(f"{day}  S2 images {c['s2']:3d}  Cloud Score+ {c['cloud_score']:3d}  {'complete' if c['s2'] == c['cloud_score'] else 'NOT complete'}")
+        return 0
     rows = export_all_dates(configs, args.start, args.end, bucket=cfg["gcs"]["bucket"],
                             prefix=cfg["gcs"]["base_folder"] + "/s2_dates_masks", bands=BANDS_WITH_MASKS)
     started = [r for r in rows if r.get("task_id")]

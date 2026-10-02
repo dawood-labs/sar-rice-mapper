@@ -32,6 +32,7 @@ LEGEND = {
     5: ("rice-like curve, never bare", "the optical curve looks like rice but the radar shows trees or buildings all season (cloud/haze artefact); not rice", (140, 90, 190, 255)),
     7: ("flooded, not yet green", "under water on the map date: transplanting water confirmed by Sentinel-1 within 60 days, crop not yet visible (the next map's rice)", (60, 120, 200, 255)),
     8: ("cut crop, water not confirmed", "a rice-like cycle cut before the map date with no transplanting water in the radar: mostly rain-fed dry-land crops, not paddy", (200, 170, 120, 255)),
+    9: ("rice-like, no sign of water", "rice-like crop cycle, radar shows no water at sowing (dry-sown crop or direct-seeded rice); reported, not delivered", (0, 150, 150, 255)),
 }
 NODATA = 255
 

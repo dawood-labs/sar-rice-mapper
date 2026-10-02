@@ -356,7 +356,7 @@ def review_aoi(aoi_id: int, per_category: int = 3, out_dir=OUT) -> dict:
 # ---------------------------------------------------------------- what changed since the first map
 BASELINE = f"{SRC}/baseline_v3"
 FLOW_NAMES = {0: "not_rice", 1: "rice", 2: "young", 3: "class3", 4: "harvested", 5: "never_bare",
-              6: "young_rice", 7: "flooded", 8: "cut_unconfirmed"}
+              6: "young_rice", 7: "flooded", 8: "cut_unconfirmed", 9: "rice_like_no_water"}
 
 
 def change_samples(aoi_id: int, n_per_flow: int = 4, n_unchanged: int = 4, baseline_dir=BASELINE, out_dir=OUT,
