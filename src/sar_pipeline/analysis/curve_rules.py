@@ -1009,7 +1009,7 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
 #: AOIs whose result the user accepted (user, 2 Oct: "aoi160 is done and locked"). Their outputs in
 #: ``rice_fresh/aoi<N>/`` are never rewritten (``force=True`` to override on the user's word); the frozen copy, the
 #: code and the labels at lock time are in ``rice_fresh/locked/aoi<N>/`` with checksums (MANIFEST.json).
-LOCKED_AOIS = {160, 28, 72, 116, 39}
+LOCKED_AOIS = {160, 28, 72, 116, 39, 118}
 #: Rule changes for ONE AOI (user, 2 Oct: "try the aoi160 rules first; if they do not work, new rules only for that
 #: AOI, not 160"): ``{aoi: {"NAME": value, "field_polygons.NAME": value}}``. The module constants are the aoi160 rules;
 #: an AOI without an entry runs exactly those.
@@ -1074,6 +1074,13 @@ AOI_OVERRIDES[116] = dict(AOI_OVERRIDES[72],
                           WATER_END_TRACKS="earliest_unless_wet_view",  # 116025: first track rising (27 Jul);
 #                                                       143310: a water view after it -> the later track (29 Aug)
                           WATER_FALL_POLS="VV")       # 217385 / 112734: flooding seen as a VV fall; VH already dark
+#: aoi118 (user, 5 Oct): starts from the aoi116 set (try_rules), minus SOWING_FROM_RADAR (45428: "100 % standing", the
+#: dark radar under the canopy in Aug put the transplanting at the end of that spell, 17 Aug -> young at 45 days; NDVI
+#: rose from mid July), and a VV jump alone on the last pass is not plants (32253 / 32252: under water since late July,
+#: only the 4 Oct pass VV +6.6 dB with VH flat; one read young, the other flooded).
+AOI_OVERRIDES[118] = dict(AOI_OVERRIDES[116], SOWING_FROM_RADAR=False, VV_JUMP=float("inf"))
+#: aoi83 (user, 5 Oct): neighbour of aoi118; starts from the aoi118 set (try_rules: fewest young, most transplanted).
+AOI_OVERRIDES[83] = dict(AOI_OVERRIDES[118])
 
 
 @contextmanager
@@ -1446,6 +1453,8 @@ def main(argv=None) -> int:
                         "processed/aoi<N>/monsoon2026/ANALYSIS_SERIES.txt; a newer series has its own folder); the radar "
                         "run is the AOI's pinned one (python -m sar_pipeline --config ... pin-run)")
     p.add_argument("--out", help="also write the table to this CSV")
+    p.add_argument("--sources", type=int, nargs="*", default=list(RULE_SOURCES),
+                   help="try-rules: the AOIs whose rule sets are tried (160 = the defaults)")
     p.add_argument("--force", action="store_true", help="rewrite a LOCKED AOI's outputs (only on the user's word)")
     args = p.parse_args(argv)
     if args.step == "run":
@@ -1454,7 +1463,7 @@ def main(argv=None) -> int:
         print(sieve(args.aoi, force=args.force).to_string(index=False))
         return 0
     if args.step == "try-rules":
-        print(try_rules(args.aoi, series_root=args.series_root).to_string(index=False))
+        print(try_rules(args.aoi, sources=args.sources, series_root=args.series_root).to_string(index=False))
         return 0
     if args.step == "fields":
         print(fields(args.aoi, force=args.force).to_string(index=False))

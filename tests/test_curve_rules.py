@@ -503,3 +503,19 @@ def test_aoi33_lone_low_view_needs_vh_out_of_its_low_part_only():
     assert cr.classify_relative(f).tolist() == ["rice harvested"]
     with cr.rules_for(33):
         assert cr.classify_relative(f).tolist() == ["rice standing direct seeded"]
+
+
+def test_try_rules_cli_takes_the_rule_set_aois(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cr, "try_rules", lambda aoi, sources, series_root=None: seen.update(aoi=aoi, sources=sources)
+                        or pd.DataFrame())
+    cr.main(["try-rules", "--aoi", "118", "--sources", "116", "72", "33", "160"])
+    assert seen == {"aoi": 118, "sources": [116, 72, 33, 160]}
+
+
+def test_aoi118_rules_drop_radar_sowing_and_vv_jump_alone():
+    r = cr.AOI_OVERRIDES[118]
+    assert r["SOWING_FROM_RADAR"] is False and r["VV_JUMP"] == float("inf")
+    assert {k: v for k, v in r.items() if k not in ("SOWING_FROM_RADAR", "VV_JUMP")} == \
+        {k: v for k, v in cr.AOI_OVERRIDES[116].items() if k not in ("SOWING_FROM_RADAR", "VV_JUMP")}
+    assert 118 in cr.LOCKED_AOIS

@@ -331,11 +331,21 @@ def annotate_rule(fig, rule: dict) -> None:
         head += f"\nrules used: {rule['rule_set']}"
     if rule.get("inputs"):
         head += f"\ninputs: {rule['inputs']}"
-    fig.suptitle(head, fontsize=11, fontweight="bold", y=0.995 if "\n" not in head else 1.0 + 0.025 * head.count("\n"))
+    # Wrapped title and the feature box INSIDE the figure (user, 5 Oct: "the curves plot is too small"): a long
+    # "rules used" line (an AOI with many own switches) or a box drawn outside the axes widened the saved figure, and
+    # the notebook shrank the whole figure, curves included, to its cell width.
+    import textwrap
+
+    head = "\n".join(textwrap.fill(h, 170, subsequent_indent="    ") for h in head.split("\n"))
+    n_head = head.count("\n") + 1
+    fig.set_size_inches(20, 10 + 0.25 * n_head)
+    fig.subplots_adjust(left=0.05, right=0.80, bottom=0.06, top=1 - (0.35 + 0.25 * n_head) / (10 + 0.25 * n_head),
+                        hspace=0.12)
+    fig.suptitle(head, fontsize=11, fontweight="bold", x=0.01, ha="left", y=0.995)
     lines = [f"{RULE_FEATURE_NAMES[k]}: {rule['rule_features'][k]}" for k in RULE_FEATURE_NAMES
              if k in rule.get("rule_features", {})]
     ax = fig.axes[0]
-    ax.text(1.01, 1.0, "\n".join(lines), transform=ax.transAxes, va="top", ha="left", fontsize=8,
+    ax.text(1.01, 1.0, "\n".join(lines), transform=ax.transAxes, va="top", ha="left", fontsize=8.5,
             family="monospace", bbox=dict(boxstyle="round", fc="white", ec="#999999", alpha=0.9))
 
 
