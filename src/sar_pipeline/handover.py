@@ -208,7 +208,8 @@ def _download_part(args):
 
     Each file goes to ``<name>.part`` first and is renamed when complete, so an interrupted run never leaves a
     truncated file under the real name."""
-    root, bucket, dest, key, workers, items, part = args
+    root, bucket, dest, key, workers, items, part = args[:7]
+    force = args[7] if len(args) > 7 else False
     root_p = Path(root)
     b = _client(key, pool=workers).bucket(bucket)
     got, nbytes, failed, t0 = 0, 0, [], time.time()
@@ -216,7 +217,7 @@ def _download_part(args):
     def one(item):
         name, size = item
         target = root_p / name[len(dest) + 1:]
-        if target.exists() and target.stat().st_size == size:
+        if not force and target.exists() and target.stat().st_size == size:
             return item, 0, None
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(target.name + ".part")
@@ -245,7 +246,7 @@ def _download_part(args):
 
 
 def download(root: str, bucket: str, prefix: str, key: str | None = None, workers: int = 32,
-             processes: int = 8) -> dict:
+             processes: int = 8, changed_since: float | None = None, exclude=()) -> dict:
     """Download the uploaded folder into ``root`` (its parent is created), then recreate the links.
 
     Like ``upload`` the work is spread over processes: one process with 64 threads reached only ~44 MB/s on the
@@ -255,11 +256,19 @@ def download(root: str, bucket: str, prefix: str, key: str | None = None, worker
     root_p = Path(root)
     dest = f"{prefix.strip('/')}/{root_p.name}"
     b = _client(key, pool=workers).bucket(bucket)
-    items = [(bl.name, bl.size) for bl in b.list_blobs(prefix=dest + "/")]
+    blobs = list(b.list_blobs(prefix=dest + "/"))
+    if changed_since is not None:
+        # pull a colleague's update (5 Oct): only objects written to the bucket after the moment both sides were in
+        # step, and ALL of them, also those whose size did not change (a re-made raster, an edited source file)
+        blobs = [bl for bl in blobs if bl.updated.timestamp() > changed_since]
+    # paths this side changed too are left for a by-hand merge (``exclude``: relative paths)
+    blobs = [bl for bl in blobs if bl.name[len(dest) + 1:] not in set(exclude)]
+    items = [(bl.name, bl.size) for bl in blobs]
     print(f"{len(items)} objects, {sum(s for _, s in items) / 1e9:.1f} GB listed", flush=True)
     got, failed = 0, []
     with ProcessPoolExecutor(processes) as pp:
-        for g, f in pp.map(_download_part, [(str(root_p), bucket, dest, key, workers, part, i)
+        for g, f in pp.map(_download_part, [(str(root_p), bucket, dest, key, workers, part, i,
+                                             changed_since is not None)
                                             for i, part in enumerate(_deal(items, processes))]):
             got += g
             failed += f

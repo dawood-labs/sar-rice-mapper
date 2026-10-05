@@ -444,3 +444,62 @@ def test_young_needs_water_only_when_switched_on(monkeypatch):
     assert cr.classify_relative(f).tolist() == ["young rice", "young rice"]
     monkeypatch.setattr(cr, "YOUNG_NEEDS_WATER", True)
     assert cr.classify_relative(f).tolist() == ["rice standing direct seeded", "young rice"]
+
+
+def test_lone_low_newest_view_is_not_a_harvest_only_when_switched_on(monkeypatch):
+    # aoi33 pixel 51135 (5 Oct): standing and clear on 26 Sep, cloudy 28 Sep view at NDVI 0.17, VH at its season top
+    base = dict(radar_rise_days=133, vh_pos_end=0.98, vh_slope_end=-0.03, vh_accel_end=0.14, vh_step_end=0.05,
+                vh_rise_recent=0.27, vv_pos_end=0.76, vv_slope_end=-0.22, vv_accel_end=-0.63, vv_step_end=-0.43,
+                vv_rise_recent=0.25, water_depth=-0.88, ndvi_low_peak=0.09, ndvi_low_day=20582, ndvi_left=0.16,
+                last_view_water=0, dry_water_share=0, ndvi_slope_end=-0.84, ndvi_rise_seen=85, ndvi_rise_days=60,
+                days_since_peak=50, days_at_top=60, days_off_top=0, crop_age=145, water_spell=0, view_gap_days=2,
+                ndvi_left_prev=1.0)
+    f = pd.DataFrame([base, dict(base, view_gap_days=20),       # a low view long after the last green one: a cut
+                      dict(base, vh_pos_end=0.5)])              # radar left its top too: a cut
+    assert cr.classify_relative(f).tolist() == ["rice harvested"] * 3
+    monkeypatch.setattr(cr, "LONE_LOW_VIEW_DAYS", 5)
+    assert cr.classify_relative(f).tolist() == ["rice standing direct seeded", "rice harvested", "rice harvested"]
+    assert cr.AOI_OVERRIDES[33]["LONE_LOW_VIEW_DAYS"] == 5 and all(
+        "LONE_LOW_VIEW_DAYS" not in cr.AOI_OVERRIDES.get(a, {}) for a in cr.LOCKED_AOIS)
+
+
+def test_fast_green_up_is_rice_when_other_vegetation_by_speed_is_off(monkeypatch):
+    # aoi33 pixel 41218 (user 5 Oct: rice): NDVI up in 30 days, left its top 80 days ago, 65 % of its green left
+    f = pd.DataFrame([dict(radar_rise_days=133, vh_pos_end=0.76, vh_slope_end=0.18, vh_step_end=0.08,
+                           vh_rise_recent=0.18, vv_pos_end=0.6, vv_step_end=0.08, vv_rise_recent=0.3, water_depth=-6.48,
+                           ndvi_low_peak=0.12, ndvi_low_day=20592, ndvi_left=0.65, view_gap_days=5, ndvi_left_prev=0.79,
+                           last_view_water=0, dry_water_share=0, ndvi_slope_end=-0.14, ndvi_rise_seen=25,
+                           ndvi_rise_days=30, days_since_peak=90, days_at_top=100, days_off_top=80, crop_age=135,
+                           water_spell=0)])
+    assert cr.classify_relative(f).tolist() == ["other vegetation"]
+    monkeypatch.setattr(cr, "FAST_RISE_OTHER_VEG", False)
+    assert cr.classify_relative(f).tolist() == ["rice standing direct seeded"]
+    assert cr.AOI_OVERRIDES[33]["FAST_RISE_OTHER_VEG"] is False and all(
+        "FAST_RISE_OTHER_VEG" not in cr.AOI_OVERRIDES.get(a, {}) for a in cr.LOCKED_AOIS)
+
+
+def test_fast_green_up_held_at_its_top_is_grown_when_other_vegetation_by_speed_is_off(monkeypatch):
+    # aoi33 pixel 43566 (user 5 Oct: direct seeded standing): up in 30 days, held 105 days, VH dipped to 0.54 at the end
+    f = pd.DataFrame([dict(radar_rise_days=133, vh_pos_end=0.54, vh_slope_end=-0.35, vh_step_end=0.13,
+                           vh_rise_recent=0.07, vv_pos_end=0.54, vv_step_end=-0.54, vv_rise_recent=0.66,
+                           water_depth=-0.84, ndvi_low_peak=0.16, ndvi_low_day=20592, ndvi_left=0.82, view_gap_days=5,
+                           ndvi_left_prev=1.0, last_view_water=0, dry_water_share=0, ndvi_slope_end=-0.18,
+                           ndvi_rise_seen=25, ndvi_rise_days=30, days_since_peak=95, days_at_top=105, days_off_top=5,
+                           crop_age=135, water_spell=0)])
+    monkeypatch.setattr(cr, "FAST_RISE_OTHER_VEG", True)
+    assert cr.classify_relative(f).tolist() == ["flooded / bare"]
+    monkeypatch.setattr(cr, "FAST_RISE_OTHER_VEG", False)
+    assert cr.classify_relative(f).tolist() == ["rice standing direct seeded"]
+
+
+def test_aoi33_lone_low_view_needs_vh_out_of_its_low_part_only():
+    # aoi33 pixel 9412 (user 5 Oct: standing on 26 Sep): cloudy 28 Sep view 2 days after a held one, VH at 0.69
+    f = pd.DataFrame([dict(radar_rise_days=111.5, vh_pos_end=0.69, vh_slope_end=-0.31, vh_step_end=0.0,
+                           vh_rise_recent=0.07, vv_pos_end=0.22, vv_step_end=-0.08, vv_rise_recent=0.33, water_depth=1.0,
+                           ndvi_low_peak=0.02, ndvi_low_day=20582, ndvi_left=0.29, view_gap_days=2, ndvi_left_prev=1.0,
+                           last_view_water=0, dry_water_share=0, ndvi_slope_end=-0.71, ndvi_rise_seen=75,
+                           ndvi_rise_days=70, days_since_peak=50, days_at_top=65, days_off_top=0, crop_age=145,
+                           water_spell=0)])
+    assert cr.classify_relative(f).tolist() == ["rice harvested"]
+    with cr.rules_for(33):
+        assert cr.classify_relative(f).tolist() == ["rice standing direct seeded"]
