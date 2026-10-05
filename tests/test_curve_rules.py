@@ -460,7 +460,7 @@ def test_aoi63_starts_as_a_copy_of_the_aoi39_rules_with_the_new_aoi_switches():
            "GREEN_VIEW_NOT_FLOODED": True}                                          # 36796 / 23348)
     assert cr.AOI_OVERRIDES[63] == dict(cr.AOI_OVERRIDES[39], **own)
     assert cr.AOI_OVERRIDES[39]["HARVEST_NOT_IF_RADAR_RISING"] and "CANOPY_NOT_FLOODED" not in cr.AOI_OVERRIDES[39]
-    assert all(cr.AOI_OVERRIDES[63][k] == v for k, v in cr.NEW_AOI_SWITCHES.items())
+    assert cr.AOI_OVERRIDES[63]["RADAR_DECIDES_WITHOUT_OPTICAL"] and "TONE_AND_CURVE" not in cr.AOI_OVERRIDES[63]
     assert 63 in cr.LOCKED_AOIS                  # locked 5 Oct (user)
 
 
@@ -679,3 +679,51 @@ def test_a_pixel_still_empty_on_the_latest_image_is_not_rice_when_switched_on(mo
     before = cr.classify_relative(f).tolist()
     monkeypatch.setattr(cr, "NEWEST_EMPTY_NOT_RICE", True)
     assert cr.classify_relative(f).tolist() == [before[0], "flooded / bare", before[2]]
+
+
+def test_change_since_reads_the_radar_after_the_view():
+    pday = np.array([0, 12, 24, 36])
+    pos = np.array([[0.9, 0.2], [0.8, np.nan], [0.2, 0.3], [0.1, 0.9]])
+    ch = cr.change_since(pday, pos, np.array([12.0, 12.0]))
+    # pixel 0: 0.8 at the view, 0.15 on its last two passes -> fell; pixel 1: NaN on the view pass -> the pass
+    # before (0.2), 0.6 after -> rose
+    assert np.allclose(ch, [0.15 - 0.8, 0.6 - 0.2])
+    assert np.isnan(cr.change_since(pday, pos, np.array([40.0, np.nan]))).all()   # no pass after / no view
+
+
+def test_universal_tone_and_curve_rules(monkeypatch):
+    """User, 5 Oct: a class must fit the latest clear view's tone; the newer news wins; harvested needs VV and VH."""
+    base = dict(radar_rise_days=60.0, vh_pos_end=0.8, vh_slope_end=0.0, vh_step_end=0.0, vh_rise_recent=0.1,
+                vv_step_end=0.0, vv_rise_recent=0.1, vh_fall_recent=0.1, vv_fall_recent=0.1, water_depth=4.0,
+                ndvi_low_peak=0.1, ndvi_low_day=20600.0, days_since_ndvi_low=90.0, ndvi_left=0.9, ndvi_left_year=0.9,
+                last_view_water=0, dry_water_share=0, ndvi_slope_end=0.0, ndvi_rise_seen=60.0, ndvi_rise_days=60.0,
+                days_since_peak=10.0, days_at_top=30.0, days_off_top=5.0, crop_age=90.0, water_spell=1,
+                views_in_water=0, water_views_in_water=0, rise_unseen=0, crop_unseen=0, view_day=20700.0,
+                vh_since_view=0.0, vv_since_view=0.0)
+    f = pd.DataFrame([
+        dict(base),                                                          # green, standing: unchanged
+        dict(base, vh_since_view=-0.7, vv_since_view=-0.6),                  # green 13 Sep, both fell after: harvested
+        dict(base, vh_since_view=-0.7, vv_since_view=0.1),                   # only VH fell: still standing
+        dict(base, ndvi_left_year=0.1, ndvi_left=0.1),                       # empty now, no radar move: not rice
+        dict(base, ndvi_left_year=0.1, ndvi_left=0.1, vh_since_view=0.6, vv_since_view=0.8),  # empty, both rose: crop
+        dict(base, last_view_water=1, ndvi_left_year=0.0, ndvi_left=0.0),   # water now: not standing rice
+        dict(base, view_day=np.nan),                                         # no clear view: the curve decides
+    ])
+    out = ["rice standing transplanted"] * 7
+    monkeypatch.setattr(cr, "TONE_AND_CURVE", True)
+    assert cr.tone_and_curve(f, out) == [
+        "rice standing transplanted", "rice harvested", "rice standing transplanted", "flooded / bare",
+        "rice standing transplanted", "flooded / bare", "rice standing transplanted"]
+    # harvested needs both polarisations
+    g = pd.DataFrame([dict(base, vh_fall_recent=0.8, vv_fall_recent=0.1, view_day=np.nan),
+                      dict(base, vh_fall_recent=0.8, vv_fall_recent=0.7, view_day=np.nan)])
+    monkeypatch.setattr(cr, "HARVEST_NEEDS_BOTH_POLS", True)
+    assert cr.tone_and_curve(g, ["rice harvested"] * 2) == ["rice standing transplanted", "rice harvested"]
+
+
+def test_nearest_locked_orders_the_locked_aois_by_distance():
+    index = pd.DataFrame({"aoi": [1, 2, 3, 4], "lon": [96.0, 96.1, 97.0, 96.0], "lat": [17.0, 17.0, 17.0, 18.0],
+                          "acres": [10.0, 20.0, 30.0, 40.0]})
+    t = cr.nearest_locked(1, index, locked=[2, 3, 4])
+    assert t.locked_aoi.tolist() == [2, 3, 4]                 # ~10.6 km, ~106 km, ~111 km
+    assert 10 < t.km[0] < 11.5
