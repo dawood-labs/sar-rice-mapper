@@ -85,6 +85,22 @@ WATER_DEPTH_K = 3.0
 #: transplanted rice, young or standing by its age (a dense canopy lowers the radar too: aoi39 pixel 11226). Off
 #: by default (the locked AOIs keep their results); on for aoi39 and, by the user's decision, for every new AOI.
 RADAR_DECIDES_WITHOUT_OPTICAL = False
+#: No "rice harvested" while the radar is at the top of its own range and still rising (VV and VH both up half their
+#: range recently, VH not in its lower part): a cut field's radar does not climb to its season top. Such a crop is
+#: standing: transplanted when a water spell or deep water (``WATER_DEPTH_K``) was seen, else direct seeded. Why (aoi39,
+#: user 5 Oct, pixels 37571 / 37570 / 39894: one hazy-looking 18 Sep view at NDVI 0.35 after 0.66 on 13 Sep, measured
+#: against the April summer crop's peak, read as harvested while VH was at its season top). Off for the locked AOIs.
+HARVEST_NOT_IF_RADAR_RISING = False
+#: Young rice only when the VH has kept climbing for at least this many days since its last low (the water or the cut);
+#: a shorter rise is a field still at water level -> flooded / bare (aoi39, user 5 Oct, pixel 43450: cut, water from
+#: mid July, VH up on the last passes only, 12 days: flooded; "young rice needs VH rising for about 40-50 days"; the
+#: user relabelled 8391 / 15496 / 25885, 12-24 days, as flooded too). None = not asked (the locked AOIs).
+YOUNG_MIN_RISE_DAYS = None
+#: Young rice only on a field that held water at some point (radar below its own dry-season level, ``water_depth`` > 0):
+#: young rice comes up after the water or the cut; a field that never held water and is green is standing direct-seeded
+#: rice (aoi39, user 5 Oct, pixels 29972 / 26437 / 13545: radar never below its dry level, NDVI 0.75-0.92 on 13 Sep, the
+#: rule said young). Off for the locked AOIs.
+YOUNG_NEEDS_WATER = False
 OPTICAL_VIEWS_MIN = 2
 DRY_SEASON_FROM = "2026-03-01"
 #: Tree / orchard only when the radar saw NO water spell (two wet passes while the crop was small): trees do not stand in
@@ -556,6 +572,8 @@ def own_range_features(aoi: int, pixels, series_root: str | None = None,
         pday = dd[use].to_numpy().astype("datetime64[D]").astype("int64")
         ilow = len(ph) - 1 - np.argmax(low_pass[::-1], axis=0)
         acc.setdefault("_radar_rise_start", []).append(np.where(low_pass.any(axis=0), pday[ilow], np.nan))
+        # days the VH has been climbing: from that last low pass to this track's newest pass (YOUNG_MIN_RISE_DAYS)
+        acc.setdefault("radar_rise_days", []).append(np.where(low_pass.any(axis=0), pday[-1] - pday[ilow], np.nan))
         # the last pass with VV AND VH both at the bottom of their range before that top: still water level. In a long
         # flood no pass after the first weeks is a FALL (the passes before are water too), so the end of the water is
         # read from the level, not from the wet-pass test (aoi116 pixel 186792: water to 1 Sep, "wet" only to 5 Aug)
@@ -870,11 +888,36 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
             # radar has already climbed out of the low part of its range (fast-growing transplants, 63530)
             out.append("young rice")
         else:
-            if r.ndvi_left < HARVEST_LEFT:
+            rising_top = (HARVEST_NOT_IF_RADAR_RISING and radar_rose and r.vh_pos_end >= LOW_NOW)
+            if r.ndvi_left < HARVEST_LEFT and rising_top:
+                deep = getattr(r, "water_spell", 0) == 1 or getattr(r, "water_depth", 0) >= WATER_DEPTH_K
+                out.append("rice standing transplanted" if deep else "rice standing direct seeded")
+            elif r.ndvi_left < HARVEST_LEFT:
                 out.append("rice harvested")
             else:
                 out.append("rice standing transplanted" if getattr(r, "water_spell", 0) == 1 else
                            "rice standing direct seeded")
+    if YOUNG_NEEDS_WATER and "water_depth" in f:
+        depth = pd.to_numeric(f["water_depth"], errors="coerce").to_numpy()
+        out = ["rice standing direct seeded" if c == "young rice" and np.isfinite(d) and d <= 0 else c
+               for c, d in zip(out, depth)]
+    if YOUNG_MIN_RISE_DAYS is not None and "radar_rise_days" in f:
+        # a short radar rise: flooded / bare where the field still looks like water (radar low now, or the newest clear
+        # view shows water); a green field whose radar never went to water level keeps a crop: standing rice
+        # (aoi39 pixel 29260: no radar water dip, NDVI 0.84 on 13 Sep -> transplanted per the user, not flooded)
+        fixed = []
+        for c, r in zip(out, f.itertuples(index=False)):
+            d = pd.to_numeric(getattr(r, "radar_rise_days", np.nan), errors="coerce")
+            if c == "young rice" and np.isfinite(d) and d < YOUNG_MIN_RISE_DAYS:
+                deep = getattr(r, "water_spell", 0) == 1 or getattr(r, "water_depth", 0) >= WATER_DEPTH_K
+                # radar low counts as water only where the field ever went below its own dry-season level (8391: yes,
+                # flooded; 29260: never, water_depth -1.1, its radar low now is a dense canopy -> a crop)
+                watery = getattr(r, "last_view_water", 0) == 1 or (
+                    r.vh_pos_end < LOW_NOW and getattr(r, "water_depth", 0) > 0)
+                c = "flooded / bare" if watery else (
+                    "rice standing transplanted" if deep else "rice standing direct seeded")
+            fixed.append(c)
+        out = fixed
     return pd.Series(out, index=f.index)
 
 
@@ -882,7 +925,7 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
 #: AOIs whose result the user accepted (user, 2 Oct: "aoi160 is done and locked"). Their outputs in
 #: ``rice_fresh/aoi<N>/`` are never rewritten (``force=True`` to override on the user's word); the frozen copy, the
 #: code and the labels at lock time are in ``rice_fresh/locked/aoi<N>/`` with checksums (MANIFEST.json).
-LOCKED_AOIS = {160, 28, 72, 116}
+LOCKED_AOIS = {160, 28, 72, 116, 39}
 #: Rule changes for ONE AOI (user, 2 Oct: "try the aoi160 rules first; if they do not work, new rules only for that
 #: AOI, not 160"): ``{aoi: {"NAME": value, "field_polygons.NAME": value}}``. The module constants are the aoi160 rules;
 #: an AOI without an entry runs exactly those.
@@ -918,8 +961,13 @@ AOI_OVERRIDES[39] = {"YOUNG_WHILE_RADAR_LOW": True,   # pixel 8391: watered late
                      "SECOND_CROP_BY_RADAR": True,    # pixel 24716: deep water after an earlier crop, radar up now ->
 #                                                        a new transplanted crop (not tree / other vegetation)
                      "RADAR_DECIDES_WITHOUT_OPTICAL": True,  # pixel 21618: the optical never saw the water -> radar alone
-                     "YOUNG_AFTER_LAST_WATER": True}  # pixel 25885: last clear view water (13 Sep), VV and VH up since ->
+                     "YOUNG_AFTER_LAST_WATER": True,  # pixel 25885: last clear view water (13 Sep), VV and VH up since ->
 #                                                        young (the aoi72 rule of 42109; user accepted young 24 -> 56 ac)
+                     "HARVEST_NOT_IF_RADAR_RISING": True,  # 37570 / 37571 / 39894 / 39895: radar at its top and rising
+                     "YOUNG_MIN_RISE_DAYS": 40,       # 43450 (+ 8391 / 15496 / 25885 relabelled): VH must have risen
+#                                                        for 40 days, else flooded / bare
+                     "YOUNG_NEEDS_WATER": True,       # 29972 / 26437 / 13545: never held water, green -> direct seeded
+                     "SIEVE_ACRES": 0.15}             # as aoi28 / aoi72 / aoi116 (0.5 erases small young-rice patches)
 #: Every NEW AOI (after aoi39) starts with RADAR_DECIDES_WITHOUT_OPTICAL on (user, 3 Oct: "from now on, wherever there is
 #: no NDVI, the radar alone decides"): put it in that AOI's AOI_OVERRIDES entry together with the chosen rule set.
 NEW_AOI_SWITCHES = {"RADAR_DECIDES_WITHOUT_OPTICAL": True}

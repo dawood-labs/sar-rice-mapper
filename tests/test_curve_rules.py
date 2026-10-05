@@ -398,3 +398,49 @@ def test_radar_only_keeps_a_field_still_under_water_flooded(monkeypatch):
     monkeypatch.setattr(cr, "RADAR_DECIDES_WITHOUT_OPTICAL", True)
     assert cr.classify_relative(f).tolist() == ["flooded / bare"]
 
+
+
+def test_no_harvest_while_the_radar_climbs_to_its_top_only_when_switched_on(monkeypatch):
+    # aoi39 pixel 39894: NDVI 'left' 0.47 after a hazy late view, radar at its season top and rising, deep water earlier
+    f = pd.DataFrame([dict(ndvi_low_peak=0.03, vh_pos_end=1.05, vh_slope_end=0.5, vv_step_end=0.1, vh_rise_recent=1.33,
+                           vv_rise_recent=1.24, ndvi_left=0.47, ndvi_slope_end=-0.5, days_since_peak=30, days_at_top=40,
+                           days_off_top=0, ndvi_rise_days=65, crop_age=100, water_spell=0, last_view_water=0,
+                           dry_water_share=0, water_depth=3.66, views_in_water=float("nan"), water_views_in_water=float("nan"))])
+    assert cr.classify_relative(f).tolist() == ["rice harvested"]
+    monkeypatch.setattr(cr, "HARVEST_NOT_IF_RADAR_RISING", True)
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted"]
+
+
+def test_young_needs_a_long_radar_rise_only_when_switched_on(monkeypatch):
+    # aoi39 pixel 43450: last view water, VV and VH up on the last passes only (12 days) -> young by the aoi72 rule
+    base = dict(ndvi_low_peak=-1.0, vh_pos_end=0.46, vh_slope_end=0.6, vv_step_end=0.4, vh_rise_recent=0.8,
+                vv_rise_recent=0.7, ndvi_left=0.0, ndvi_slope_end=-0.5, days_since_peak=80, days_at_top=90,
+                days_off_top=60, ndvi_rise_days=40, crop_age=52, water_spell=1, last_view_water=1, radar_rise_days=12)
+    f = pd.DataFrame([base, dict(base, radar_rise_days=45)])
+    monkeypatch.setattr(cr, "YOUNG_AFTER_LAST_WATER", True)
+    assert cr.classify_relative(f).tolist() == ["young rice", "young rice"]
+    monkeypatch.setattr(cr, "YOUNG_MIN_RISE_DAYS", 40)
+    assert cr.classify_relative(f).tolist() == ["flooded / bare", "young rice"]
+    assert 'radar_rise_days' in __import__("inspect").getsource(cr.own_range_features)
+
+
+def test_short_rise_young_becomes_flooded_only_where_the_field_ever_held_water(monkeypatch):
+    base = dict(ndvi_low_peak=0.23, vh_pos_end=0.18, vh_slope_end=0.6, vv_step_end=0.4, vh_rise_recent=0.2,
+                vv_rise_recent=0.43, ndvi_left=1.0, ndvi_slope_end=0.5, days_since_peak=0, days_at_top=0, days_off_top=0,
+                ndvi_rise_days=120, crop_age=30, water_spell=0, last_view_water=0, radar_rise_days=30)
+    f = pd.DataFrame([dict(base, water_depth=2.0),        # 8391: went below its dry level -> flooded
+                      dict(base, water_depth=-1.1)])      # 29260: never did, dense canopy -> a crop
+    monkeypatch.setattr(cr, "YOUNG_MIN_RISE_DAYS", 40)
+    out = cr.classify_relative(f).tolist()
+    assert out[0] == "flooded / bare" and out[1].startswith("rice standing")
+
+
+def test_young_needs_water_only_when_switched_on(monkeypatch):
+    # aoi39 pixel 13545: never below its dry radar level, young by its NDVI age (45 days)
+    base = dict(ndvi_low_peak=0.13, vh_pos_end=0.68, vh_slope_end=0.1, vv_step_end=0.0, vh_rise_recent=0.3,
+                vv_rise_recent=0.2, ndvi_left=1.0, ndvi_slope_end=0.5, days_since_peak=15, days_at_top=15, days_off_top=0,
+                ndvi_rise_days=30, ndvi_rise_seen=40, crop_age=45, water_spell=0, last_view_water=0)
+    f = pd.DataFrame([dict(base, water_depth=-2.7), dict(base, water_depth=4.0)])
+    assert cr.classify_relative(f).tolist() == ["young rice", "young rice"]
+    monkeypatch.setattr(cr, "YOUNG_NEEDS_WATER", True)
+    assert cr.classify_relative(f).tolist() == ["rice standing direct seeded", "young rice"]
