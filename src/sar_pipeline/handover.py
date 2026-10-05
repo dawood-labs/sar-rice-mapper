@@ -106,9 +106,27 @@ def _existing(bucket, prefix: str) -> dict:
     return {b.name: b.size for b in bucket.list_blobs(prefix=prefix + "/")}
 
 
+def to_upload(root, files, have: dict, dest: str, changed_since: float | None = None) -> list:
+    """The (path, size) items to send: not in the bucket with the same size, or (``changed_since``, epoch seconds)
+    modified on disk after that moment.
+
+    Why the time (5 Oct 2026, updating the 2 Oct handover in place): a file rewritten with the same number of bytes (a
+    class raster re-made, a pin file switched) has the size of the old copy, so the size test alone would keep the
+    old version in the bucket. The moment to pass is when the folder was last in step with the bucket (for a restored
+    folder: when its download finished; every file it downloaded carries that time)."""
+    root_p = Path(root)
+    out = []
+    for rel, size in files:
+        if have.get(f"{dest}/{rel}") != size:
+            out.append((rel, size))
+        elif changed_since is not None and os.lstat(root_p / rel).st_mtime > changed_since:
+            out.append((rel, size))
+    return out
+
+
 def upload(root: str, bucket: str, prefix: str, key: str | None = None, workers: int = 32,
-           processes: int = 8) -> dict:
-    """Upload ``root`` (see the module docstring); returns counts and bytes."""
+           processes: int = 8, changed_since: float | None = None) -> dict:
+    """Upload ``root`` (see the module docstring and :func:`to_upload`); returns counts and bytes."""
     root_p = Path(root).resolve()
     dest = f"{prefix.strip('/')}/{root_p.name}"
     client = _client(key)
@@ -130,7 +148,7 @@ def upload(root: str, bucket: str, prefix: str, key: str | None = None, workers:
         w.writerows(files_listed)
     files, links = scan(root_p)
     have = _existing(b, dest)
-    todo = [(r, s) for r, s in files if have.get(f"{dest}/{r}") != s]
+    todo = to_upload(root_p, files, have, dest, changed_since)
     total = sum(s for _, s in todo)
     print(f"{len(files)} files ({sum(s for _, s in files) / 1e9:.1f} GB), {len(links)} links; "
           f"{len(files) - len(todo)} already there; uploading {len(todo)} ({total / 1e9:.1f} GB)", flush=True)
@@ -258,10 +276,18 @@ def main(argv=None) -> int:
     p.add_argument("--key", help="service-account key file (default: application default credentials)")
     p.add_argument("--workers", type=int, default=32, help="threads per process (upload and download)")
     p.add_argument("--processes", type=int, default=8)
+    p.add_argument("--changed-since", help="upload: also send files modified after this moment (ISO time, UTC), "
+                   "even when the bucket holds a copy of the same size")
     a = p.parse_args(argv)
     key = a.key if a.key and Path(a.key).exists() else None
     if a.step == "upload":
-        print(upload(a.root, a.bucket, a.prefix, key, a.workers, a.processes))
+        since = None
+        if a.changed_since:
+            import pandas as pd
+
+            since = pd.Timestamp(a.changed_since, tz="UTC").timestamp() if pd.Timestamp(a.changed_since).tzinfo is None \
+                else pd.Timestamp(a.changed_since).timestamp()
+        print(upload(a.root, a.bucket, a.prefix, key, a.workers, a.processes, since))
     elif a.step == "verify":
         print(verify(a.root, a.bucket, a.prefix, key))
     elif a.step == "download":

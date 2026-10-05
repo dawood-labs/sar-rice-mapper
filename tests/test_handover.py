@@ -27,3 +27,20 @@ def test_deal_spreads_big_and_small_files_evenly_over_processes():
     assert sorted(it for p in parts for it in p) == sorted(items)
     assert [p[0][1] for p in parts] == [100, 90]
     assert abs(len(parts[0]) - len(parts[1])) <= 1
+
+
+def test_to_upload_sends_new_resized_and_recently_changed_files(tmp_path):
+    import os
+    import time
+
+    for name in ("same.txt", "resized.txt", "rewritten.txt", "new.txt"):
+        (tmp_path / name).write_text("abcd")
+    old = time.time() - 3600
+    for name in ("same.txt", "resized.txt", "rewritten.txt", "new.txt"):
+        os.utime(tmp_path / name, (old, old))
+    cut = time.time() - 60
+    os.utime(tmp_path / "rewritten.txt", None)                       # touched after the cut, same size
+    files = [("same.txt", 4), ("resized.txt", 4), ("rewritten.txt", 4), ("new.txt", 4)]
+    have = {"d/same.txt": 4, "d/resized.txt": 3, "d/rewritten.txt": 4}
+    assert [r for r, _ in h.to_upload(tmp_path, files, have, "d")] == ["resized.txt", "new.txt"]
+    assert [r for r, _ in h.to_upload(tmp_path, files, have, "d", cut)] == ["resized.txt", "rewritten.txt", "new.txt"]

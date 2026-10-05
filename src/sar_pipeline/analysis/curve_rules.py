@@ -917,7 +917,9 @@ AOI_OVERRIDES[39] = {"YOUNG_WHILE_RADAR_LOW": True,   # pixel 8391: watered late
                      "POND_IF_DRY_WATER": True,       # pixel 30425: water on the March-April views -> fish pond
                      "SECOND_CROP_BY_RADAR": True,    # pixel 24716: deep water after an earlier crop, radar up now ->
 #                                                        a new transplanted crop (not tree / other vegetation)
-                     "RADAR_DECIDES_WITHOUT_OPTICAL": True}  # pixel 21618: the optical never saw the water -> radar alone
+                     "RADAR_DECIDES_WITHOUT_OPTICAL": True,  # pixel 21618: the optical never saw the water -> radar alone
+                     "YOUNG_AFTER_LAST_WATER": True}  # pixel 25885: last clear view water (13 Sep), VV and VH up since ->
+#                                                        young (the aoi72 rule of 42109; user accepted young 24 -> 56 ac)
 #: Every NEW AOI (after aoi39) starts with RADAR_DECIDES_WITHOUT_OPTICAL on (user, 3 Oct: "from now on, wherever there is
 #: no NDVI, the radar alone decides"): put it in that AOI's AOI_OVERRIDES entry together with the chosen rule set.
 NEW_AOI_SWITCHES = {"RADAR_DECIDES_WITHOUT_OPTICAL": True}
