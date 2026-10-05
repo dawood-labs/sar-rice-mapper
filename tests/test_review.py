@@ -100,3 +100,19 @@ def test_annotate_rule_writes_the_live_class_and_the_features_on_the_curve():
     assert "rule now: young rice" in fig._suptitle.get_text() and "your label" in fig._suptitle.get_text()
     assert any("water while crop small" in t.get_text() for t in fig.axes[0].texts)
     plt.close(fig)
+
+
+def test_a_long_rule_set_is_wrapped_so_the_curve_figure_keeps_its_width():
+    """User, 5 Oct (aoi63): one long 'rules used' line made the saved figure very wide and the curves tiny."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from sar_pipeline import qgis_review as q
+
+    fig, _ = plt.subplots(2, 1)
+    q.annotate_rule(fig, {"rule_class": "young rice", "rule_set": ", ".join(f"SWITCH_{i}=True" for i in range(40))})
+    lines = fig._suptitle.get_text().split("\n")
+    assert len(lines) > 3 and max(map(len, lines)) <= q.TITLE_WRAP
+    plt.close(fig)

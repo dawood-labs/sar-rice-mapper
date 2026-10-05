@@ -21,6 +21,7 @@ The GDAL command-line tools do the mosaicking (``gdalbuildvrt``, ``gdal_translat
 from __future__ import annotations
 
 import subprocess
+import textwrap
 from pathlib import Path
 
 import pandas as pd
@@ -318,6 +319,10 @@ def _sowing(rule: dict, fresh: dict):
     return d if d is not None and not pd.isna(d) else fresh.get("sowing_date")
 
 
+#: Characters per title line on the curve figure (the figure is ~14 inches wide at fontsize 11).
+TITLE_WRAP = 130
+
+
 def annotate_rule(fig, rule: dict) -> None:
     """Writes the rule's class (and the user's label) in the curve figure's title and the features in a box."""
     if fig is None or not rule:
@@ -328,9 +333,11 @@ def annotate_rule(fig, rule: dict) -> None:
     if rule.get("your_labels"):
         head += "   |   your label: " + "; ".join(rule["your_labels"].values())
     if rule.get("rule_set"):
-        head += f"\nrules used: {rule['rule_set']}"
+        # wrapped: an AOI with many switches made one very long line, the saved figure became that wide and the
+        # curves shrank to a strip in the notebook (user, 5 Oct, aoi63)
+        head += "\n" + textwrap.fill(f"rules used: {rule['rule_set']}", TITLE_WRAP)
     if rule.get("inputs"):
-        head += f"\ninputs: {rule['inputs']}"
+        head += "\n" + textwrap.fill(f"inputs: {rule['inputs']}", TITLE_WRAP)
     fig.suptitle(head, fontsize=11, fontweight="bold", y=0.995 if "\n" not in head else 1.0 + 0.025 * head.count("\n"))
     lines = [f"{RULE_FEATURE_NAMES[k]}: {rule['rule_features'][k]}" for k in RULE_FEATURE_NAMES
              if k in rule.get("rule_features", {})]
