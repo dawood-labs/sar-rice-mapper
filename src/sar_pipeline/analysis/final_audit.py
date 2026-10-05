@@ -121,9 +121,14 @@ def main(argv=None) -> int:
     import argparse
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.final_audit")
-    p.add_argument("step", choices=["acquisition", "bad-passes", "screen", "missed-rice"])
+    p.add_argument("step", choices=["acquisition", "bad-passes", "screen", "missed-rice", "new-passes"])
     p.add_argument("--ids", nargs="*", type=int, default=[])
+    p.add_argument("--run", help="new-passes: the newer radar run whose new passes are judged and appended")
     args = p.parse_args(argv)
+    if args.step == "new-passes":
+        t = add_new_passes(args.ids, args.run)
+        print(t.to_string(index=False) if len(t) else "no new passes")
+        return 0
     if args.step == "screen":
         t = screen_all()
         b = t[t["bad"]]
@@ -251,6 +256,35 @@ def screen_all(audit_dir=f"{SRC}/report/final_audit", out_name: str = "bad_passe
     return t
 
 
+def add_new_passes(aoi_ids, run_id: str, audit_dir=f"{SRC}/report/final_audit",
+                   out_name: str = "bad_passes_all.csv") -> pd.DataFrame:
+    """Judge only the passes of radar run ``run_id`` that the artefact list does not hold yet, and APPEND them to it.
+
+    Why (2 Oct 2026, newer passes for 7 AOIs): :func:`screen_all` rebuilds the whole list from every AOI's table, and in
+    a newer run the last passes before the new ones read slightly differently (the speckle filter gains a later
+    neighbour) and the cross-AOI screen sees another set of AOIs, so verdicts on OLD passes could flip and change the
+    maps of accepted (locked) AOIs without anyone noticing. Old rows are kept exactly; the new rows are screened among
+    themselves (``screen_passes``: a track-wide verdict needs ``CROSS_AOI_MIN`` AOIs of the new set). Returns the new
+    rows; the previous list is kept as ``<out_name>_prev``."""
+    audit = Path(audit_dir)
+    out = audit / out_name
+    old = pd.read_csv(out)
+    old_keys = set(zip(old["aoi"], old["track"], old["pol"], pd.to_datetime(old["date"]).dt.strftime("%Y-%m-%d")))
+    parts = []
+    for a in aoi_ids:
+        t = bad_passes(int(a), run_id=run_id)
+        t["date"] = pd.to_datetime(t["date"]).dt.strftime("%Y-%m-%d")
+        keep = [(r.aoi, r.track, r.pol, r.date) not in old_keys for r in t.itertuples()]
+        parts.append(t[keep])
+    new = pd.concat(parts, ignore_index=True)
+    if new.empty:
+        return new
+    new = screen_passes(new)
+    out.replace(audit / out_name.replace(".csv", "_prev.csv"))
+    pd.concat([old, new[old.columns]], ignore_index=True).to_csv(out, index=False)
+    return new
+
+
 def stable_pixels(aoi_id: int, min_px: int = 20) -> np.ndarray:
     """Pixels that should not change within a week: evergreen all year (fitted NDVI >= 0.5 in 90 % of
     windows) or class 5 (never bare) of the final map, inside the AOI."""
@@ -271,13 +305,14 @@ def stable_pixels(aoi_id: int, min_px: int = 20) -> np.ndarray:
     return pix if len(pix) >= min_px else np.array([], dtype=int)
 
 
-def bad_passes(aoi_id: int, window: int = 5, limit: float = BAD_PASS_DB) -> pd.DataFrame:
+def bad_passes(aoi_id: int, window: int = 5, limit: float = BAD_PASS_DB, run_id: str | None = None) -> pd.DataFrame:
     """Every pass of every track: the jump of the stable ground's median against the 2 passes each side.
-    ``bad`` where the jump is ``limit`` dB or more in that polarisation."""
+    ``bad`` where the jump is ``limit`` dB or more in that polarisation. ``run_id``: the radar run to judge (default:
+    the run the analysis is pinned to)."""
     from . import sar_curve
 
     pix = stable_pixels(aoi_id)
-    loc = pr.locate(aoi_id, 0, season_key=SEASON_KEY)
+    loc = pr.locate(aoi_id, 0, season_key=SEASON_KEY, run_id=run_id)
     rows = []
     for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
         dates, cubes = sar_curve.read_track(loc, track, window, drop_bad=False)   # judge every pass afresh

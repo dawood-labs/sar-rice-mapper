@@ -372,6 +372,132 @@ prefix plus a single digit also matches ordinary code, such as the EPSG:4326 hel
 
 ---
 
+## Bringing in newer imagery without changing accepted AOIs
+
+**Why this needs care.** The rule reads two inputs per AOI: a Sentinel-1 *run* (`processed/<aoi>/<season>/runs/<run>/`)
+and a 5-day Sentinel-2 *series* folder, which itself reads the raw per-date files in `data/s2_dates_masks/<aoi>/`.
+Until 2 Oct 2026 both were found implicitly: the radar readers took "the newest complete run", and the series read
+"every local per-date file" (and `pixel_report.sync_s2` downloads every new date from GCS on each run). So simply
+exporting newer images would have changed the maps of AOIs that were already accepted and locked. Two records now
+freeze what an analysis reads:
+
+* **Radar run pin** — `processed/<aoi>/<season>/ANALYSIS_RUN.txt` (`config.analysis_run_dir`). Every analysis
+  reader (`pixel_report.locate`, `radar_water.read_series`, the rule, notebook 08) reads the pinned run; without a pin
+  it reads the newest run, as before. The pipeline stages (export, monitor, download, stack) still work on the newest
+  run. A pin is only moved to another run with `--replace`.
+* **Series date record** — `<series folder>/<aoi>/<aoi>_series_dates.json` (`ndvi_5day.series_dates`). `ndvi_5day.load`
+  reads exactly these raw dates; `ndvi_5day.build` writes the record, and refuses to rebuild a folder whose record
+  lists other dates. A newer series therefore always goes into a NEW folder (a new `mask_experiment` variant).
+
+Steps (from the repository root, `GDAL_NUM_THREADS=ALL_CPUS`, one AOI at a time):
+
+```bash
+# 0. Freeze what the analysis reads NOW (before anything new arrives); both are no-ops when already done
+python -m sar_pipeline --config config/aoi<N>_<season>.yaml pin-run
+python -m sar_pipeline.analysis.ndvi_5day freeze --aois <N> --series-root processed/_batch/<series folder> --until <last date>
+
+# 1. Is anything new? (read-only: Sentinel-1 passes of the configured tracks after the pinned run's last pass,
+#    Sentinel-2 dates after the newest exported file, Cloud Score+ completeness and the AOI's clear share per date)
+python -m sar_pipeline.newest_imagery check --aois <N> ...
+
+# 2. Sentinel-1: extend season.end in config/aoi<N>_<season>.yaml, then a NEW run of the whole season
+#    (the multi-temporal speckle filter makes each pass depend on its 3 neighbours on each side, so the newest
+#    passes cannot be exported alone, and the last 3 old passes change slightly once they have a new neighbour)
+python -m sar_pipeline --config <cfg> audit
+python -m sar_pipeline --config <cfg> new-run
+python -m sar_pipeline --config <cfg> export  --run <new run> --all --yes     # starts Earth Engine exports
+python -m sar_pipeline --config <cfg> monitor --run <new run> --yes
+python -m sar_pipeline --config <cfg> download --run <new run> --yes
+python -m sar_pipeline --config <cfg> stack   --run <new run>
+
+# 3. Sentinel-2: export the new dates only (skip a date whose Cloud Score+ is not complete yet: its clear band
+#    would be 0 and the file name would block a corrected export later), then a new series in its own folder
+python -m sar_pipeline.optical_export dates --configs <cfg> --start <first new date> --end <day after the last>
+python -m sar_pipeline.analysis.mask_experiment build --ids <N> --variants <new variant> --jobs 1
+
+# 4. How much did the old part move? (radar pass by pass; series window by window)
+python -m sar_pipeline.newest_imagery compare-radar  --aois <N> --old <old run> --new <new run>
+python -m sar_pipeline.newest_imagery compare-series --aois <N> --old processed/_batch/<old series> --new processed/_batch/<new series>
+
+# 5. What does the rule read now? (an accepted AOI must still show the old run and the old dates)
+python -m sar_pipeline.newest_imagery inputs --aois <N> [--run <run>] [--series-root <series folder>]
+python -m sar_pipeline.analysis.curve_rules reproduce --aoi <locked N> --scratch <folder outside processed/>
+```
+
+**Switching one AOI to the new inputs** (only when the user decides; the AOI's results will change):
+
+```bash
+python -m sar_pipeline --config config/aoi<N>_<season>.yaml pin-run --run <new run> --replace
+python -m sar_pipeline.analysis.curve_rules run --aoi <N> --series-root processed/_batch/<new series folder>
+```
+
+In notebook 08 set `q.SERIES_ROOT = "processed/_batch/<new series folder>"` before `inspect_pixel` /
+`inspect_field` (it applies to every AOI opened in that kernel); the radar follows the AOI's pin. An AOI without a
+new Sentinel-2 date has no new series: it keeps its old series folder and only its radar pin moves.
+
+## Per-pass radar images and a season summary for every AOI (May to the newest pass)
+
+**Why.** The rule reads the radar through the pipeline's own stacks. For looking at the radar in any GIS tool, and
+for sharing it, every AOI also gets its radar as plain GeoTIFFs: one image per descending pass from 1 May 2026 to
+the newest pass, and one three-band summary of the season. Module: `src/sar_pipeline/s1_season_images.py` (its
+docstring explains every choice). It never touches the project's runs, pins, the rule or any locked output.
+
+**What you get** (local work folder `processed/_batch/s1_may_to_latest_<newest date>/`, mirrored to the project's
+bucket under `<base folder>/s1_may_to_latest_<newest date>/`):
+
+| File | Bands | Encoding |
+|---|---|---|
+| `aoi<N>/dates/aoi<N>_<track>_<YYYYMMDD>.tif` | 1 VV, 2 VH, 3 VV minus VH (one pass, single pixels) | dB x 100, int16, nodata -32768 |
+| `aoi<N>/aoi<N>_s1_summary.tif` | 1 VVmin (lowest VV: water / sowing), 2 VHmax (highest VH on or after the VVmin date: crop peak), 3 VH range (VHmax minus the lowest VH from 1 May up to the VHmax date) | dB x 100, int16, nodata -32768 |
+| `aoi<N>/aoi<N>_s1_summary_dates.tif` | 1 day of year of VVmin, 2 day of year of VHmax | uint16, nodata 0 |
+| `manifest.csv` | one row per file: AOI, kind, track, UTC and local date, valid share of the AOI, artefact polarisation, file, size | |
+| `README.txt` | what the bands are | |
+| `_ee_stacks/aoi<N>/<track>/<chunk>.tif` | the raw Earth Engine exports | float32 dB, nodata -9999 |
+
+* **Processing** is the pipeline's (`s1_ard`: GRD linear power, terrain flattening, refined Lee + multi-temporal speckle
+  filter, dB) on each AOI's own pipeline grid, so pixel ids are those of `pixel_index.tif`. The passes before 1 May
+  that the multi-temporal filter needs as neighbours are computed but not exported, so the values equal the project's
+  runs (checked: `verify`).
+* **One track per AOI, the descending one** (user decision): one viewing geometry, so every pass is comparable and the
+  summary needs no track mixing. The configured descending track is used; with several configured, the one with the
+  most passes since 1 May; with none configured, a descending track the archive offers that covers the AOI
+  (>= 90 % median cover); otherwise the AOI is SKIPPED (never an ascending track). The choice and the reason are in
+  `aoi<N>/track_choice.json`.
+* **Summary**: computed on 5 x 5 means in linear power (the window the rule reads; single pixels would mostly measure
+  speckle), with the recorded artefact passes (`sar_curve.BAD_PASSES`) blanked in their broken polarisation. No
+  thresholds. Dates are UTC acquisition dates (the project's convention; a descending pass is the next morning in
+  local time).
+* **Efficiency**: one Earth Engine task per AOI and grid chunk exports the whole season stack (~150 tasks for all
+  AOIs) instead of one task per pass (thousands, and every pass computed ~7 times by the multi-temporal filter).
+  Splitting into per-pass files and the summary take about a second per AOI locally.
+* **Safe and resumable**: the plan, the task book (`tasks.csv`) and the AOI states (`aois.csv`, with per-stage
+  timings) live in the work folder; stop and start again at any time. Uploads never overwrite (`if_generation_match=0`).
+
+Steps (from the repository root, `GDAL_NUM_THREADS=ALL_CPUS`):
+
+```bash
+# 1. Find the newest descending pass (read-only) and create the work folder s1_may_to_latest_<newest>
+python -m sar_pipeline.s1_season_images plan [--end <YYYY-MM-DD>]
+# 2. Dry run (lists the passes per AOI, plans the tasks), then the real run: Earth Engine exports, download,
+#    per-pass files, summary, upload. All AOIs' tasks run in Earth Engine at once; each AOI is processed locally
+#    as soon as its tasks finish.
+python -m sar_pipeline.s1_season_images run --aois 39
+python -m sar_pipeline.s1_season_images run --aois 39 --yes
+python -m sar_pipeline.s1_season_images run --aois all --yes          # --retry puts FAILED AOIs back in line
+# 3. Checks: the per-pass values against the project's radar run, and the summary at chosen pixels
+#    (CSV files in <work folder>/report/); the 5x5 series behind the summary at one pixel
+python -m sar_pipeline.s1_season_images verify --aoi 39 --pixels 21405 8384 30425
+python -m sar_pipeline.s1_season_images pixel  --aoi 39 --pixel 21405
+# 4. manifest.csv + README.txt at the folder root (a second manifest gets a time stamp, never overwrites)
+python -m sar_pipeline.s1_season_images finalize --yes
+python -m sar_pipeline.s1_season_images status
+```
+
+**Reading the summary.** A transplanted paddy: VVmin very low (water) in June-August, then VHmax high and a large VH
+range. Permanent water / fish ponds: VVmin and VHmax both very low (the VH range can still be several dB because water
+is so dark; read VHmax with it). Trees and villages: VHmax high but a small range. Still flooded on the newest pass:
+VVmin late in the season, VHmax low.
+
 ## Field polygons: refining the delineation and checking it
 
 The field polygons (a segmentation model's output) are cleaned before they are labelled, because

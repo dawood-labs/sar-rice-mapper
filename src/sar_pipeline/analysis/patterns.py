@@ -148,7 +148,7 @@ def sample_many(config_paths, start, end, n_samples=2000, seed=0, log=print):
     for i, path in enumerate(config_paths):
         cfg = config_mod.load_config(path)
         track = primary_track(cfg)
-        run = config_mod.run_dir(cfg)
+        run = config_mod.analysis_run_dir(cfg)
         vrt = run / "stack" / f"track_{track}" / "stack_VH.vrt"
         bins, series, rows, cols = sample_binned_series(
             vrt, config_mod.aoi_path(cfg), start, end, n_samples=n_samples, seed=seed)

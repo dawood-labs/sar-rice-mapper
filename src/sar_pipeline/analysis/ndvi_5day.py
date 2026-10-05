@@ -174,7 +174,8 @@ def relative_cloud_score(cs, data, k: float | None = None) -> np.ndarray:
 
 def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None, cs_min: float | None = None,
                qa60_mode: str = QA60_MODE, keep_dark: bool = False, drop_haze: bool = False,
-               cs_missing_unknown: bool = False, b8_zero_water: bool = False, cs_relative: bool = False):
+               cs_missing_unknown: bool = False, b8_zero_water: bool = False, cs_relative: bool = False,
+               only_dates=None):
     """NDVI, NDWI, LSWI, QA60 cloud and SCL cloud for every exported date, shaped (dates, rows, cols).
 
     ``ok`` is True where the pixel has data and QA60 does not flag cloud (``qa60_mode``: cloud and
@@ -190,6 +191,8 @@ def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None,
     view is kept with NDVI -1 (water reflects almost no near-infrared).
     ``cs_relative`` (fresh start, 30 Sep): the Cloud Score+ limit is per pixel, from its own clear views
     (:func:`relative_cloud_score`), instead of ``cs_min``; dates without a score are judged without it.
+    ``only_dates`` (``YYYY-MM-DD`` strings): read exactly these dates and no others (a frozen series, see
+    :func:`series_dates`); a listed date missing from the folder is an error, never silently skipped.
     """
     import rasterio
 
@@ -201,6 +204,8 @@ def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None,
 
     loc = pr.locate(aoi_id, 0)
     paths = sorted(pr.sync_s2(loc, cache_root or f"data/{folder}", folder).glob("*.tif"))
+    if only_dates is not None:
+        paths = select_dates(paths, only_dates)
     if not paths:
         raise FileNotFoundError(f"no files for aoi{aoi_id} in {folder}")
     dates, ndvi, ndwi, lswi, ok, scl = [], [], [], [], [], []
@@ -243,6 +248,116 @@ def read_dates(aoi_id: int, folder: str = FOLDER, cache_root: str | None = None,
     pick = lambda xs: np.stack(xs)[order]  # noqa: E731
     return (pd.DatetimeIndex(np.array(dates)[order]), pick(ndvi), pick(ndwi), pick(lswi), pick(ok),
             pick(scl), loc)
+
+
+def file_date(path) -> str:
+    """The acquisition date (``YYYY-MM-DD``) in a per-date file name ``<aoi>_<month>_S2_<date>.tif``."""
+    return Path(path).stem.rsplit("_S2_", 1)[1]
+
+
+def select_dates(paths, only_dates) -> list:
+    """The files of exactly ``only_dates``; raises FileNotFoundError naming any listed date with no file."""
+    want = set(only_dates)
+    picked = [p for p in paths if file_date(p) in want]
+    missing = sorted(want - {file_date(p) for p in picked})
+    if missing:
+        raise FileNotFoundError(f"the series was built from dates that are no longer on disk: {', '.join(missing)}")
+    return picked
+
+
+#: Sidecar of a series folder listing the per-date files it was built from (``<aoi>_series_dates.json``).
+SERIES_DATES = "series_dates.json"
+
+
+def series_dates(out_root, aoi_key: str) -> list[str] | None:
+    """The raw dates a series was built from (its ``<aoi>_series_dates.json``), or None for a series without one.
+
+    Why (2 Oct 2026): :func:`load` (and through it the rule, notebook 08 and the label tools) reads the RAW per-date
+    files next to the 5-day stacks: the newest clear view, the last two views, the season low. It used to read every
+    file in ``data/s2_dates_masks/<aoi>/``, and :func:`pixel_report.sync_s2` downloads every new date from GCS on each
+    run, so exporting newer dates would silently have changed the maps of accepted AOIs built on an older series.
+    With the sidecar a series always sees exactly the dates it was built from; newer dates only reach a NEW series."""
+    import json
+
+    path = Path(out_root) / aoi_key / f"{aoi_key}_{SERIES_DATES}"
+    if not path.exists():
+        return None
+    return list(json.loads(path.read_text())["dates"])
+
+
+def write_series_dates(out_root, aoi_key: str, dates, folder: str = FOLDER, note: str = "") -> Path:
+    """Write the series' date sidecar (refuses to replace an existing one with a different list: a series' inputs
+    are fixed once it is built)."""
+    import json
+
+    path = Path(out_root) / aoi_key / f"{aoi_key}_{SERIES_DATES}"
+    dates = sorted({str(d)[:10] for d in dates})
+    if path.exists() and series_dates(out_root, aoi_key) != dates:
+        raise FileExistsError(f"{path} already lists other dates; a built series' inputs are not rewritten")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"folder": folder, "dates": dates, **({"note": note} if note else {})}, indent=1))
+    return path
+
+
+def freeze_dates(aoi_id: int, out_root, folder: str = FOLDER, until: str | None = None) -> Path:
+    """Record, for a series built before sidecars existed, the per-date files it reads NOW (optionally only dates on or
+    before ``until``) as its fixed inputs. Run it BEFORE any newer date is exported, so the record is what the series
+    was built from. Nothing is downloaded: the local mirror is listed as it is."""
+    from .. import config as config_mod
+
+    key = f"aoi{aoi_id}"
+    local = config_mod.repo_root() / "data" / folder / key
+    dates = [file_date(p) for p in sorted(local.glob("*.tif"))]
+    if until is not None:
+        dates = [d for d in dates if d <= until]
+    if not (Path(out_root) / key / f"{key}_ndvi5d.tif").exists():
+        raise FileNotFoundError(f"no series in {Path(out_root) / key}")
+    return write_series_dates(out_root, key, dates, folder,
+                              note=f"recorded by freeze_dates on {pd.Timestamp.now(tz='UTC'):%Y-%m-%d}")
+
+
+#: The 5-day series the fresh-start analysis (curve_rules, curve_labels, notebook 08) reads for an AOI with no series
+#: pin: the M1-mask series to 28 Sep 2026 that aoi160 and aoi28 were accepted with.
+ANALYSIS_SERIES_DEFAULT = "processed/_batch/s2_2026_hyb40m1late"
+#: File in ``processed/aoi<N>/monsoon2026/`` naming the series root the analysis reads (next to ``ANALYSIS_RUN.txt``,
+#: the radar pin), one path on one line.
+ANALYSIS_SERIES_FILE = "ANALYSIS_SERIES.txt"
+
+
+def _series_pin_path(aoi_id: int) -> Path:
+    from .. import config as config_mod
+
+    return config_mod.repo_root() / "processed" / f"aoi{aoi_id}" / "monsoon2026" / ANALYSIS_SERIES_FILE
+
+
+def analysis_series_root(aoi_id: int) -> str:
+    """The 5-day series root the analysis reads for this AOI: the pinned one (``ANALYSIS_SERIES.txt``), else
+    ``ANALYSIS_SERIES_DEFAULT``.
+
+    Why (2 Oct 2026): newer Sentinel-2 dates go into a NEW series root (a built series is never rewritten), and only
+    some AOIs get one. One fixed root for every AOI meant either no AOI could use the newer series, or every AOI,
+    the accepted (locked) ones included, would. The pin chooses per AOI, the same way ``ANALYSIS_RUN.txt`` chooses the
+    radar run, so the rule, the label tools and notebook 08 always read the same inputs for an AOI."""
+    path = _series_pin_path(aoi_id)
+    text = path.read_text().strip() if path.exists() else ""
+    return text or ANALYSIS_SERIES_DEFAULT
+
+
+def pin_analysis_series(aoi_id: int, series_root: str, replace: bool = False) -> str:
+    """Pin the series root the analysis reads for this AOI. The root must hold this AOI's series. An existing pin to
+    ANOTHER root is only replaced with ``replace=True``: switching changes the AOI's results, so it must be deliberate."""
+    from .. import config as config_mod
+
+    key = f"aoi{aoi_id}"
+    if not (config_mod.repo_root() / series_root / key / f"{key}_ndvi5d.tif").exists():
+        raise FileNotFoundError(f"no {key} series in {series_root}")
+    path = _series_pin_path(aoi_id)
+    current = path.read_text().strip() if path.exists() else ""
+    if current and current != series_root and not replace:
+        raise FileExistsError(f"{key}: analysis is pinned to {current}; pass replace=True to switch to {series_root}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(series_root + "\n")
+    return series_root
 
 
 def window_starts(start: str, end: str, step: int = STEP_DAYS) -> pd.DatetimeIndex:
@@ -383,6 +498,12 @@ def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd:
                                                         keep_dark=keep_dark, drop_haze=drop_haze,
                                                         cs_missing_unknown=cs_missing_unknown, b8_zero_water=b8_zero_water,
                                                         cs_relative=cs_relative)
+    date_list = [d.strftime("%Y-%m-%d") for d in dates]
+    have = series_dates(out_root, loc["aoi"])
+    if have is not None and have != sorted(date_list):
+        # a series with a date record is fixed (an accepted AOI may read it); newer dates go to a NEW out_root
+        raise FileExistsError(f"{Path(out_root) / loc['aoi']} was built from other dates; build the new series "
+                              "into its own out_root")
     h, w = ndvi.shape[1:]
     starts = window_starts(start, end)
     keep = (dates >= starts[0]) & (dates < pd.Timestamp(end))
@@ -411,6 +532,8 @@ def build(aoi_id: int, start: str = "2025-09-01", end: str = "2026-09-24", lmbd:
                                    folder_out / f"{loc['aoi']}_{key}.tif", dtype)
     import json
 
+    # every date READ (not only those inside the windows): with ``cs_relative`` all of them set the per-pixel cloud limit
+    write_series_dates(out_root, loc["aoi"], date_list, folder)
     (folder_out / f"{loc['aoi']}_series_mask.json").write_text(json.dumps(
         {"cs_min": cs_min, "qa60_mode": qa60_mode, "keep_dark": keep_dark, "drop_haze": drop_haze,
          **({"cs_missing_unknown": True} if cs_missing_unknown else {}), **({"b8_zero_water": True} if b8_zero_water else {}),
@@ -483,7 +606,9 @@ def load(aoi_id: int, out_root="processed/_batch/s2_2026", folder: str = FOLDER)
     # so "clear" means the same thing to every reader of this series
     meta_path = Path(out_root) / loc0["aoi"] / f"{loc0['aoi']}_series_mask.json"
     mask = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-    dates, ndvi, _, lswi, ok, scl, loc = read_dates(aoi_id, folder, **mask)
+    # the raw dates the series was built from (its date sidecar); a series without one reads every local date
+    only = series_dates(out_root, loc0["aoi"])
+    dates, ndvi, _, lswi, ok, scl, loc = read_dates(aoi_id, folder, only_dates=only, **mask)
     stacks = {}
     for name in ("ndvi5d", "lswi5d", "ndvi5d_raw", "gapdays5d"):
         with rasterio.open(Path(out_root) / loc["aoi"] / f"{loc['aoi']}_{name}.tif") as ds:
@@ -503,13 +628,18 @@ def forget():
 
 def inside_aoi(aoi_id: int) -> np.ndarray:
     """Flat boolean mask of the grid pixels inside the AOI polygons (the grid carries a buffer)."""
+    return inside_from_loc(load(aoi_id)["loc"])
+
+
+def inside_from_loc(loc: dict) -> np.ndarray:
+    """:func:`inside_aoi` from an already loaded series' ``loc`` (no second series load: the rule needs the mask while
+    its own series is in memory)."""
     import geopandas as gpd
     from rasterio.features import rasterize
     from rasterio.transform import from_origin
 
     from .. import config as config_mod
 
-    loc = load(aoi_id)["loc"]
     grid = loc["grid"]
     shapes = gpd.read_file(config_mod.aoi_path(loc["cfg"])).to_crs(grid["crs"]).geometry
     mask = rasterize(((g, 1) for g in shapes), out_shape=(int(grid["height"]), int(grid["width"])),
@@ -602,3 +732,33 @@ def sheet(aoi_id: int, pids, out_path=None, cols: int = 3, lswi: bool = True):
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_path, dpi=110, facecolor=SURFACE)
     return fig
+
+
+def main(argv=None) -> int:
+    """Command line: ``freeze`` records the raw dates an existing series reads now as its fixed inputs
+    (:func:`freeze_dates`; run before newer dates are exported); ``dates`` prints a series' recorded dates; ``pin``
+    makes the analysis of these AOIs read ``--series-root`` (:func:`pin_analysis_series`, ``--replace`` to switch)."""
+    import argparse
+
+    p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.ndvi_5day", description=main.__doc__)
+    p.add_argument("step", choices=["freeze", "dates", "pin"])
+    p.add_argument("--aois", nargs="+", type=int, required=True)
+    p.add_argument("--series-root", required=True, help="the series folder, e.g. processed/_batch/s2_2026_<variant>")
+    p.add_argument("--until", help="freeze: only dates on or before this one (YYYY-MM-DD)")
+    p.add_argument("--replace", action="store_true", help="pin: switch an AOI already pinned to another series")
+    args = p.parse_args(argv)
+    for a in args.aois:
+        if args.step == "pin":
+            print(f"aoi{a}: analysis reads {pin_analysis_series(a, args.series_root, replace=args.replace)}")
+        elif args.step == "freeze":
+            path = freeze_dates(a, args.series_root, until=args.until)
+            d = series_dates(args.series_root, f"aoi{a}")
+            print(f"aoi{a}: {len(d)} dates {d[0]} .. {d[-1]} -> {path}")
+        else:
+            d = series_dates(args.series_root, f"aoi{a}")
+            print(f"aoi{a}: " + (f"{len(d)} dates {d[0]} .. {d[-1]}" if d else "no date record (reads every local date)"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

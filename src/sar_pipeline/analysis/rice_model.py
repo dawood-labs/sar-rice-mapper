@@ -245,7 +245,7 @@ def features_for_config(config_path, out_dir, start, end, samples=None):
 
     cfg = config_mod.load_config(config_path)
     aoi = cfg["aoi"]["key"]
-    run = config_mod.run_dir(cfg)
+    run = config_mod.analysis_run_dir(cfg)
     track = pt.primary_track(cfg)
     full = aoi_features(run, track, config_mod.aoi_path(cfg), start, end)
     extra = {}

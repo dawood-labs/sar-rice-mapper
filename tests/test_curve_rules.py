@@ -214,3 +214,187 @@ def test_manifest_check_finds_code_files_in_code_folder_and_flags_changes(tmp_pa
     assert cr.manifest_mismatches(tmp_path, man) == ["gone.csv (missing)"]
     (tmp_path / "a.tif").write_bytes(b"changed")
     assert cr.manifest_mismatches(tmp_path, man) == ["a.tif", "gone.csv (missing)"]
+
+
+def test_young_while_radar_low_is_off_by_default_and_turns_a_still_closing_canopy_young(monkeypatch):
+    # aoi72 pixel 19247: VH still in the lower part of its range and climbing, newest view the greenest and rising,
+    # the fit held flat after the last view (looks "held at top"), age from the first water 88 days
+    base = dict(ndvi_low_peak=0.14, vh_pos_end=0.55, vh_slope_end=0.46, vv_step_end=0.55, vh_rise_recent=0.63,
+                vv_rise_recent=0.96, ndvi_left=1.0, ndvi_slope_end=0.52, last_view_water=0, days_since_peak=15,
+                days_at_top=15, days_off_top=0, ndvi_rise_days=50, ndvi_rise_seen=128, crop_age=88, water_spell=1)
+    grown = dict(base, vh_pos_end=0.69)          # radar already up: a standing crop (aoi72 pixel 27550)
+    f = pd.DataFrame([base, grown])
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted"] * 2
+    monkeypatch.setattr(cr, "YOUNG_WHILE_RADAR_LOW", True)
+    monkeypatch.setattr(cr, "YOUNG_NEEDS_AGE", True)
+    assert cr.classify_relative(f).tolist() == ["young rice", "rice standing transplanted"]
+
+
+def test_try_rules_runs_each_finished_aois_rule_set_in_its_own_folder(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_run(aoi, series_root, fresh):
+        assert (tmp_path / "out" / Path(fresh).name / f"aoi{aoi}" / f"aoi{aoi}_step1_cover.tif").exists()
+        seen.append((Path(fresh).name, cr.AGE_LOW_SHARE, cr.YOUNG_WHILE_RADAR_LOW))
+        return pd.DataFrame({"class": [1, 7], "name": ["a", "b"], "acres": [cr.AGE_LOW_SHARE, 1.0]})
+
+    from pathlib import Path
+
+    (tmp_path / "fresh" / "aoi5").mkdir(parents=True)
+    (tmp_path / "fresh" / "aoi5" / "aoi5_step1_cover.tif").write_bytes(b"x")
+    monkeypatch.setattr(cr, "_run", fake_run)
+    t = cr.try_rules(5, series_root="s", fresh=str(tmp_path / "fresh"), out=str(tmp_path / "out"))
+    assert seen == [("rules_aoi160", 0.2, False), ("rules_aoi28", 0.05, False), ("rules_aoi72", 0.05, True)]
+    assert list(t.columns) == ["class", "name", "aoi160 rules", "aoi28 rules", "aoi72 rules"]
+    assert cr.AGE_LOW_SHARE == 0.2 and (tmp_path / "out" / "aoi5_rule_trials.csv").exists()
+    assert not (tmp_path / "fresh" / "aoi5" / "aoi5_rel_class.tif").exists()      # the AOI's own outputs untouched
+
+
+def test_a_radar_water_spell_overrules_the_ndvi_tree_test_only_when_switched_on(monkeypatch):
+    # aoi116 pixel 168977: no clear view June-August, NDVI low/peak 0.63 ("never emptied"), radar water spell
+    base = dict(ndvi_low_peak=0.63, vh_pos_end=1.19, vh_slope_end=0.7, ndvi_left=1.0, ndvi_slope_end=1.0,
+                days_since_peak=15, days_at_top=20, days_off_top=0, ndvi_rise_days=65, ndvi_rise_seen=108,
+                crop_age=104, last_view_water=0)
+    f = pd.DataFrame([dict(base, water_spell=1), dict(base, water_spell=0)])
+    assert cr.classify_relative(f).tolist() == ["tree/orchard", "tree/orchard"]
+    monkeypatch.setattr(cr, "TREE_NEEDS_NO_WATER", True)
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "tree/orchard"]
+
+
+def test_radar_sowing_is_an_aoi116_switch_only_and_the_feature_code_keeps_its_source_column():
+    """User, 2 Oct: the aoi116 rules are for aoi116 only; the locked AOIs keep the old sowing / age."""
+    import inspect
+
+    assert cr.SOWING_FROM_RADAR is False and cr.TREE_NEEDS_NO_WATER is False
+    assert cr.AOI_OVERRIDES[116]["SOWING_FROM_RADAR"] and cr.AOI_OVERRIDES[116]["TREE_NEEDS_NO_WATER"]
+    for locked in (160, 28, 72):
+        assert "SOWING_FROM_RADAR" not in cr.AOI_OVERRIDES.get(locked, {})
+        assert "TREE_NEEDS_NO_WATER" not in cr.AOI_OVERRIDES.get(locked, {})
+    src = inspect.getsource(cr.own_range_features)
+    assert 'out["sowing_from"]' in src and "_water_level_end" in src
+
+
+def test_notebook_names_where_the_sowing_date_came_from():
+    from sar_pipeline import qgis_review as q
+
+    assert q._sowing_label({"rule_sowing_from": q.SOWING_SOURCES[1]}) == \
+        "sowing (radar: end of the water spell (transplanting))"
+    assert q._sowing_label({}) == "sowing (last empty spell)"
+
+
+def test_water_end_from_the_earliest_track_is_aoi116_only():
+    import inspect
+
+    assert cr.WATER_END_TRACKS == "median" and cr.AOI_OVERRIDES[116]["WATER_END_TRACKS"] == "earliest_unless_wet_view"
+    assert all("WATER_END_TRACKS" not in cr.AOI_OVERRIDES.get(a, {}) for a in (160, 28, 72))
+    assert "earliest_unless_wet_view" in inspect.getsource(cr.own_range_features)
+
+
+def test_behind_nearly_all_fields_tie_break_is_aoi_relative_and_aoi116_only():
+    import inspect
+
+    src = inspect.getsource(cr.own_range_features)
+    assert "BEHIND_SHARE" in src and "inside_from_loc" in src      # the reference is the AOI's own clear pixels
+    assert 0 < cr.BEHIND_SHARE < 0.5 and cr.WATER_END_TRACKS == "median"
+
+
+def test_vv_only_water_fall_is_aoi116_only():
+    import inspect
+
+    assert cr.WATER_FALL_POLS == "both" and cr.AOI_OVERRIDES[116]["WATER_FALL_POLS"] == "VV"
+    assert all("WATER_FALL_POLS" not in cr.AOI_OVERRIDES.get(a, {}) for a in (160, 28, 72))
+    assert inspect.getsource(cr.own_range_features).count('WATER_FALL_POLS == "VV"') == 2
+
+
+def test_young_while_radar_low_can_require_the_radar_to_be_still_climbing(monkeypatch):
+    # aoi39 pixel 11226: dense canopy (NDVI at its top), radar falling on the last passes but risen since the July water
+    base = dict(ndvi_low_peak=0.24, vh_pos_end=0.51, vh_slope_end=-0.13, vv_step_end=-0.24, vh_rise_recent=0.55,
+                vv_rise_recent=0.51, ndvi_left=1.0, ndvi_slope_end=1.0, last_view_water=0, days_since_peak=15,
+                days_at_top=15, days_off_top=0, ndvi_rise_days=40, ndvi_rise_seen=38, crop_age=88, water_spell=1)
+    climbing = dict(base, vh_slope_end=0.77)      # aoi39 pixel 8391: radar still climbing
+    f = pd.DataFrame([base, climbing])
+    monkeypatch.setattr(cr, "YOUNG_WHILE_RADAR_LOW", True)
+    assert cr.classify_relative(f).tolist() == ["young rice", "young rice"]          # aoi72 / aoi116 behaviour
+    monkeypatch.setattr(cr, "YOUNG_RADAR_LOW_NEEDS_RISE", True)
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "young rice"]
+    assert cr.YOUNG_RADAR_LOW_NEEDS_RISE is not None
+
+
+def test_one_wet_pass_spell_is_aoi39_only():
+    import inspect
+
+    assert cr.WATER_SPELL_MIN_PASSES == 2 and cr.AOI_OVERRIDES[39]["WATER_SPELL_MIN_PASSES"] == 1
+    assert all("WATER_SPELL_MIN_PASSES" not in cr.AOI_OVERRIDES.get(a, {}) for a in (160, 28, 72, 116))
+    assert "counts >= WATER_SPELL_MIN_PASSES" in inspect.getsource(cr.own_range_features)
+
+
+def test_a_water_view_lifts_the_grown_canopy_guard_only_when_switched_on(monkeypatch):
+    # aoi39 pixel 21405: interpolated July "top", radar at water level, newest clear view open water
+    f = pd.DataFrame([dict(ndvi_low_peak=-3.36, vh_pos_end=0.13, vh_slope_end=0.02, vv_step_end=0.08, vh_rise_recent=0.24,
+                           vv_rise_recent=0.22, ndvi_left=0.0, ndvi_slope_end=-0.69, last_view_water=1, days_since_peak=80,
+                           days_at_top=90, days_off_top=70, ndvi_rise_days=45, crop_age=52, water_spell=1)])
+    assert cr.classify_relative(f).tolist() == ["rice harvested"]
+    monkeypatch.setattr(cr, "GROWN_NOT_IF_WATER_VIEW", True)
+    assert cr.classify_relative(f).tolist() == ["flooded / bare"]
+
+
+def test_dry_season_water_is_a_pond_only_when_switched_on(monkeypatch):
+    # aoi39 pixel 30425: water on most March-April clear views, rule otherwise says direct seeded
+    f = pd.DataFrame([dict(ndvi_low_peak=-5.94, vh_pos_end=0.62, vh_slope_end=0.52, ndvi_left=0.88, ndvi_slope_end=0.88,
+                           days_since_peak=80, days_at_top=90, days_off_top=35, ndvi_rise_days=30, crop_age=115,
+                           water_spell=0, last_view_water=1, dry_water_share=1.0)])
+    assert cr.classify_relative(f).tolist() == ["rice standing direct seeded"]
+    monkeypatch.setattr(cr, "POND_IF_DRY_WATER", True)
+    assert cr.classify_relative(f).tolist() == ["flooded / bare"]
+    assert 'out["dry_water_share"]' in __import__("inspect").getsource(cr.own_range_features)
+
+
+def test_a_deep_late_water_spell_is_a_second_crop_only_when_switched_on(monkeypatch):
+    # aoi39 pixel 24716: first crop May-June (NDVI top left 105 days ago), deep water from 15 Jul (73 days)
+    base = dict(ndvi_low_peak=0.58, vh_pos_end=0.75, vh_slope_end=0.95, ndvi_left=0.5, ndvi_slope_end=0.5,
+                days_since_peak=110, days_at_top=120, days_off_top=105, ndvi_rise_days=25, crop_age=73, water_spell=1,
+                last_view_water=0, dry_water_share=0.0, water_depth=5.5)
+    shallow = dict(base, water_depth=1.5)                  # a tree's small dip
+    still_water = dict(base, vh_pos_end=0.13, ndvi_low_peak=0.2, ndvi_left=0.0, last_view_water=1)   # 21405
+    f = pd.DataFrame([base, shallow, still_water])
+    monkeypatch.setattr(cr, "SECOND_CROP_BY_RADAR", True)
+    out = cr.classify_relative(f).tolist()
+    assert out[:2] == ["rice standing transplanted", "tree/orchard"] and out[2] != "rice standing transplanted"
+    assert 'out["water_depth"]' in __import__("inspect").getsource(cr.own_range_features)
+
+
+def test_radar_decides_where_the_optical_never_saw_the_water(monkeypatch):
+    # aoi39 pixel 21618: deep water spell with no clear water view and one clear view in it; NDVI says tree
+    base = dict(ndvi_low_peak=0.8, vh_pos_end=0.91, vh_slope_end=0.97, vv_step_end=0.14, vh_rise_recent=0.92,
+                vv_rise_recent=0.87, ndvi_left=0.58, ndvi_slope_end=-0.42, days_since_peak=45, days_at_top=60,
+                days_off_top=35, ndvi_rise_days=60, crop_age=104, water_spell=1, last_view_water=0, dry_water_share=0,
+                water_depth=5.8, views_in_water=1, water_views_in_water=0)
+    seen = dict(base, views_in_water=4)                                     # the optical saw the season: NDVI rules
+    still_water = dict(base, vh_pos_end=0.1, vh_slope_end=0.0, vv_step_end=0.0, vh_rise_recent=0.1, vv_rise_recent=0.1)
+    f = pd.DataFrame([base, seen, still_water])
+    assert cr.classify_relative(f).tolist() == ["tree/orchard"] * 3
+    monkeypatch.setattr(cr, "RADAR_DECIDES_WITHOUT_OPTICAL", True)
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "tree/orchard", "flooded / bare"]
+    src = __import__("inspect").getsource(cr.own_range_features)
+    assert 'out["views_in_water"]' in src and 'out["water_views_in_water"]' in src
+
+
+def test_radar_only_young_or_standing_is_decided_by_age(monkeypatch):
+    # aoi39 pixel 11226: dense canopy lowering the radar (VH 0.51 of its range) but 88 days old -> standing
+    f = pd.DataFrame([dict(ndvi_low_peak=0.24, vh_pos_end=0.51, vh_slope_end=-0.13, vv_step_end=-0.24, vh_rise_recent=0.55,
+                           vv_rise_recent=0.51, ndvi_left=1.0, ndvi_slope_end=1.0, days_since_peak=15, days_at_top=15,
+                           days_off_top=0, ndvi_rise_days=40, crop_age=88, water_spell=1, last_view_water=0,
+                           dry_water_share=0, water_depth=4.0, views_in_water=1, water_views_in_water=0)])
+    monkeypatch.setattr(cr, "RADAR_DECIDES_WITHOUT_OPTICAL", True)
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted"]
+
+
+def test_radar_only_keeps_a_field_still_under_water_flooded(monkeypatch):
+    # aoi39 pixel 21635: deep water to the end, VH wobbling up a little on the last passes (not plants)
+    f = pd.DataFrame([dict(ndvi_low_peak=-1.67, vh_pos_end=0.17, vh_slope_end=0.25, vv_step_end=-0.11, vh_rise_recent=0.22,
+                           vv_rise_recent=0.31, ndvi_left=0.71, ndvi_slope_end=0.71, days_since_peak=130, days_at_top=130,
+                           days_off_top=130, ndvi_rise_days=15, crop_age=76, water_spell=1, last_view_water=0,
+                           dry_water_share=0.08, water_depth=14.6, views_in_water=0, water_views_in_water=0)])
+    monkeypatch.setattr(cr, "RADAR_DECIDES_WITHOUT_OPTICAL", True)
+    assert cr.classify_relative(f).tolist() == ["flooded / bare"]
+

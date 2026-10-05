@@ -163,6 +163,55 @@ def run_dir(cfg: dict, run_id: str | None = None) -> Path:
     return d
 
 
+#: File in the season folder naming the radar run the ANALYSIS reads (one run id on one line).
+ANALYSIS_RUN_FILE = "ANALYSIS_RUN.txt"
+
+
+def pinned_run(cfg: dict) -> str | None:
+    """The run id pinned for analysis in ``<season>/ANALYSIS_RUN.txt``, or None when nothing is pinned."""
+    path = season_dir(cfg) / ANALYSIS_RUN_FILE
+    if not path.exists():
+        return None
+    text = path.read_text().strip()
+    return text or None
+
+
+def analysis_run_dir(cfg: dict, run_id: str | None = None) -> Path:
+    """The radar run an ANALYSIS reads: ``run_id`` when given, else the pinned run (``ANALYSIS_RUN.txt``), else the
+    newest complete run (:func:`run_dir`).
+
+    Why (2 Oct 2026): every reader of the radar series (the rule, notebook 08, the pixel tools) found its run through
+    "the newest complete run". Bringing in newer passes is done with a NEW run, so creating it would have silently
+    switched accepted (locked) AOIs to other radar data and changed their maps. A pin keeps the analysis on the run
+    its results were made with until someone decides to switch (:func:`pin_analysis_run` with ``replace=True``);
+    the pipeline stages (export, monitor, download, stack) still work on the newest run, as before."""
+    if run_id is None:
+        run_id = pinned_run(cfg)
+        if run_id is not None:
+            newer = [r for r in list_runs(cfg) if r > run_id]
+            if newer:
+                log.info("%s: analysis reads pinned run %s; newer run(s) %s exist (switch with pin_analysis_run)",
+                         cfg["aoi"]["key"], run_id, ", ".join(newer))
+    return run_dir(cfg, run_id)
+
+
+def pin_analysis_run(cfg: dict, run_id: str | None = None, replace: bool = False) -> str:
+    """Pin the run the analysis reads (default: the run it reads now, i.e. the newest complete run) and return it.
+
+    An existing pin to a DIFFERENT run is only replaced with ``replace=True``: switching an AOI to another radar run
+    changes its results, so it must be a deliberate step, never a side effect."""
+    target = run_dir(cfg, run_id).name                     # validates that the run exists and is complete
+    current = pinned_run(cfg)
+    if current is not None and current != target and not replace:
+        raise PipelineError(f"{cfg['aoi']['key']}: analysis is pinned to {current}; pass replace=True to switch "
+                            f"it to {target}")
+    path = season_dir(cfg) / ANALYSIS_RUN_FILE
+    tmp = path.with_suffix(".txt.tmp")
+    tmp.write_text(target + "\n")
+    os.replace(tmp, path)
+    return target
+
+
 def load_run_config(run_path: Path) -> dict:
     """The run's frozen config, with paths resolved against the original project root."""
     run_path = Path(run_path).resolve()

@@ -42,8 +42,12 @@ CLASS_NAMES = {0: "outside AOI", 1: "rice: monsoon only", 2: "rice: monsoon + dr
                3: "rice: dry season only", 4: "not rice", 255: "uncertain"}
 
 
-def locate(aoi_id: int, pid: int, season_key: str = "year2025", config_dir="config") -> dict:
+def locate(aoi_id: int, pid: int, season_key: str = "year2025", config_dir="config", run_id: str | None = None) -> dict:
     """Config, run, grid and row/col/lon/lat for a pixel id in an AOI.
+
+    ``run`` is the radar run the analysis reads (``config.analysis_run_dir``): ``run_id`` when given, else the run
+    pinned in the season's ``ANALYSIS_RUN.txt``, else the newest complete run. Why the pin: a newer run (newer passes)
+    must not silently change the results of AOIs that were made and accepted with an older one.
 
     A relative ``config_dir`` is resolved against the repository, not the working directory, so this
     works from a notebook folder without anyone having to ``chdir`` first.
@@ -64,7 +68,7 @@ def locate(aoi_id: int, pid: int, season_key: str = "year2025", config_dir="conf
     lon, lat = pyproj.Transformer.from_crs(grid["crs"], "EPSG:4326", always_xy=True).transform(x, y)
     tracks = {t["role"]: t["track_id"] for t in cfg["s1"]["tracks"]}
     return {"cfg": cfg, "aoi": cfg["aoi"]["key"], "pid": int(pid), "row": row, "col": col,
-            "lon": lon, "lat": lat, "grid": grid, "run": config_mod.run_dir(cfg),
+            "lon": lon, "lat": lat, "grid": grid, "run": config_mod.analysis_run_dir(cfg, run_id),
             "primary": tracks.get("primary"), "secondary": tracks.get("secondary")}
 
 

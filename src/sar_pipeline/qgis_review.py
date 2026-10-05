@@ -176,10 +176,30 @@ def field_at(aoi_id: int, lon: float, lat: float):
     return f, pids
 
 
-#: The series the sheets read (fresh start, 30 Sep: the latest images, M1 mask, series to 28 Sep) and the fresh-start
-#: step outputs (``vegetation_types`` step 1, ``sowing_fresh`` step 2), so notebook 08 shows what QGIS shows.
-SERIES_ROOT = "processed/_batch/s2_2026_hyb40m1late"
+#: The series the sheets read. None (default): each AOI's own pinned series (``ndvi_5day.analysis_series_root``, the
+#: same one the rule reads, so notebook 08 shows what the map was made from; 2 Oct: newer images live in a new series
+#: for some AOIs only). Set a path to force one series for every AOI. The fresh-start step outputs (``vegetation_types``
+#: step 1, ``sowing_fresh`` step 2) are read from ``FRESH``.
+SERIES_ROOT = None
 FRESH = "processed/_batch/s2_2026/rice_fresh"
+
+
+def series_root(aoi_id: int) -> str:
+    """The series notebook 08 reads for this AOI: ``SERIES_ROOT`` when set, else the AOI's pinned series."""
+    from .analysis import ndvi_5day as nd
+
+    return SERIES_ROOT or nd.analysis_series_root(aoi_id)
+
+
+def inputs_used(aoi_id: int) -> str:
+    """One line naming the inputs behind the curves and the rule: series folder, its newest date, radar run."""
+    from .analysis import ndvi_5day as nd
+    from .analysis import pixel_report as pr
+
+    root = series_root(aoi_id)
+    dates = nd.series_dates(root, f"aoi{aoi_id}")
+    run = Path(pr.locate(aoi_id, 0, season_key="monsoon2026")["run"]).name
+    return f"series {Path(root).name}" + (f" (S2 to {dates[-1]})" if dates else "") + f", radar run {run}"
 
 
 def fresh_at(aoi_id: int, pids, fresh_root: str = FRESH) -> dict:
@@ -238,7 +258,7 @@ def rule_at(aoi_id: int, pids) -> dict:
 
     pids = np.asarray(pids, dtype=int)
     with cr.rules_for(aoi_id):                 # the AOI's own rules (curve_rules.AOI_OVERRIDES), as on its map
-        f = cr.own_range_features(aoi_id, pids, SERIES_ROOT)
+        f = cr.own_range_features(aoi_id, pids, series_root(aoi_id))
         cls = cr.classify_relative(f)
     shares = (cls.value_counts(normalize=True) * 100).round(0)
     feats = {c: round(float(f[c].median()), 2) for c in f.columns
@@ -248,11 +268,14 @@ def rule_at(aoi_id: int, pids) -> dict:
     sd = f["sowing_day"].where(f["sowing_day"] >= 0) if "sowing_day" in f else pd.Series(dtype=float)
     out = {"rule_class": shares.index[0], "rule_shares": {k: f"{v:.0f} %" for k, v in shares.items()},
            "rule_features": feats,
+           "inputs": inputs_used(aoi_id),
            "rule_set": ("aoi160 rules" + (" + this AOI's own: " + ", ".join(f"{k}={v}" for k, v in
                                                                          cr.AOI_OVERRIDES[aoi_id].items())
                                           if cr.AOI_OVERRIDES.get(aoi_id) else "")),
            "rule_sowing": (pd.Timestamp("1970-01-01") + pd.Timedelta(days=float(sd.median()))).normalize()
-           if sd.notna().any() else pd.NaT}
+           if sd.notna().any() else pd.NaT,
+           "rule_sowing_from": SOWING_SOURCES.get(int(f["sowing_from"].mode().iloc[0]), "")
+           if "sowing_from" in f and f["sowing_from"].notna().any() else ""}
     lab = cl.load()
     lab = lab[(lab["aoi"] == aoi_id) & lab["pixel"].isin(pids)]
     if len(lab):
@@ -270,7 +293,20 @@ RULE_FEATURE_NAMES = {
     "ndvi_rise_days": "days 10 -> 90 % green-up (fit)", "ndvi_rise_seen": "days 10 -> 90 % (clear views)",
     "days_since_peak": "days since NDVI peak", "crop_age": "crop age, days since last at low", "days_at_top": "days held at top", "days_off_top": "days since last at top",
     "vh_rise_recent": "VH rise since recent low", "vv_rise_recent": "VV rise since recent low",
-    "vv_step_end": "VV change, last pass", "water_spell": "water while crop small (1 = yes)"}
+    "vv_step_end": "VV change, last pass", "water_spell": "water while crop small (1 = yes)",
+    "sowing_from": "sowing date from (0 NDVI, 1 radar water end, 2 radar rise, 3 radar water start)"}
+
+
+#: Where the rule's sowing date came from (``curve_rules.own_range_features`` column ``sowing_from``), for the plot.
+SOWING_SOURCES = {0: "NDVI: end of the empty spell", 1: "radar: end of the water spell (transplanting)",
+                  2: "radar: VH leaves its low (no clear view)", 3: "radar: start of the water spell"}
+
+
+def _sowing_label(rule: dict) -> str:
+    """The text on the sowing line: where the date came from (user, 2 Oct: when the optical cannot see the sowing the
+    radar gives the date, and the plot must say so)."""
+    src = rule.get("rule_sowing_from")
+    return f"sowing ({src})" if src else "sowing (last empty spell)"
 
 
 def _sowing(rule: dict, fresh: dict):
@@ -293,7 +329,9 @@ def annotate_rule(fig, rule: dict) -> None:
         head += "   |   your label: " + "; ".join(rule["your_labels"].values())
     if rule.get("rule_set"):
         head += f"\nrules used: {rule['rule_set']}"
-    fig.suptitle(head, fontsize=11, fontweight="bold", y=0.995 if "\n" not in head else 1.02)
+    if rule.get("inputs"):
+        head += f"\ninputs: {rule['inputs']}"
+    fig.suptitle(head, fontsize=11, fontweight="bold", y=0.995 if "\n" not in head else 1.0 + 0.025 * head.count("\n"))
     lines = [f"{RULE_FEATURE_NAMES[k]}: {rule['rule_features'][k]}" for k in RULE_FEATURE_NAMES
              if k in rule.get("rule_features", {})]
     ax = fig.axes[0]
@@ -412,7 +450,7 @@ def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect
     from .analysis import water_investigation as wi
 
     info = {"aoi": f"aoi{aoi_id}", "pixel_id": pid, "classes_at_pixel": classes_at(aoi_id, pid)}
-    g = nd.load(aoi_id, out_root=SERIES_ROOT)["loc"]["grid"]
+    g = nd.load(aoi_id, out_root=series_root(aoi_id))["loc"]["grid"]
     block_pids = wi.block_pids(int(pid), int(g["width"]), int(g["height"]), block)
     fresh = fresh_at(aoi_id, block_pids)
     info.update({k: v for k, v in fresh.items() if k != "sowing_date"})
@@ -421,8 +459,9 @@ def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect
     figs = {}
     figs["curve"], figs["chips"], ev = wi.group_sheet(aoi_id, int(pid), block=block, out_dir=out_dir,
                                                       file_stem=f"aoi{aoi_id}_pid{pid}_{block}x{block}",
-                                                      label=f"({block}x{block} pixels)", series_root=SERIES_ROOT,
-                                                      sowing=_sowing(rule, fresh))
+                                                      label=f"({block}x{block} pixels)", series_root=series_root(aoi_id),
+                                                      sowing=_sowing(rule, fresh),
+                                                      sowing_label=_sowing_label(rule))
     annotate_rule(figs["curve"], rule)
     if "sowing_date" in fresh:
         info["sowing_date"] = str(ev.get("sowing_date", ""))
@@ -454,7 +493,7 @@ def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = Tr
     if not len(fpids):
         info["note"] = "the field is smaller than one pixel: no curve of its own"
         return info
-    d = nd.load(aoi_id, out_root=SERIES_ROOT)
+    d = nd.load(aoi_id, out_root=series_root(aoi_id))
     g = d["loc"]["grid"]
     rr, cc = np.divmod(fpids, int(g["width"]))
     centre = int(np.round(np.median(rr)) * int(g["width"]) + np.round(np.median(cc)))
@@ -471,8 +510,9 @@ def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = Tr
     figs = {}
     figs["curve"], figs["chips"], ev = wi.group_sheet(aoi_id, centre, out_dir=out_dir, file_stem=field_id,
                                                       label=f"field {field_id} ({len(fpids)} px)",
-                                                      pids=fpids, outline=(ox, oy), series_root=SERIES_ROOT,
-                                                      sowing=_sowing(rule, fresh))
+                                                      pids=fpids, outline=(ox, oy), series_root=series_root(aoi_id),
+                                                      sowing=_sowing(rule, fresh),
+                                                      sowing_label=_sowing_label(rule))
     annotate_rule(figs["curve"], rule)
     if "sowing_date" in fresh:
         info["sowing_date"] = str(ev.get("sowing_date", ""))

@@ -308,9 +308,12 @@ def own_levels(tracks, track_of, end_day, passes: int = END_PASSES) -> dict:
     return {"end": end, "noise": noise}
 
 
-def read_series(aoi_id: int, season_key: str = "monsoon2026", window: int = 5) -> list:
-    """Every track of the AOI's radar season as ``[(dates, {"VV": (dates, pixels), "VH": ...}), ...]`` in dB."""
-    loc = pr.locate(aoi_id, 0, season_key=season_key)
+def read_series(aoi_id: int, season_key: str = "monsoon2026", window: int = 5, run_id: str | None = None) -> list:
+    """Every track of the AOI's radar season as ``[(dates, {"VV": (dates, pixels), "VH": ...}), ...]`` in dB.
+
+    ``run_id``: the radar run to read; None = the run the analysis is pinned to (``config.analysis_run_dir``), so a
+    newer run never changes an AOI's results until it is chosen on purpose."""
+    loc = pr.locate(aoi_id, 0, season_key=season_key, run_id=run_id)
     series = []
     for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
         dates, cubes = sar_curve.read_track(loc, track, window)

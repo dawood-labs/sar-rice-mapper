@@ -66,6 +66,12 @@ VARIANTS["relm1late"] = dict(VARIANTS["hyb40m1"], cs_relative=True)
 #: the end is a property of the series, not of the mask. The rule needs no end of its own: the season
 #: follows the series (``monsoon_rule.season_to_series``) and the map date is the last window.
 SERIES_END = {"hyb40m1late": "2026-09-29", "relm1late": "2026-09-29"}      # includes the 26 and 28 Sep images
+#: The newer-imagery update of 2 Oct 2026: exactly the ``hyb40m1late`` mask and settings, the series run on to the
+#: 1 Oct images (window of 1 Oct). Why a new variant and not a rebuild of ``hyb40m1late``: accepted (locked) AOIs read
+#: that series, and a rebuild would change their maps; a variant gets its own folder (:func:`root`) and its own date
+#: record (``ndvi_5day.series_dates``), so the old series stays exactly as it was until an AOI is switched on purpose.
+VARIANTS["hyb40m1late_20261001"] = dict(VARIANTS["hyb40m1late"])
+SERIES_END["hyb40m1late_20261001"] = "2026-10-02"
 OUT = f"{BASE}/report/mask_experiment"
 
 

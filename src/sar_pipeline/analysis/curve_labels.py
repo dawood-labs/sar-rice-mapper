@@ -61,7 +61,7 @@ def add(rows, store: Path = STORE, sowing: str = "", establishment: str = "", st
     return t
 
 
-def describe(aoi: int, pixel: int, series_root: str = "processed/_batch/s2_2026_hyb40m1late",
+def describe(aoi: int, pixel: int, series_root: str | None = None,
              start: str = "2026-04-01") -> dict:
     """The numbers the user and Claude read before a label (1 Oct): the fitted NDVI per 5-day window (``*`` = a clear
     view that window), every clear view with NDVI and LSWI (water: NDVI near or below 0 and LSWI above NDVI), every
@@ -82,7 +82,7 @@ def describe(aoi: int, pixel: int, series_root: str = "processed/_batch/s2_2026_
                 v = int(ds.read(1).ravel()[pixel])
             out[name] = str((pd.Timestamp("2026-01-01") + pd.Timedelta(days=v - 1)).date()) if f == "step2_sowing" and v \
                 else v
-    d = nd.load(aoi, out_root=series_root)
+    d = nd.load(aoi, out_root=series_root or nd.analysis_series_root(aoi))   # the AOI's pinned series
     w = pd.DatetimeIndex(d["windows"])
     f = d["ndvi5d"].reshape(len(w), -1)[:, pixel]
     r = d["ndvi5d_raw"].reshape(len(w), -1)[:, pixel]

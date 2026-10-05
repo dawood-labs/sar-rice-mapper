@@ -16,6 +16,8 @@ Use::
     python -m sar_pipeline.analysis.curve_rules run --aoi 160        # the relative rule on the whole AOI -> map, and
                                                                      # the same map sieved at 0.5 ac (_sieved.tif)
     python -m sar_pipeline.analysis.curve_rules fields --aoi 160     # delineated fields labelled from the sieved map
+    python -m sar_pipeline.analysis.curve_rules try-rules --aoi 116  # step 1 on a new AOI: raw map with each finished
+                                                                     # AOI's rule set side by side (rule_trials/)
 """
 from __future__ import annotations
 
@@ -45,6 +47,74 @@ TREE_LOW_BEFORE = None
 #: young rice, whatever the optical curve says (aoi72, user 2 Oct, pixel 42109: water on 13 Sep, no view on 26 Sep,
 #: VV -15.7 -> -8.2; the rule had called it "harvested"). Off for aoi160 / aoi28.
 YOUNG_AFTER_LAST_WATER = False
+#: Young rice also when the radar has not yet reached the top of its own range (VH below ``LOW_NOW``) and shows plants
+#: coming up, while the newest clear view is the season's greenest and still rising: the canopy is not closed yet,
+#: whatever the day count says (aoi72, user 2 Oct, pixel 19247: water to late July, VV up from early August, NDVI only
+#: 0.47 on 13 Sep and still climbing; the fit held flat after that view looked like "15 days at the top" and the age
+#: from the first water was 88 days). Off for aoi160 / aoi28.
+YOUNG_WHILE_RADAR_LOW = False
+#: ...and only while the radar is still climbing on its last passes (VH up ``RISING`` over the last three, or a VV jump
+#: on the last pass), not merely risen once since an earlier low: a dense / ripening canopy LOWERS the radar while its
+#: NDVI is at the top (aoi39, user 3 Oct, pixel 11226: water to 8 Aug, NDVI 0.88 on 13 Sep, VV -7 -> -13.4 in
+#: September: transplanted standing, not young). Off = the aoi72 / aoi116 behaviour (locked).
+YOUNG_RADAR_LOW_NEEDS_RISE = False
+#: The "grown / ripening canopy" guard (``HELD_DAYS``: a canopy at its top for weeks keeps a low radar off the flooded
+#: path) does not apply when the newest clear view shows open water: a ripening canopy never looks like water on the
+#: optical (aoi39, user 3 Oct, pixel 21405: no clear view 11 May - 24 Aug, the fit's July "top" was interpolated, under
+#: water from mid July to 13 Sep (NDVI -0.85): flooded, not harvested). Off for the locked AOIs.
+GROWN_NOT_IF_WATER_VIEW = False
+#: Permanent water (fish pond, lake): most clear views of the DRY season (``DRY_SEASON_FROM`` to ``DRY_UNTIL``) show water
+#: (NDVI below 0, or LSWI above NDVI) -> flooded / bare. A paddy is dry or bare in March-April; a pond holds water all
+#: year (aoi39, user 3 Oct, pixel 30425: teal rectangle with thick bunds in every chip, NDVI -0.5..-1.0 in April, radar
+#: dark all year; the rule called it direct seeded). Off for the locked AOIs.
+POND_IF_DRY_WATER = False
+#: A second crop: a DEEP radar water spell that began after the NDVI curve had already left its top (an earlier crop's
+#: peak) is a new, transplanted crop, classed by the radar and its age from that water (young up to ``YOUNG_MAX_DAYS``,
+#: else standing transplanted), whatever the NDVI features of the first crop say (aoi39, user 3 Oct, pixel 24716: a
+#: crop to NDVI 0.64 in May-June, deep water 15 Jul - end Aug, radar up in Sep; the rule said tree/orchard). "Deep":
+#: on one pass VV AND VH both fall at least ``WATER_DEPTH_K`` times their own pass-to-pass wobble below their own
+#: dry-season level (``water_depth``), so a tree's small dip does not count (aoi39: trees 90 % below 2.1). Off for the
+#: locked AOIs. The crop must also be up now (VH out of the lower part of its range, ``LOW_NOW``): a field still under
+#: that water has no crop yet (aoi39 pixel 21405: flooded from mid July, VH at 0.13 of its range -> stays flooded).
+SECOND_CROP_BY_RADAR = False
+WATER_DEPTH_K = 3.0
+#: User rule (3 Oct 2026, aoi39 pixel 21618): "whenever and wherever there is no NDVI, the decision is made by the radar
+#: alone". When the radar shows a DEEP water spell (``WATER_DEPTH_K``) and the optical did not see that spell (no clear
+#: view showing water during it, and fewer than ``OPTICAL_VIEWS_MIN`` clear views in it), the NDVI tests (tree / orchard,
+#: other vegetation, harvested) are not used: radar low now with no plants coming up -> flooded / bare, otherwise
+#: transplanted rice, young or standing by its age (a dense canopy lowers the radar too: aoi39 pixel 11226). Off
+#: by default (the locked AOIs keep their results); on for aoi39 and, by the user's decision, for every new AOI.
+RADAR_DECIDES_WITHOUT_OPTICAL = False
+OPTICAL_VIEWS_MIN = 2
+DRY_SEASON_FROM = "2026-03-01"
+#: Tree / orchard only when the radar saw NO water spell (two wet passes while the crop was small): trees do not stand in
+#: water for weeks. Why (aoi116, user 2 Oct, pixel 168977): no clear view from 31 May to 13 Sep, so the NDVI low/peak
+#: (0.38 / 0.61) said "never emptied" while both radar tracks showed water mid June - mid July and a crop rising after.
+#: User rule: where the optical has no view, the radar decides. Off for aoi160 / aoi28 / aoi72.
+TREE_NEEDS_NO_WATER = False
+#: Sowing / transplanting date (and the crop age that decides young vs standing) from the RADAR wherever the optical
+#: cannot see it (user, 2 Oct, aoi116 pixel 186792: "why not give the radar priority for the sowing date when we know
+#: NDVI is not available"): a transplanted crop (radar water spell) was planted at the END of its water spell, the last
+#: pass at water level before the radar rises (seedlings in water are invisible to the optical; 186792: water mid June -
+#: end of August, radar up on 10-13 Sep: planted ~1 Sep, not 26 Jun when the water came); any other crop at the end of
+#: its empty NDVI spell when a clear view lies within one series step of it, else at the last pass with VH at the bottom
+#: of its own range before its season top. ``sowing_from`` says which. Off for aoi160 / aoi28 / aoi72 (locked).
+SOWING_FROM_RADAR = False
+#: How the tracks' "last pass at water level" dates combine into one transplanting date: "median" (the default way every
+#: radar feature is combined); "earliest": the first track to show the plants rising (aoi116, user 2 Oct, pixel 116025:
+#: the ascending track's VV rose with plants from 8 Aug while the descending track read water again on 17 / 29 Aug; the
+#: median, 12 Aug, made a crop at NDVI 0.79 on 13 Sep "31 days old"); "earliest_unless_wet_view": the earliest, unless
+#: a clear optical view AFTER it still shows water (LSWI above NDVI): then the water had not ended and the latest track
+#: is right (aoi116 pixel 143310: same track split as 116025, but 24 Aug view water and NDVI 0.37 on 13 Sep: young);
+#: also the latest when the pixel's newest clear view is greener than fewer than ``BEHIND_SHARE`` of the AOI's clear
+#: pixels that day: a crop far behind nearly all fields was planted later (aoi116 pixel 108161: no view from 8 May to
+#: 13 Sep, NDVI 0.41 on 13 Sep while 90 % of the AOI's fields were above 0.57; 116025 at 0.79 stays early).
+#: User rule: the radar decides where the optical cannot see; where a clear view exists, it settles the tracks' dispute.
+WATER_END_TRACKS = "median"
+#: See ``WATER_END_TRACKS``: "behind nearly all fields" = below this share (percentile / 100) of the AOI's clear NDVI on
+#: the pixel's newest clear date. A date seen clear on less than ``BEHIND_MIN_CLEAR`` of the AOI is not used.
+BEHIND_SHARE = 0.10
+BEHIND_MIN_CLEAR = 0.25
 #: Crop age of a transplanted crop (water spell while small) counts from the water spell's first pass, not from the end
 #: of the low NDVI spell (aoi72, user 2 Oct, pixel 27550). Off for aoi160 / aoi28.
 AGE_FROM_WATER = False
@@ -81,10 +151,12 @@ def _radar_events(dates, vv, vh, k: float = WATER_K):
     return water, later_max - vv
 
 
-def features(aoi: int, pixels, series_root: str = "processed/_batch/s2_2026_hyb40m1late",
+def features(aoi: int, pixels, series_root: str | None = None,
              start: str = START) -> pd.DataFrame:
     """The measured story of each pixel since ``start`` (see the module docstring)."""
     from . import ndvi_5day as nd
+
+    series_root = series_root or nd.analysis_series_root(aoi)   # the AOI's pinned series
     from . import radar_water as rw
 
     px = np.asarray(pixels, dtype=int)
@@ -232,7 +304,7 @@ def classify(f: pd.DataFrame) -> pd.Series:
 DRY_UNTIL = "2026-05-01"
 
 
-def relative_features(aoi: int, pixels, series_root: str = "processed/_batch/s2_2026_hyb40m1late",
+def relative_features(aoi: int, pixels, series_root: str | None = None,
                       start: str = START) -> pd.DataFrame:
     """Each pixel against ITSELF (user, 1 Oct: "rise above hard-coded numbers: rate of change, acceleration,
     derivatives, relative change"). No dB or NDVI level is compared with a fixed number:
@@ -251,6 +323,8 @@ def relative_features(aoi: int, pixels, series_root: str = "processed/_batch/s2_
       by 2 wobbles, on the same grid step) to the start of the sustained VH rise (positive: water first, transplanted;
       negative: the crop rose first, water came later)."""
     from . import ndvi_5day as nd
+
+    series_root = series_root or nd.analysis_series_root(aoi)   # the AOI's pinned series
     from . import radar_water as rw
     from .radar_water import pass_noise
 
@@ -359,10 +433,20 @@ WATER_DROP = 0.3
 #: None: the fall is measured from the last pass outside the bottom (aoi160 / aoi28). N days: from the highest pass of
 #: the last N days (aoi72: a long flood's previous pass is itself water).
 WATER_FALL_LOOKBACK_DAYS = None
+#: Which polarisations must FALL into the bottom for a wet pass: "both" (aoi160 / aoi28 / aoi72) or "VV": VV must fall,
+#: VH only has to be at the bottom (aoi116, user 2 Oct, pixels 217385 / 112734: dry May soil was already dark in VH, so
+#: the flooding dropped VV by 7-8 dB but VH by ~1 dB and no water spell was found -> "direct seeded"; the user: these
+#: are transplanted; a water dip is a VV dip, as for aoi160 pixel 20951).
+WATER_FALL_POLS = "both"
 #: Wet passes count from mid-May (April-early May dry bare soil is also at the bottom of the range).
 WATER_FROM = "2026-05-15"
 #: Two wet passes within this many days (any track) = standing water, not one wet day.
 WATER_SPELL_DAYS = 15
+#: Wet passes (while the crop is small) needed within ``WATER_SPELL_DAYS`` for a water spell: 2 (aoi160 / aoi28 / aoi72 /
+#: aoi116; user 1 Oct: one wet pass is water given later to a direct-seeded crop). 1 for aoi39 (user, 3 Oct, pixel 8384:
+#: one pass with VV and VH both at water level on 27 Jul, the passes around it VH low with VV high = seedlings standing
+#: in water; transplanted, not direct seeded).
+WATER_SPELL_MIN_PASSES = 2
 #: "Crop still small": the fitted NDVI below this share of its own rise.
 SMALL_SHARE = 0.5
 
@@ -390,7 +474,7 @@ def _last_k(x, k: int) -> np.ndarray:
     return packed[-k:]
 
 
-def own_range_features(aoi: int, pixels, series_root: str = "processed/_batch/s2_2026_hyb40m1late",
+def own_range_features(aoi: int, pixels, series_root: str | None = None,
                        start: str = START) -> pd.DataFrame:
     """Every signal on the pixel's OWN season range (0 = its own low since ``start``, 1 = its own high; 10th / 90th
     percentile so one speckle does not set the scale), per radar track on the real passes, then the median over tracks.
@@ -409,12 +493,15 @@ def own_range_features(aoi: int, pixels, series_root: str = "processed/_batch/s2
       curve first reached 90 % of its rise.
     Vectorised over pixels (a whole AOI in one call)."""
     from . import ndvi_5day as nd
+
+    series_root = series_root or nd.analysis_series_root(aoi)   # the AOI's pinned series
     from . import radar_water as rw
     from .radar_water import pass_noise
 
     px = np.asarray(pixels, dtype=int)
     acc = {}
     joints = []                                   # (dates, (passes, pixels) bool): VV AND VH at their own bottom
+    depth = []                                    # per track: deepest same-pass VV + VH fall (own wobbles)
     for dd, flat in rw.read_series(aoi):
         dd = pd.DatetimeIndex(dd)
         use = dd >= pd.Timestamp(start)
@@ -444,7 +531,8 @@ def own_range_features(aoi: int, pixels, series_root: str = "processed/_batch/s2
                     if w_.any():
                         ref_h[i] = np.nanmax(pos[0][w_], axis=0)
                         ref_v[i] = np.nanmax(pos[1][w_], axis=0)
-                wet = bottom & (ref_h - pos[0] >= WATER_DROP) & (ref_v - pos[1] >= WATER_DROP)
+                wet = bottom & (ref_v - pos[1] >= WATER_DROP) & (
+                    (ref_h - pos[0] >= WATER_DROP) | (WATER_FALL_POLS == "VV"))
             else:
                 idx = np.where(~bottom & np.isfinite(pos[0]) & np.isfinite(pos[1]), np.arange(n_p)[:, None], -1)
                 last_out = np.maximum.accumulate(idx, axis=0)
@@ -452,9 +540,41 @@ def own_range_features(aoi: int, pixels, series_root: str = "processed/_batch/s2
                 ref = np.clip(last_out, 0, None)
                 drop_h = pos[0][ref, cols] - pos[0]
                 drop_v = pos[1][ref, cols] - pos[1]
-                wet = bottom & (last_out >= 0) & (drop_h >= WATER_DROP) & (drop_v >= WATER_DROP)
+                wet = bottom & (last_out >= 0) & (drop_v >= WATER_DROP) & (
+                    (drop_h >= WATER_DROP) | (WATER_FALL_POLS == "VV"))
         late = np.asarray(dd[use] >= pd.Timestamp(WATER_FROM))[:, None]
         joints.append((dd[use], wet & late))
+        # radar start of the crop: the last pass with VH at the bottom of its own range before the crop's VH top. The
+        # top is searched only AFTER the first pass at water level: a wet-soil spike before the flooding is not the
+        # crop (aoi116 pixel 143310, descending track: VH -13.1 on 18 May hid the August water passes)
+        with np.errstate(invalid="ignore"):
+            ph = pos[0]
+            n_ = np.arange(len(ph))[:, None]
+            first_bot = np.where((bottom & late).any(axis=0), np.argmax(bottom & late, axis=0), 0)
+            itop = np.where(late & np.isfinite(ph) & (n_ >= first_bot[None, :]), ph, -np.inf).argmax(axis=0)
+            low_pass = (ph <= WATER_BOTTOM) & late & (np.arange(len(ph))[:, None] < itop[None, :])
+        pday = dd[use].to_numpy().astype("datetime64[D]").astype("int64")
+        ilow = len(ph) - 1 - np.argmax(low_pass[::-1], axis=0)
+        acc.setdefault("_radar_rise_start", []).append(np.where(low_pass.any(axis=0), pday[ilow], np.nan))
+        # the last pass with VV AND VH both at the bottom of their range before that top: still water level. In a long
+        # flood no pass after the first weeks is a FALL (the passes before are water too), so the end of the water is
+        # read from the level, not from the wet-pass test (aoi116 pixel 186792: water to 1 Sep, "wet" only to 5 Aug)
+        with np.errstate(invalid="ignore"):
+            at_bottom = bottom & late & (np.arange(len(ph))[:, None] < itop[None, :])
+        ibot = len(ph) - 1 - np.argmax(at_bottom[::-1], axis=0)
+        acc.setdefault("_water_level_end", []).append(np.where(at_bottom.any(axis=0), pday[ibot], np.nan))
+        # water depth: the deepest same-pass fall of VV and VH below their own dry-season level, in own wobbles
+        dry_all = np.asarray(dd < pd.Timestamp(DRY_UNTIL))
+        if dry_all.sum() >= 2:
+            fall = []
+            with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
+                warnings.simplefilter("ignore", RuntimeWarning)
+                for pol in ("VV", "VH"):
+                    xf = np.asarray(flat[pol], dtype="float32")[:, px]
+                    nz = pass_noise(xf)
+                    fall.append((np.nanmedian(xf[dry_all], axis=0) - xf) / np.where(nz > 0, nz, np.nan))
+                both = np.fmin(fall[0], fall[1])[np.asarray(dd >= pd.Timestamp(WATER_FROM))]
+                depth.append(np.nanmax(both, axis=0) if len(both) else np.full(len(px), np.nan))
         for pol in ("VH", "VV"):
             x, lo, hi = cube[pol]
             with warnings.catch_warnings(), np.errstate(invalid="ignore", divide="ignore"):
@@ -475,6 +595,10 @@ def own_range_features(aoi: int, pixels, series_root: str = "processed/_batch/s2
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         out = {k: np.nanmedian(np.stack(v), axis=0) for k, v in acc.items()}
+        out["water_depth"] = np.nanmax(np.stack(depth), axis=0) if depth else np.full(len(px), np.nan)
+        track_ends = np.stack(acc["_water_level_end"]) if "_water_level_end" in acc else None
+        if WATER_END_TRACKS in ("earliest", "earliest_unless_wet_view") and track_ends is not None:
+            out["_water_level_end"] = np.nanmin(track_ends, axis=0)
     d = nd.load(aoi, out_root=series_root)
     dt = pd.DatetimeIndex(d["dates"])
     nv = d["ndvi"].reshape(len(dt), -1)[:, px].astype("float32")
@@ -490,6 +614,7 @@ def own_range_features(aoi: int, pixels, series_root: str = "processed/_batch/s2
     wet_win = np.zeros(fit_all.shape, dtype=bool)
     np.logical_or.at(wet_win, k_, wet_date)
     fit = water_aware_fit(fit_all, raw_all, wet_win)[sel]
+    gaps = d["gapdays5d"].reshape(len(w), -1)[:, px][sel]     # days from each window to the nearest clear view
     w = w[sel]
     newest = dt[ok.any(axis=1)].max()
     nd.forget()
@@ -510,6 +635,12 @@ def own_range_features(aoi: int, pixels, series_root: str = "processed/_batch/s2
         lv_ = d["lswi"].reshape(len(dt), -1)[:, px].astype("float32")
         lw = _last_k(np.where(ok, lv_, np.nan), 1)[-1]
         out["last_view_water"] = ((last2[-1] < 0) | (lw > last2[-1])).astype(float)
+        # share of the dry-season clear views that show water (permanent water / ponds; see POND_IF_DRY_WATER)
+        dry_ = ((dt >= pd.Timestamp(DRY_SEASON_FROM)) & (dt < pd.Timestamp(DRY_UNTIL)))[:, None]
+        ok_dry = d["ok"].reshape(len(dt), -1)[:, px].astype(bool) & dry_
+        wet_dry = ok_dry & ((nv < 0) | (lv_ > nv))
+        out["dry_water_share"] = np.where(ok_dry.any(axis=0), wet_dry.sum(axis=0) / np.maximum(ok_dry.sum(axis=0), 1),
+                                          np.nan)
         out["ndvi_slope_end"] = (last2[-1] - last2[-2]) / amp
         # green-up seen on clear views: from the last clear view still near the season low (<= 10 % of the rise) to
         # the first clear view at >= 90 %, before the peak view. An UPPER bound of the green-up time: when it is short
@@ -576,7 +707,7 @@ def own_range_features(aoi: int, pixels, series_root: str = "processed/_batch/s2
         cs = np.vstack([np.zeros((1, M.shape[1]), dtype=int), np.cumsum(M, axis=0)])
         hi_i = np.searchsorted(D, D + WATER_SPELL_DAYS, side="right")
         counts = cs[hi_i] - cs[np.arange(len(D))]
-        qual = (counts >= 2) & (M > 0)
+        qual = (counts >= WATER_SPELL_MIN_PASSES) & (M > 0)
         out["water_spell"] = qual.any(axis=0).astype(float)
         # the rule's own sowing date (days since 1970): a transplanted crop was planted when the water spell began; any
         # other crop when its empty spell ended (user, 2 Oct, aoi28 pixel 4227: the notebook showed step 2's June
@@ -589,6 +720,52 @@ def own_range_features(aoi: int, pixels, series_root: str = "processed/_batch/s2
             # optical for weeks, so the end of the low NDVI spell comes far too late (aoi72 pixel 27550: water from
             # 12 Jul, NDVI low until 12 Aug, "45 days" -> 76 days)
             out["crop_age"] = np.where(first_wet >= 0, wd[-1] - first_wet, out["crop_age"]).astype(float)
+        # where the date came from: 0 NDVI (end of the empty spell), 1 radar (end of the water spell), 2 radar (VH
+        # leaves the bottom of its range), 3 radar (start of the water spell, the pre-SOWING_FROM_RADAR date)
+        out["sowing_from"] = np.where(first_wet >= 0, 3.0, 0.0)
+        rise = out.pop("_radar_rise_start")
+        level_end = out.pop("_water_level_end")
+        # the optical during the water spell (first wet pass -> last pass at water level): how many clear views, and
+        # how many of them show water (RADAR_DECIDES_WITHOUT_OPTICAL)
+        last_wet_any = np.where((M > 0).any(axis=0), D[len(D) - 1 - np.argmax((M > 0)[::-1], axis=0)], -1)
+        w_end = np.where(qual.any(axis=0), np.fmax(np.nan_to_num(level_end, nan=-1), last_wet_any), -1)
+        tday = dt.to_numpy().astype("datetime64[D]").astype("int64")[:, None]
+        in_spell = ok & (tday >= first_wet[None, :]) & (tday <= w_end[None, :]) & (first_wet >= 0)[None, :]
+        out["views_in_water"] = np.where(first_wet >= 0, in_spell.sum(axis=0), np.nan).astype(float)
+        out["water_views_in_water"] = np.where(first_wet >= 0, (in_spell & ((nv < 0) | (lv_ > nv))).sum(axis=0),
+                                               np.nan).astype(float)
+        if SOWING_FROM_RADAR:
+            # end of the water spell: the later of the last wet pass and the last pass still at water level (median
+            # over tracks) before the radar rises; only for a pixel with a water spell
+            last_wet = np.where((M > 0).any(axis=0), D[len(D) - 1 - np.argmax((M > 0)[::-1], axis=0)], -1)
+            if WATER_END_TRACKS == "earliest_unless_wet_view" and track_ends is not None:
+                # the newest clear view showing water (LSWI above NDVI) since WATER_FROM; later than the earliest
+                # track's end -> the water had not ended there: take the latest track's end
+                wv = wet_date & (dt >= pd.Timestamp(WATER_FROM))[:, None]
+                last_view_wet = np.where(wv.any(axis=0), np.max(np.where(wv, tdays[:, None], -1), axis=0), -1)
+                # ...or the newest clear view is behind nearly all of the AOI's fields that day (AOI-relative)
+                full_ok = d["ok"].reshape(len(dt), -1).astype(bool) & (dt >= pd.Timestamp(start))[:, None]
+                inside = nd.inside_from_loc(d["loc"])
+                full_v = d["ndvi"].reshape(len(dt), -1)
+                inew = len(dt) - 1 - np.argmax(ok[::-1], axis=0)              # each pixel's newest clear date
+                ref = np.full(len(px), np.nan, dtype="float32")
+                for j in np.unique(inew[ok.any(axis=0)]):
+                    sel_ = full_ok[j] & inside
+                    if sel_.sum() >= BEHIND_MIN_CLEAR * inside.sum():
+                        ref[inew == j] = np.percentile(full_v[j][sel_], 100 * BEHIND_SHARE)
+                with np.errstate(invalid="ignore"):
+                    behind = np.where(ok.any(axis=0), nv[inew, np.arange(len(px))], np.nan) < ref
+                later = (last_view_wet > np.nan_to_num(level_end, nan=-1)) | behind
+                level_end = np.where(later, np.nanmax(track_ends, axis=0), level_end)
+            spell_end = np.where(qual.any(axis=0), np.fmax(np.nan_to_num(level_end, nan=-1), last_wet), -1)
+            seen = (i20 >= 0) & (gaps[np.clip(i20, 0, None), np.arange(len(px))] <= nd.STEP_DAYS)
+            radar_rise = np.isfinite(rise) & ~seen
+            sowing = np.where(spell_end >= 0, spell_end, np.where(radar_rise, np.nan_to_num(rise, nan=-1), low_end))
+            out["sowing_from"] = np.where(spell_end >= 0, 1.0, np.where(radar_rise, 2.0, 0.0))
+            out["sowing_day"] = sowing.astype(float)
+            out["crop_age"] = np.where(sowing >= 0, wd[-1] - sowing, out["crop_age"]).astype(float)
+    out.pop("_radar_rise_start", None)
+    out.pop("_water_level_end", None)
     frame = pd.DataFrame({k: np.round(np.asarray(v_, dtype=float), 2) for k, v_ in out.items()})
     frame.insert(0, "pixel", px)
     return frame
@@ -633,15 +810,48 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
         # a real crop that greened over weeks and has stood at its top for weeks: a grown / ripening canopy, whatever
         # the radar does now (a dense or ripening rice canopy lowers VV and VH; user, 1 Oct, 93578 / 74380 / 110873)
         grown = (pd.notna(r.ndvi_rise_days) and r.ndvi_rise_days >= FAST_RISE_DAYS and
-                 pd.notna(r.days_at_top) and r.days_at_top >= HELD_DAYS)
+                 pd.notna(r.days_at_top) and r.days_at_top >= HELD_DAYS and
+                 not (GROWN_NOT_IF_WATER_VIEW and getattr(r, "last_view_water", 0) == 1))
         low_late = (TREE_LOW_BEFORE is not None and pd.notna(getattr(r, "ndvi_low_day", np.nan)) and
                     r.ndvi_low_day >= (pd.Timestamp(TREE_LOW_BEFORE) - pd.Timestamp("1970-01-01")).days)
         radar_rose = (getattr(r, "vh_rise_recent", 0) >= RISE_BOTH and getattr(r, "vv_rise_recent", 0) >= RISE_BOTH) \
             or getattr(r, "vv_step_end", 0) >= VV_JUMP
-        if r.ndvi_low_peak >= TREE_LOW_PEAK and not low_late:
+        radar_water = TREE_NEEDS_NO_WATER and getattr(r, "water_spell", 0) == 1
+        second_crop = (SECOND_CROP_BY_RADAR and getattr(r, "water_spell", 0) == 1 and
+                       getattr(r, "water_depth", 0) >= WATER_DEPTH_K and pd.notna(getattr(r, "days_off_top", np.nan))
+                       and pd.notna(getattr(r, "crop_age", np.nan)) and r.crop_age < r.days_off_top
+                       and r.vh_pos_end >= LOW_NOW)
+        radar_only = (RADAR_DECIDES_WITHOUT_OPTICAL and getattr(r, "water_spell", 0) == 1 and
+                      getattr(r, "water_depth", 0) >= WATER_DEPTH_K and
+                      getattr(r, "water_views_in_water", 1) == 0 and getattr(r, "views_in_water", 99) < OPTICAL_VIEWS_MIN)
+        if POND_IF_DRY_WATER and getattr(r, "dry_water_share", 0) >= 0.5:
+            # most dry-season clear views show water: a pond / permanent water, not a field
+            out.append("flooded / bare")
+        elif radar_only:
+            # the optical never saw this water spell: the radar alone decides
+            # still low: a crop only if VV AND VH both rose half their range (radar_rose); the last passes' small wobble
+            # on standing water is not plants (aoi39 pixel 21635: under water to 25 Sep, 13 Sep view NDVI -1.0)
+            if r.vh_pos_end < LOW_NOW and not radar_rose:
+                out.append("flooded / bare")
+            elif getattr(r, "crop_age", 999) <= YOUNG_MAX_DAYS:
+                # young or standing by the AOI's own crop age (aoi39: from the start of the water). Counting from the END
+                # of the water was tried (pixel 10969) and rejected by the user (3 Oct): it doubled young rice (24 -> 56 ac)
+                out.append("young rice")
+            else:
+                out.append("rice standing transplanted")
+        elif second_crop:
+            # deep water after the NDVI had left its top: a new transplanted crop; its class comes from its age
+            out.append("young rice" if r.crop_age <= YOUNG_MAX_DAYS else "rice standing transplanted")
+        elif r.ndvi_low_peak >= TREE_LOW_PEAK and not low_late and not radar_water:
             out.append("tree/orchard")
         elif YOUNG_AFTER_LAST_WATER and getattr(r, "last_view_water", 0) == 1 and radar_rose:
             # the last clear view was water and the radar rose since: plants in the water the optical has not seen
+            out.append("young rice")
+        elif YOUNG_WHILE_RADAR_LOW and r.vh_pos_end < LOW_NOW and r.ndvi_left >= 1.0 and r.ndvi_slope_end > 0 and (
+                r.vh_slope_end >= RISING or getattr(r, "vv_step_end", 0) >= VV_JUMP or
+                (radar_rose and not YOUNG_RADAR_LOW_NEEDS_RISE)):
+            # the radar is still in the lower part of its range and climbing while the newest clear view is the
+            # season's greenest: the canopy is still closing (young), not a grown crop held at its top
             out.append("young rice")
         elif r.vh_pos_end < LOW_NOW and not grown and not (
                 YOUNG_NEEDS_AGE and getattr(r, "crop_age", 0) > YOUNG_MAX_DAYS and r.ndvi_left >= HELD_LEFT):
@@ -672,7 +882,7 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
 #: AOIs whose result the user accepted (user, 2 Oct: "aoi160 is done and locked"). Their outputs in
 #: ``rice_fresh/aoi<N>/`` are never rewritten (``force=True`` to override on the user's word); the frozen copy, the
 #: code and the labels at lock time are in ``rice_fresh/locked/aoi<N>/`` with checksums (MANIFEST.json).
-LOCKED_AOIS = {160, 28}
+LOCKED_AOIS = {160, 28, 72, 116}
 #: Rule changes for ONE AOI (user, 2 Oct: "try the aoi160 rules first; if they do not work, new rules only for that
 #: AOI, not 160"): ``{aoi: {"NAME": value, "field_polygons.NAME": value}}``. The module constants are the aoi160 rules;
 #: an AOI without an entry runs exactly those.
@@ -685,10 +895,41 @@ AOI_OVERRIDES: dict = {
          "YOUNG_AFTER_LAST_WATER": True,    # pixel 42109: last view water, radar up since -> young rice
          "AGE_FROM_WATER": True,            # pixel 27550: a transplanted crop's age from its water spell
          "WATER_BOTTOM": 0.3,               # pixel 26433: a two-month flood sits at 0.16-0.18 of its own range
-         "WATER_FALL_LOOKBACK_DAYS": 45},   # ...and its fall is from the pre-flood high, not the previous pass
+         "WATER_FALL_LOOKBACK_DAYS": 45,    # ...and its fall is from the pre-flood high, not the previous pass
+         "YOUNG_WHILE_RADAR_LOW": True,     # pixel 19247: radar still low and rising, NDVI still climbing -> young
+         "WATER_SPELL_DAYS": 30},           # pixel 42979: water on 18 May (DSC) and 14 Jun (ASC); the DSC mid-June
+    #                                         pass has its VH dropped (artefact list), so 15 days found one wet pass only
     # TREE_LOW_BEFORE "2026-06-01" was tried for aoi28 (pixel 7826) and reverted by the user (2 Oct): it moved 11.9 ac
     # of trees into rice
 }
+#: aoi39 (user, 3 Oct): works on the aoi160 rule set = the module defaults; the aoi72 set was tried and rejected by the
+#: user (its map is kept in ``rice_fresh/aoi39/rule_trials/rules_aoi72/``). Its own changes, aoi39 ONLY:
+AOI_OVERRIDES[39] = {"YOUNG_WHILE_RADAR_LOW": True,   # pixel 8391: watered late Aug, radar rising, NDVI 0.74 on 13 Sep
+                     #                                  and climbing; "15 days past the peak" was the fit held flat
+                     "YOUNG_RADAR_LOW_NEEDS_RISE": True,  # pixel 11226: dense canopy (NDVI 0.88) lowering the radar in
+                     #                                  September is not young: the radar must still be climbing
+                     "AGE_FROM_WATER": True,          # pixel 11226: transplanted, sown 30 Jun = start of its water spell
+                     "WATER_BOTTOM": 0.3,             # pixel 8384: VV fell gradually into the water level (-7.8 on
+                     "WATER_FALL_LOOKBACK_DAYS": 45,  # 14 Jun, -10.4 on 15 Jul, -10.9 on 27 Jul): fall from the 45-day
+                     "WATER_SPELL_MIN_PASSES": 1,     # high, and one wet pass while small (the passes around it: VH
+#                                                        low with VV high = seedlings in water) -> transplanted, 61 days
+                     "GROWN_NOT_IF_WATER_VIEW": True, # pixel 21405: newest clear view open water -> flooded, not harvested
+                     "POND_IF_DRY_WATER": True,       # pixel 30425: water on the March-April views -> fish pond
+                     "SECOND_CROP_BY_RADAR": True,    # pixel 24716: deep water after an earlier crop, radar up now ->
+#                                                        a new transplanted crop (not tree / other vegetation)
+                     "RADAR_DECIDES_WITHOUT_OPTICAL": True}  # pixel 21618: the optical never saw the water -> radar alone
+#: Every NEW AOI (after aoi39) starts with RADAR_DECIDES_WITHOUT_OPTICAL on (user, 3 Oct: "from now on, wherever there is
+#: no NDVI, the radar alone decides"): put it in that AOI's AOI_OVERRIDES entry together with the chosen rule set.
+NEW_AOI_SWITCHES = {"RADAR_DECIDES_WITHOUT_OPTICAL": True}
+#: aoi116 (user, 2 Oct): starts from the aoi72 rule set, chosen after ``try_rules`` (aoi160 / aoi28 rules: ~3,030 ac
+#: direct seeded; aoi72 rules: ~4,770 ac transplanted, which the user found more plausible). A COPY, so a later aoi116
+#: change never touches the locked aoi72 entry.
+AOI_OVERRIDES[116] = dict(AOI_OVERRIDES[72],
+                          TREE_NEEDS_NO_WATER=True,   # pixel 168977: no optical view Jun-Aug, radar water -> not a tree
+                          SOWING_FROM_RADAR=True,     # pixel 186792: planted at the end of its water spell (~1 Sep)
+                          WATER_END_TRACKS="earliest_unless_wet_view",  # 116025: first track rising (27 Jul);
+#                                                       143310: a water view after it -> the later track (29 Aug)
+                          WATER_FALL_POLS="VV")       # 217385 / 112734: flooding seen as a VV fall; VH already dark
 
 
 @contextmanager
@@ -738,7 +979,14 @@ def lock(aoi: int, sliver_acres: float, fresh: str = "processed/_batch/s2_2026/r
         shutil.copy2(here / n, dst / "code" / n)
     lab = load()
     lab[lab["aoi"] == aoi].to_csv(dst / f"aoi{aoi}_labels_at_lock.csv", index=False)
+    from . import ndvi_5day as nd
+    from . import pixel_report as pr
+
+    # the inputs the result was made with (user, 2 Oct: newer images come in new folders; a lock must say which it used)
+    inputs = {"series_root": nd.analysis_series_root(aoi),
+              "radar_run": Path(pr.locate(aoi, 0, season_key="monsoon2026")["run"]).name}
     man = {"aoi": aoi, "locked": str(pd.Timestamp.now().date()), "final": f"aoi{aoi}_rel_fields_sliver{tag}.gpkg",
+           "inputs": inputs,
            "sliver_acres": sliver_acres, "rules": "aoi160 rules" + (f" + {AOI_OVERRIDES[aoi]}" if aoi in AOI_OVERRIDES
                                                                     else ""),
            "files": {str(p.relative_to(dst)): hashlib.sha256(p.read_bytes()).hexdigest()
@@ -802,7 +1050,7 @@ def manifest_mismatches(ref, man: dict) -> list[str]:
 
 
 def reproduce(aoi: int, scratch, fresh: str = "processed/_batch/s2_2026/rice_fresh",
-              series_root: str = "processed/_batch/s2_2026_hyb40m1late") -> dict:
+              series_root: str | None = None) -> dict:
     """Rebuilds a LOCKED AOI from zero in ``scratch`` (raw rule, sieve, fields with its own rules) and compares it with
     the frozen copy in ``rice_fresh/locked/aoi<N>/`` (:func:`compare_outputs`); also re-checks the frozen files'
     sha256 against MANIFEST.json. Only ``scratch`` is written; the real folder and the locked copy are read only.
@@ -842,12 +1090,14 @@ MAP_CLASSES = {1: ("rice standing direct seeded", "#1a9850"), 7: ("rice standing
                0: ("no data", "#d9d9d9")}
 
 
-def run(aoi: int, series_root: str = "processed/_batch/s2_2026_hyb40m1late",
+def run(aoi: int, series_root: str | None = None,
         fresh: str = "processed/_batch/s2_2026/rice_fresh", force: bool = False) -> pd.DataFrame:
     """Locked-AOI guard and per-AOI rules around :func:`_run`."""
+    from . import ndvi_5day as nd
+
     _guard(aoi, force)
     with rules_for(aoi):
-        return _run(aoi, series_root, fresh)
+        return _run(aoi, series_root or nd.analysis_series_root(aoi), fresh)
 
 
 def _run(aoi: int, series_root: str, fresh: str) -> pd.DataFrame:
@@ -889,6 +1139,40 @@ def _run(aoi: int, series_root: str, fresh: str) -> pd.DataFrame:
                         for k, (n, _) in MAP_CLASSES.items()])
     res.to_csv(f"{stem}_rel.csv", index=False)
     return res
+
+
+#: The finished AOIs whose rule sets a new AOI is tried with first (user, 2 Oct, aoi116: "apply the rules of the 3 AOIs
+#: we have done, tell me the results of each, then we decide which one to tune"). Each source's ``AOI_OVERRIDES`` entry
+#: (none for 160 = the defaults) is applied in turn.
+RULE_SOURCES = (160, 28, 72)
+
+
+def try_rules(aoi: int, sources=RULE_SOURCES, series_root: str | None = None,
+              fresh: str = "processed/_batch/s2_2026/rice_fresh", out: str | None = None) -> pd.DataFrame:
+    """Step 1 on a new AOI: the raw rule map with each finished AOI's rule set, side by side, so the user can pick the
+    set to start tuning from. Each set's map goes to ``rice_fresh/aoi<N>/rule_trials/rules_aoi<src>/aoi<N>/``
+    (``aoi<N>_rel_class.tif`` + style + acre table); the comparison to ``rule_trials/aoi<N>_rule_trials.csv`` (acres
+    per class, one column per rule set). The AOI's own outputs in ``rice_fresh/aoi<N>/`` are not touched, so nothing is
+    chosen until the user decides; the AOI's own pinned inputs are used (``ndvi_5day.analysis_series_root`` and the
+    radar run pin)."""
+    import shutil
+
+    from . import ndvi_5day as nd
+
+    series_root = series_root or nd.analysis_series_root(aoi)
+    out = Path(out) if out else Path(fresh) / f"aoi{aoi}" / "rule_trials"
+    step1 = Path(fresh) / f"aoi{aoi}" / f"aoi{aoi}_step1_cover.tif"
+    cols = []
+    for src in sources:
+        d = out / f"rules_aoi{src}"
+        (d / f"aoi{aoi}").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(step1, d / f"aoi{aoi}" / step1.name)          # the rule's output grid / profile
+        with rules_for(src):
+            res = _run(aoi, series_root, str(d))
+        cols.append(res.set_index(["class", "name"])["acres"].rename(f"aoi{src} rules"))
+    table = pd.concat(cols, axis=1).reset_index()
+    table.to_csv(out / f"aoi{aoi}_rule_trials.csv", index=False)
+    return table
 
 
 #: Smallest patch kept on the map (user, 2 Oct: "sieve to remove noise", 0.5 ac = 20 pixels; 0.2 was tried, user chose 0.5);
@@ -1010,18 +1294,35 @@ def table(aoi: int) -> pd.DataFrame:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["table", "run", "fields"])
+    p.add_argument("step", choices=["table", "run", "fields", "try-rules", "reproduce"])
     p.add_argument("--aoi", type=int, required=True)
+    p.add_argument("--scratch", help="reproduce: a folder OUTSIDE rice_fresh where the locked AOI is rebuilt and compared")
+    p.add_argument("--series-root", default=None,
+                   help="run: the 5-day Sentinel-2 series the rule reads (default: the AOI's pinned series, "
+                        "processed/aoi<N>/monsoon2026/ANALYSIS_SERIES.txt; a newer series has its own folder); the radar "
+                        "run is the AOI's pinned one (python -m sar_pipeline --config ... pin-run)")
     p.add_argument("--out", help="also write the table to this CSV")
     p.add_argument("--force", action="store_true", help="rewrite a LOCKED AOI's outputs (only on the user's word)")
     args = p.parse_args(argv)
     if args.step == "run":
-        print(run(args.aoi, force=args.force).to_string(index=False))
+        print(run(args.aoi, series_root=args.series_root, force=args.force).to_string(index=False))
         print("sieved:")
         print(sieve(args.aoi, force=args.force).to_string(index=False))
         return 0
+    if args.step == "try-rules":
+        print(try_rules(args.aoi, series_root=args.series_root).to_string(index=False))
+        return 0
     if args.step == "fields":
         print(fields(args.aoi, force=args.force).to_string(index=False))
+        return 0
+    if args.step == "reproduce":
+        # proof that a locked AOI still rebuilds exactly (after a restore, or after new inputs were added beside it)
+        if not args.scratch:
+            p.error("reproduce needs --scratch")
+        import json
+
+        out = reproduce(args.aoi, args.scratch)
+        print(json.dumps(out, indent=1, default=str))
         return 0
     t = table(args.aoi)
     pd.set_option("display.width", 320)

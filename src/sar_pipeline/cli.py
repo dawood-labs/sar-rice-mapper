@@ -11,6 +11,7 @@ Usage (see docs/04_runbook.md for the full, ordered procedure):
     python -m sar_pipeline --config ... stack   [--run RUN] [--track TRACK]
     python -m sar_pipeline --config ... pixel   [--run RUN] --track TRACK (--pid PID | --lon LON --lat LAT) [--plot out.png]
     python -m sar_pipeline --config ... resources
+    python -m sar_pipeline --config ... pin-run [--run RUN] [--replace]
 
 Why `--yes`?
     Earth Engine exports cost quota and bulk downloads cost time and disk. Without `--yes`, the
@@ -336,6 +337,18 @@ def cmd_pixel(cfg: dict, args) -> int:
     return EXIT_OK
 
 
+def cmd_pin_run(cfg: dict, args) -> int:
+    """Pin the radar run the ANALYSIS reads (``<season>/ANALYSIS_RUN.txt``; see ``config.analysis_run_dir``).
+
+    Why: the rule and the pixel tools used to read the newest run, so a new run (newer passes) would silently change
+    the results of accepted AOIs. Pin first, then create the new run; switch an AOI with ``--run <new> --replace``."""
+    config_mod = _mod("config")
+    before = config_mod.pinned_run(cfg)
+    run_id = config_mod.pin_analysis_run(cfg, args.run, replace=args.replace)
+    _print(f"{cfg['aoi']['key']}: analysis run pinned to {run_id} (before: {before or 'not pinned, newest run'})")
+    return EXIT_OK
+
+
 def cmd_resources(cfg: dict, args) -> int:
     r = _mod("resources")
     res = r.detect_resources(cfg)
@@ -410,6 +423,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--lat", type=float)
     s.add_argument("--plot", metavar="PNG", help="Save a plot to this file.")
     s.set_defaults(func=cmd_pixel)
+
+    s = sub.add_parser("pin-run", help="Pin the radar run the analysis reads (ANALYSIS_RUN.txt).")
+    s.add_argument("--run", help="Run id (default: the run the analysis reads now).")
+    s.add_argument("--replace", action="store_true", help="Replace an existing pin to a different run (switches the AOI).")
+    s.set_defaults(func=cmd_pin_run)
 
     s = sub.add_parser("resources", help="Show detected machine resources and derived worker counts.")
     s.set_defaults(func=cmd_resources)

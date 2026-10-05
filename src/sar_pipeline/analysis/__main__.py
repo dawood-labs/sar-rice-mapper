@@ -100,7 +100,7 @@ def main(argv=None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = _parser().parse_args(argv)
     cfg = config_mod.load_config(args.config)
-    run = config_mod.run_dir(cfg, args.run)
+    run = config_mod.analysis_run_dir(cfg, args.run)
     if args.step == "gcp-qc":
         from . import gcp_qc
         from .pixel_features import analysis_dir, run_context
@@ -126,10 +126,10 @@ def main(argv=None) -> int:
     elif args.step == "class-map":
         from . import maps
         map_cfg = config_mod.load_config(args.map_config)
-        maps.class_map(cfg, run, args.set, config_mod.run_dir(map_cfg, args.map_run), features_name=args.name)
+        maps.class_map(cfg, run, args.set, config_mod.analysis_run_dir(map_cfg, args.map_run), features_name=args.name)
     elif args.step == "model":
         from . import model
-        map_run = config_mod.run_dir(config_mod.load_config(args.map_config), args.map_run) if args.map_config else None
+        map_run = config_mod.analysis_run_dir(config_mod.load_config(args.map_config), args.map_run) if args.map_config else None
         model.run(cfg, run, map_run, name=args.name)
     elif args.step == "final-models":
         from . import final_models
@@ -138,14 +138,14 @@ def main(argv=None) -> int:
         from pathlib import Path
 
         from . import final_models
-        map_run = config_mod.run_dir(config_mod.load_config(args.map_config), args.map_run)
+        map_run = config_mod.analysis_run_dir(config_mod.load_config(args.map_config), args.map_run)
         final_models.predict(cfg, run, map_run, models_dir=Path(args.models) if args.models else None, name=args.name)
     elif args.step == "field-labels":
         from pathlib import Path
 
         from . import field_labels
         train_cfg = config_mod.load_config(args.train_config) if args.train_config else cfg
-        train_run = config_mod.run_dir(train_cfg, args.train_run) if args.train_config or args.train_run else run
+        train_run = config_mod.analysis_run_dir(train_cfg, args.train_run) if args.train_config or args.train_run else run
         field_labels.run(cfg, run, Path(args.delineation), Path(args.class_raster),
                          prob_raster=Path(args.prob_raster) if args.prob_raster else None,
                          model_path=Path(args.model) if args.model else None,

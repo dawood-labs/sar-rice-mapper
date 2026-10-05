@@ -397,7 +397,7 @@ def block_pids(center: int, width: int, height: int, block: int = 5) -> np.ndarr
 
 def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: str = "",
                 season=("2026-03-15", None), pids=None, outline=None, file_stem: str | None = None,
-                series_root: str = "processed/_batch/s2_2026", sowing=None):
+                series_root: str = "processed/_batch/s2_2026", sowing=None, sowing_label: str = "sowing (last empty spell)"):
     """A block of pixels from the middle of a field, optical and radar on one time axis, plus chips.
 
     Top: per date the median raw NDVI of the block's QA60-clear pixels (filled when most of the
@@ -407,7 +407,8 @@ def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: s
 
     ``series_root``: the series folder to read (e.g. the latest sandbox). ``sowing`` (a date): the fresh-start sowing
     (``sowing_fresh``, the last empty spell since 1 May) is drawn instead of the old rule's trough and climb, whose
-    110-day lookback could not see a May sowing (user, 30 Sep, aoi160 pixel 90542).
+    110-day lookback could not see a May sowing (user, 30 Sep, aoi160 pixel 90542). ``sowing_label``: the text on that
+    line (says whether the date came from NDVI or from the radar).
     """
     import matplotlib.pyplot as plt
 
@@ -459,7 +460,7 @@ def group_sheet(aoi_id: int, center: int, block: int = 5, out_dir=None, label: s
     a1.plot(windows[w], fit[w], color="#2a78d6", lw=2, label="median fitted NDVI")
     a1.plot(windows[w], lswi[w], color="#6aa6e8", lw=1, ls="--", label="median fitted LSWI")
     lines = (("trough_date", "#b45f06", "trough"), ("climb_date", "#1f7a3a", "climb")) if sowing is None \
-        else (("sowing_date", "#b45f06", "sowing (last empty spell)"),)
+        else (("sowing_date", "#b45f06", sowing_label),)
     for key, colour, name in lines:
         if pd.notna(ev[key]):
             for a in (a1, a2):
