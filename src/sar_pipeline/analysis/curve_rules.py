@@ -148,6 +148,37 @@ CANOPY_OVER_RADAR_WATER = False
 #: mid July, NDVI 0.79 on 28 Sep -> flooded, "transplanted, a clear radar dip"; 23348, bare 7 Aug, 0.84 on 28 Sep,
 #: radar falling now -> flooded, "not smooth like a flooded field: direct seeded"). Off for the locked AOIs.
 GREEN_VIEW_NOT_FLOODED = False
+#: Young rice whose field shows a clear radar water dip (a water spell AND VV and VH both deep below their own dry-season
+#: level, ``WATER_DEPTH_K``) is called transplanted rice, whatever its age; applied after ``YOUNG_MIN_RISE_DAYS``, so a
+#: field whose radar has not yet risen that long stays flooded / bare. Why (aoi13, user 5 Oct: everything harvested
+#: until ~18 Jul, water to late August, planted after it, so on 1 Oct the crops are 30-50 days old; "lower the 40 days
+#: to 30 for this AOI only, and wherever VV and VH show a clear dip put it in transplanted rice even at 30 days").
+#: Off for the locked AOIs.
+DIP_MAKES_TRANSPLANTED = False
+#: With ``SOWING_FROM_RADAR``: the sowing is never later than the optical saw the crop rising. When a clear view after
+#: the field's lowest (empty / water) view already shows the crop above ``AGE_LOW_SHARE`` of its own NDVI amplitude, and
+#: that view is earlier than the radar's end of the water spell, the crop was planted at that lowest view; a later radar
+#: dip is the canopy or rain, not the transplanting water. Why (aoi13, user 5 Oct, pixel 14994: water view 18 Jul,
+#: NDVI 0.33 on 17 Aug, a dip on 29 Aug -> sowing 29 Aug, 33 days, young; the user: sown mid July, transplanted).
+#: Off for the locked AOIs.
+SOWING_NOT_AFTER_SEEN_CROP = False
+#: In the radar story (``RADAR_STORY_IN_GAP``): the newest clear view shows water but VV and VH both rose since
+#: (``radar_rose``) -> young rice, then the usual young-rice checks (``YOUNG_MIN_RISE_DAYS``, ``DIP_MAKES_TRANSPLANTED``).
+#: Without it, an old water view decided "flooded" whatever the radar did after. Why (aoi13, user 5 Oct, pixel 11791:
+#: deep water June - end August, last clear view 19 Aug (water), radar up from 6-10 Sep, VV +12 dB; the user:
+#: transplanted end of August). Off for the locked AOIs.
+STORY_YOUNG_AFTER_LAST_WATER = False
+#: With ``YOUNG_MIN_RISE_DAYS``: a young crop whose radar has risen a shorter time stays YOUNG RICE (not flooded / bare)
+#: when the newest clear view shows it green (at least ``HARVEST_LEFT`` of the whole-year range, not water). Why (aoi13,
+#: user 5 Oct, pixel 16003: water to end August, radar up from 10 Sep (24 days), 1 Oct NDVI 0.67 -> the rule said
+#: flooded; the user: young rice. 9643, whose 1 Oct view is still water, stays flooded). Off for the locked AOIs.
+SHORT_RISE_GREEN_YOUNG = False
+#: A pixel that is clear on the AOI's LATEST image and still empty there (its NDVI within ``AGE_LOW_SHARE`` of its own
+#: whole-year range above its lowest view: the bare / water level) is not rice: flooded / bare, whatever the radar or
+#: the fitted curve say. Pixels cloudy on the latest image keep the curve's class. Why (aoi13, user 5 Oct: "after the
+#: latest image arrives, every pixel that is still empty is certainly not rice -> flooded or bare; the green ones by
+#: their curve; the cloudy ones by the same curve"). Off for the locked AOIs.
+NEWEST_EMPTY_NOT_RICE = False
 OPTICAL_VIEWS_MIN = 2
 DRY_SEASON_FROM = "2026-03-01"
 #: Tree / orchard only when the radar saw NO water spell (two wet passes while the crop was small): trees do not stand in
@@ -537,6 +568,17 @@ def _last_k(x, k: int) -> np.ndarray:
     return packed[-k:]
 
 
+def sowing_not_after_seen_crop(sowing, spell_end, ok, v, lo, amp, ilo, tdays):
+    """``SOWING_NOT_AFTER_SEEN_CROP``: per pixel, the radar sowing (end of the water spell, days since 1970) moved back to
+    the field's lowest clear view (``ilo``) where a later clear view already shows the crop above ``AGE_LOW_SHARE`` of
+    its own amplitude before that radar date. Returns (sowing, moved). ``ok`` / ``v``: (dates, pixels) clear flags and
+    NDVI; ``lo`` / ``amp``: the pixel's clear-view low and amplitude; ``tdays``: the dates in days since 1970."""
+    up = ok & (v >= (lo + AGE_LOW_SHARE * amp)[None, :]) & (tdays[:, None] > tdays[ilo][None, :])
+    first_up = np.where(up.any(axis=0), np.min(np.where(up, tdays[:, None], 10 ** 9), axis=0), -1)
+    moved = (first_up >= 0) & (sowing >= 0) & (first_up < sowing) & (spell_end >= 0)
+    return np.where(moved, tdays[ilo], sowing), moved
+
+
 def own_range_features(aoi: int, pixels, series_root: str | None = None,
                        start: str = START) -> pd.DataFrame:
     """Every signal on the pixel's OWN season range (0 = its own low since ``start``, 1 = its own high; 10th / 90th
@@ -700,6 +742,10 @@ def own_range_features(aoi: int, pixels, series_root: str | None = None,
         inew_ = len(dt) - 1 - np.argmax(ok[::-1], axis=0)
         out["days_since_ndvi_low"] = np.where(np.isfinite(lo) & ok.any(axis=0), tdays[inew_] - tdays[ilo],
                                               np.nan).astype(float)
+        # the pixel is clear on the AOI's newest image date (NEWEST_EMPTY_NOT_RICE: only the latest image decides)
+        aoi_ok = d["ok"].reshape(len(dt), -1).astype(bool) & (dt >= pd.Timestamp(start))[:, None]
+        latest = np.flatnonzero(aoi_ok.any(axis=1)).max() if aoi_ok.any() else -1
+        out["seen_on_latest"] = (ok[latest] if latest >= 0 else np.zeros(len(px), dtype=bool)).astype(float)
         out["ndvi_left"] = (last2[-1] - lo) / amp
         # the same on the whole year's clear views (from DRY_SEASON_FROM): "green now" against the pixel's own bare
         # level, not against a summer crop's dip (RADAR_STORY_IN_GAP; aoi63 pixel 31277: summer crop 0.94 in May,
@@ -858,6 +904,12 @@ def own_range_features(aoi: int, pixels, series_root: str | None = None,
             radar_rise = np.isfinite(rise) & ~seen
             sowing = np.where(spell_end >= 0, spell_end, np.where(radar_rise, np.nan_to_num(rise, nan=-1), low_end))
             out["sowing_from"] = np.where(spell_end >= 0, 1.0, np.where(radar_rise, 2.0, 0.0))
+            if SOWING_NOT_AFTER_SEEN_CROP:
+                # a clear view after the field's lowest view already shows the crop rising (above AGE_LOW_SHARE of its
+                # own amplitude) before the radar's water end: the crop was planted by then -> sowing = that lowest view
+                # (aoi13 pixel 14994: water view 18 Jul, NDVI 0.33 on 17 Aug, a late-August radar dip made it 29 Aug)
+                sowing, early = sowing_not_after_seen_crop(sowing, spell_end, ok, v, lo, amp, ilo, tdays)
+                out["sowing_from"] = np.where(early, 4.0, out["sowing_from"])
             out["sowing_day"] = sowing.astype(float)
             out["crop_age"] = np.where(sowing >= 0, wd[-1] - sowing, out["crop_age"]).astype(float)
     out.pop("_radar_rise_start", None)
@@ -956,6 +1008,11 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
             held_water = paddy or getattr(r, "water_depth", 0) > 0
             if r.ndvi_low_peak >= TREE_LOW_PEAK and not low_late and not held_water:
                 out.append("tree/orchard")
+            elif STORY_YOUNG_AFTER_LAST_WATER and getattr(r, "last_view_water", 0) == 1 and radar_rose:
+                # the last clear view was water and VV and VH both rose since: plants in the water the optical has not
+                # seen yet (aoi13 pixel 11791: last view 19 Aug water, VV -18.8 -> -6.3 by 22 Sep); the young-rice
+                # checks after the loop (radar rise days, a clear dip) then decide
+                out.append("young rice")
             elif left < HARVEST_LEFT:
                 water_now = getattr(r, "last_view_water", 0) == 1 or (r.vh_pos_end < LOW_NOW and not radar_rose)
                 out.append("rice harvested" if held_water and not water_now else "flooded / bare")
@@ -1015,6 +1072,12 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
             else:
                 out.append("rice standing transplanted" if getattr(r, "water_spell", 0) == 1 else
                            "rice standing direct seeded")
+    if NEWEST_EMPTY_NOT_RICE and "seen_on_latest" in f:
+        # applied before every other late check: the latest image's word on an empty field is final
+        left = pd.to_numeric(f.get("ndvi_left_year", pd.Series(np.nan, index=f.index)), errors="coerce").to_numpy()
+        seen = pd.to_numeric(f["seen_on_latest"], errors="coerce").to_numpy() == 1
+        out = ["flooded / bare" if sn and np.isfinite(lf) and lf <= AGE_LOW_SHARE else c
+               for c, lf, sn in zip(out, left, seen)]
     if GREEN_VIEW_NOT_FLOODED and "ndvi_left_year" in f:
         fixed = []
         for c, r in zip(out, f.itertuples(index=False)):
@@ -1045,10 +1108,27 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
                 # flooded; 29260: never, water_depth -1.1, its radar low now is a dense canopy -> a crop)
                 watery = getattr(r, "last_view_water", 0) == 1 or (
                     r.vh_pos_end < LOW_NOW and getattr(r, "water_depth", 0) > 0)
+                green_now = (SHORT_RISE_GREEN_YOUNG and getattr(r, "last_view_water", 0) != 1 and
+                             getattr(r, "ndvi_left_year", np.nan) >= HARVEST_LEFT)
+                if green_now:
+                    # the newest clear view shows the young crop green (aoi13 pixel 16003: 1 Oct NDVI 0.67): young
+                    # rice, though the radar has risen only a short time; 9643 (1 Oct view water) stays flooded
+                    fixed.append("young rice")
+                    continue
                 c = "flooded / bare" if watery else (
                     "rice standing transplanted" if deep else "rice standing direct seeded")
             fixed.append(c)
         out = fixed
+    if DIP_MAKES_TRANSPLANTED and "water_depth" in f:
+        depth = pd.to_numeric(f["water_depth"], errors="coerce").to_numpy()
+        spell = pd.to_numeric(f.get("water_spell", pd.Series(0, index=f.index)), errors="coerce").to_numpy()
+        # only a crop whose radar has risen long enough (YOUNG_MIN_RISE_DAYS); a short rise kept young by
+        # SHORT_RISE_GREEN_YOUNG stays young (aoi13 pixel 16003)
+        rise = pd.to_numeric(f.get("radar_rise_days", pd.Series(np.nan, index=f.index)), errors="coerce").to_numpy()
+        short = np.isfinite(rise) & (rise < YOUNG_MIN_RISE_DAYS) if YOUNG_MIN_RISE_DAYS is not None else \
+            np.zeros(len(f), dtype=bool)
+        out = ["rice standing transplanted" if c == "young rice" and sp == 1 and np.isfinite(d) and d >= WATER_DEPTH_K
+               and not sh else c for c, d, sp, sh in zip(out, depth, spell, short)]
     return pd.Series(out, index=f.index)
 
 
@@ -1056,7 +1136,7 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
 #: AOIs whose result the user accepted (user, 2 Oct: "aoi160 is done and locked"). Their outputs in
 #: ``rice_fresh/aoi<N>/`` are never rewritten (``force=True`` to override on the user's word); the frozen copy, the
 #: code and the labels at lock time are in ``rice_fresh/locked/aoi<N>/`` with checksums (MANIFEST.json).
-LOCKED_AOIS = {160, 28, 72, 116, 39, 63}
+LOCKED_AOIS = {160, 28, 72, 116, 39, 63, 13}
 #: Rule changes for ONE AOI (user, 2 Oct: "try the aoi160 rules first; if they do not work, new rules only for that
 #: AOI, not 160"): ``{aoi: {"NAME": value, "field_polygons.NAME": value}}``. The module constants are the aoi160 rules;
 #: an AOI without an entry runs exactly those.
@@ -1122,6 +1202,17 @@ AOI_OVERRIDES[63] = dict(AOI_OVERRIDES[39], **NEW_AOI_SWITCHES,
                          POND_NEEDS_NO_CROP=True,            # 41938: dry-season water, green crop now -> a paddy
                          CANOPY_OVER_RADAR_WATER=True,       # 13571: radar low under the year's greenest view = canopy
                          GREEN_VIEW_NOT_FLOODED=True)        # 36796 / 23348: green on 26 / 28 Sep -> not flooded
+#: aoi13 (user, 5 Oct): harvested everywhere until about 18 Jul, then under water to mid / late August, planted after the
+#: water. Starts from the aoi63 set (chosen after ``try_rules``) with the crop's age from the END of its water spell
+#: (``SOWING_FROM_RADAR``, as aoi116 186792): from its start the age was ~97 days for crops planted in late August.
+#: A COPY, so a later aoi13 change never touches locked aoi63.
+AOI_OVERRIDES[13] = dict(AOI_OVERRIDES[63], SOWING_FROM_RADAR=True,
+                         YOUNG_MIN_RISE_DAYS=30,             # user: 30 days here (planted late Aug), 40 in aoi39 / aoi63
+                         DIP_MAKES_TRANSPLANTED=True,        # user: a clear VV / VH dip -> transplanted, even at 30 days
+                         SOWING_NOT_AFTER_SEEN_CROP=True,    # 14994: crop seen on 17 Aug, sown mid July, not 29 Aug
+                         STORY_YOUNG_AFTER_LAST_WATER=True,  # 11791: last view water (19 Aug), radar up since -> a crop
+                         SHORT_RISE_GREEN_YOUNG=True,        # 16003: radar up 24 days, green on 1 Oct -> young
+                         NEWEST_EMPTY_NOT_RICE=True)         # user: empty on the latest image -> not rice
 
 
 @contextmanager

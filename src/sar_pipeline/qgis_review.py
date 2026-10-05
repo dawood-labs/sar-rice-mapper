@@ -300,7 +300,8 @@ RULE_FEATURE_NAMES = {
 
 #: Where the rule's sowing date came from (``curve_rules.own_range_features`` column ``sowing_from``), for the plot.
 SOWING_SOURCES = {0: "NDVI: end of the empty spell", 1: "radar: end of the water spell (transplanting)",
-                  2: "radar: VH leaves its low (no clear view)", 3: "radar: start of the water spell"}
+                  2: "radar: VH leaves its low (no clear view)", 3: "radar: start of the water spell",
+                  4: "NDVI: last empty view (crop seen before the radar water end)"}
 
 
 def _sowing_label(rule: dict) -> str:

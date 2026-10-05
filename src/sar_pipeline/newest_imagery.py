@@ -32,12 +32,15 @@ Use::
     python -m sar_pipeline.newest_imagery inputs --aois 72 [--run v002_20261002] [--series-root <series folder>]
     python -m sar_pipeline.newest_imagery compare-series --aois 13 --old processed/_batch/<old series> \
         --new processed/_batch/<new series>
+    python -m sar_pipeline.newest_imagery describe --aois 13 --dates 2026-10-03   # after the download: no-data /
+        # clear / series-mask share, median NDVI, quick-look PNG (processed/_batch/s2_2026/qgis_review/inspect/)
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from . import config as config_mod
@@ -255,6 +258,110 @@ def compare_series(aoi_id: int, old_root: str, new_root: str, name: str = "ndvi5
     return pd.DataFrame(rows)
 
 
+# ---------------------------------------------------------------------------------------------
+# After a new date is downloaded: is it worth having?
+#
+# Why: the metadata check above scores a date with Cloud Score+ alone, over the AOI polygon. Once the file is on
+# disk, three more things decide whether the date helps the series: how much of the AOI the scene actually covers
+# (an AOI on a swath edge can be half empty, which is no data, not cloud), how much the series' own mask
+# (``mask_experiment.VARIANTS``, default ``hyb40m1late``) keeps, and whether the kept pixels look like the season
+# (median NDVI). One table row per date and a quick-look picture answer that before anyone rebuilds a series.
+# ---------------------------------------------------------------------------------------------
+
+#: Mask variant of the series the analysis reads now (``ANALYSIS_SERIES.txt`` points at an ``hyb40m1late`` folder).
+SERIES_VARIANT = "hyb40m1late"
+
+
+def date_quality(b2, b3, b4, b8, qa60, cs, variant: str = SERIES_VARIANT, cs_cut: float = 100 * CLEAR_CDF) -> dict:
+    """Shares (percent of the given pixels, normally the AOI polygon) for one date's bands, already cut to the AOI.
+
+    * ``no_data_pct``: pixels the scene does not cover (swath edge / outside the tile), by the series' data test
+      (``ndvi_5day.data_mask``); these are missing, not cloudy.
+    * ``cs_clear_pct``: pixels with data and Cloud Score+ ``clear`` >= ``cs_cut`` (60, as ``aoi_clear_pct``);
+      ``None`` when the file's Cloud Score+ band is 0 everywhere (score did not exist at export, issue 32).
+    * ``series_kept_pct``: pixels the series mask ``variant`` keeps (``ndvi_5day.clear_mask`` with its settings).
+    * ``median_ndvi_kept``: median NDVI of the kept pixels (``None`` when none is kept).
+    Pure numpy, no file access, so it can be tested on small arrays."""
+    from .analysis import mask_experiment as me
+    from .analysis import ndvi_5day as nd
+
+    v = me.VARIANTS[variant]
+    b2, b3, b4, b8, qa60, cs = (np.asarray(a, dtype="float32") for a in (b2, b3, b4, b8, qa60, cs))
+    n = max(b4.size, 1)
+    data = nd.data_mask(b3, b4, b8, v.get("b8_zero_water", False))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ndvi = np.where(data, (b8 - b4) / (b8 + b4), np.nan)
+    missing = nd.cloud_score_missing(cs, data)
+    cs_min = None if (missing and v.get("cs_missing_unknown")) else v.get("cs_min")
+    bits = 1 << 10 if v.get("qa60_mode") == "opaque" else (1 << 10) | (1 << 11)
+    kept = nd.clear_mask(data, qa60, cs, b8, ndvi, cs_min, bits, v.get("keep_dark", False),
+                         v.get("drop_haze", False), b2, b4)
+    return {"no_data_pct": round(100 * float((~data).sum()) / n, 1),
+            "cs_clear_pct": None if missing else round(100 * float((data & (cs >= cs_cut)).sum()) / n, 1),
+            "series_kept_pct": round(100 * float(kept.sum()) / n, 1),
+            "median_ndvi_kept": round(float(np.median(ndvi[kept])), 3) if kept.any() else None}
+
+
+def describe_dates(aoi_id: int, dates, s2_dir: str = "data/s2_dates_masks",
+                   png_dir: str | None = "processed/_batch/s2_2026/qgis_review/inspect",
+                   variant: str = SERIES_VARIANT) -> pd.DataFrame:
+    """:func:`date_quality` inside the AOI polygon for the given local per-date files, plus (with ``png_dir``) a
+    quick-look ``aoi<N>_newdate_<date>.png`` per date: true colour (4-3-2) and 5-3-2 side by side, AOI outline in
+    yellow, no-data pixels black. Reads local files only; nothing is exported."""
+    import geopandas as gpd
+    import rasterio
+    from rasterio.features import rasterize
+
+    from .optical_export import band_index
+
+    cfg = season_config(aoi_id)
+    root = config_mod.repo_root()
+    rows = []
+    for d in [str(x)[:10] for x in dates]:
+        hits = sorted((root / s2_dir / f"aoi{aoi_id}").glob(f"*_S2_{d}.tif"))
+        if not hits:
+            rows.append({"date": d, "file": None})
+            continue
+        with rasterio.open(hits[0]) as ds:
+            b = {k: ds.read(band_index(ds, k)).astype("float32") for k in ("B2", "B3", "B4", "B5", "B8", "QA60", "clear")}
+            shapes = gpd.read_file(config_mod.aoi_path(cfg)).to_crs(ds.crs).geometry
+            inside = rasterize(((g, 1) for g in shapes), out_shape=(ds.height, ds.width), transform=ds.transform,
+                               fill=0, dtype="uint8").astype(bool)
+            extent = (ds.bounds.left, ds.bounds.right, ds.bounds.bottom, ds.bounds.top)
+        q = date_quality(*(b[k][inside] for k in ("B2", "B3", "B4", "B8", "QA60", "clear")), variant=variant)
+        row = {"date": d, "file": str(hits[0].relative_to(root)), "size_mb": round(hits[0].stat().st_size / 1e6, 2), **q}
+        if png_dir:
+            row["png"] = str(_quicklook(aoi_id, d, b, shapes, extent, q, root / png_dir).relative_to(root))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _quicklook(aoi_id, date, b, shapes, extent, q, out_dir: Path) -> Path:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from .review import _stretch
+
+    empty = b["B4"] <= 0
+    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    for a, (r, g, bl), title in zip(axes, (("B4", "B3", "B2"), ("B5", "B3", "B2")), ("true colour 4-3-2", "5-3-2")):
+        img = np.dstack([_stretch(b[r]), _stretch(b[g]), _stretch(b[bl])])
+        img[empty] = 0
+        a.imshow(img, extent=extent, interpolation="nearest")
+        shapes.boundary.plot(ax=a, color="yellow", linewidth=1)
+        a.set_title(title, fontsize=10)
+        a.set_xticks([]), a.set_yticks([])
+    fig.suptitle(f"aoi{aoi_id} {date}: no data {q['no_data_pct']} %, Cloud Score+ clear {q['cs_clear_pct']} %, "
+                 f"series mask keeps {q['series_kept_pct']} %, median NDVI kept {q['median_ndvi_kept']}", fontsize=10)
+    fig.tight_layout()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    p = out_dir / f"aoi{aoi_id}_newdate_{date}.png"
+    fig.savefig(p, dpi=90)
+    plt.close(fig)
+    return p
+
+
 def analysis_inputs(aoi_id: int, series_root: str, run_id: str | None = None, read_radar: bool = True) -> dict:
     """What the rule would read for an AOI: the radar run (and, with ``read_radar``, the last pass per track as
     ``radar_water.read_series`` actually returns it) and the raw Sentinel-2 dates of ``series_root`` (its date record).
@@ -283,7 +390,8 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.newest_imagery", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["check", "compare-radar", "compare-series", "inputs"])
+    p.add_argument("step", choices=["check", "compare-radar", "compare-series", "inputs", "describe"])
+    p.add_argument("--dates", nargs="+", help="describe: the local per-date files to describe (YYYY-MM-DD)")
     p.add_argument("--series-root", default="processed/_batch/s2_2026_hyb40m1late",
                    help="inputs: the 5-day series folder to report on")
     p.add_argument("--run", help="inputs: an explicit radar run id (default: the pinned / analysis run)")
@@ -296,6 +404,13 @@ def main(argv=None) -> int:
     p.add_argument("--season", default="monsoon2026")
     p.add_argument("--json", help="also write the result to this JSON file")
     args = p.parse_args(argv)
+    if args.step == "describe":
+        if not args.dates:
+            p.error("describe needs --dates")
+        for a in args.aois:
+            print(f"== aoi{a}")
+            print(describe_dates(a, args.dates).to_string(index=False))
+        return 0
     if args.step == "inputs":
         for a in args.aois:
             print(json.dumps(analysis_inputs(a, args.series_root, args.run)))
