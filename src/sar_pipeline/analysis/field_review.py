@@ -300,7 +300,8 @@ def try_variants(aoi: int, variants: dict, fresh: str = FRESH, sets: dict | None
     if n == 1:
         codes = [_classify(w) for w in work]
     else:
-        with ProcessPoolExecutor(n, mp_context=mp.get_context("spawn")) as ex:     # spawn: see curve_rules._trial
+        with ProcessPoolExecutor(n, mp_context=mp.get_context("spawn"), initializer=resources.limit_worker_threads,
+                                 initargs=(max(1, r.cpus // n),)) as ex:     # spawn: see curve_rules._trial
             codes = list(ex.map(_classify, work, timeout=1800))
     rev = {v: k_ for k_, v in names.items()}
     for name, k in zip(combos, codes):
@@ -362,7 +363,8 @@ def main(argv=None) -> int:
         r = resources.detect_resources()
         # each process holds the AOI's radar (a few GB for a large AOI): as many processes as CPUs and RAM allow
         n = a.parts or max(1, min(r.cpus, int(r.memory_available_bytes / 6e9)))
-        with ProcessPoolExecutor(n, mp_context=mp.get_context("spawn")) as ex:
+        with ProcessPoolExecutor(n, mp_context=mp.get_context("spawn"), initializer=resources.limit_worker_threads,
+                                 initargs=(max(1, r.cpus // n),)) as ex:
             done = sum(len(x) for x in ex.map(render, [a.aoi] * n, [FRESH] * n, range(n), [n] * n))
         print(f"{done} sheets in {review_dir(a.aoi) / 'sheets'}")
     else:

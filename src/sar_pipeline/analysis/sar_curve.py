@@ -31,6 +31,8 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -115,6 +117,23 @@ def _plain(src, size) -> bool:
     return all(r.get(k) == v for r in rects for k, v in full.items())
 
 
+#: Whole-AOI smoothed tracks are kept on disk next to the stack (``stack/track_<id>/cache/``) so every later reader -
+#: another process, another step, another session - loads them in a second instead of re-reading and re-smoothing the
+#: stack (5 Oct audit: nine parallel rule-set trials each re-read the same stack and queued on the disk). The cache
+#: key holds the stack files' sizes and times, the window and the artefact passes dropped, so any change of the run or
+#: of the bad-pass list makes a new file; a stale cache can never be read.
+DISK_CACHE = True
+
+
+def _cache_file(stack: Path, pol: str, window: int, drop_bad: bool, bad: list) -> Path:
+    import hashlib
+
+    vrt = stack / f"stack_{pol}.vrt"
+    st = vrt.stat()
+    key = f"{st.st_size}-{st.st_mtime_ns}-{window}-{drop_bad}-{sorted(bad)}"
+    return stack / "cache" / f"{pol}_w{window}_{hashlib.sha1(key.encode()).hexdigest()[:12]}.npy"
+
+
 def _read(loc: dict, track: str, window: int, drop_bad: bool, win=None, fast: bool = True):
     """Shared reader of :func:`read_track` and :func:`read_track_pixels`: the whole AOI, or the rasterio window ``win``."""
     import rasterio
@@ -122,6 +141,13 @@ def _read(loc: dict, track: str, window: int, drop_bad: bool, win=None, fast: bo
     stack = Path(loc["run"]) / "stack" / f"track_{track}"
     out, dates = {}, None
     for pol in POLS:
+        if win is None and DISK_CACHE:
+            with rasterio.open(stack / f"stack_{pol}.vrt") as ds:
+                d_ = [dt.datetime.strptime(d.rsplit("_", 1)[1], "%Y%m%d").date() for d in ds.descriptions]
+            cf = _cache_file(stack, pol, window, drop_bad, bad_pass_indices(loc, track, pol, d_) if drop_bad else [])
+            if cf.exists():
+                out[pol], dates = np.load(cf), d_
+                continue
         with rasterio.open(stack / f"stack_{pol}.vrt") as ds:
             direct = single_chunk(stack / f"stack_{pol}.vrt") if fast else None
             if direct is not None:
@@ -139,6 +165,11 @@ def _read(loc: dict, track: str, window: int, drop_bad: bool, win=None, fast: bo
         power = ss.to_linear(cube)
         smoothed = np.stack([box_mean(p, window) for p in power])
         out[pol] = ss.to_db(smoothed)
+        if win is None and DISK_CACHE:
+            cf.parent.mkdir(exist_ok=True)
+            tmp = cf.with_name(cf.stem + f".{os.getpid()}.tmp.npy")
+            np.save(tmp, out[pol].astype("float32"))
+            tmp.replace(cf)                              # atomic: parallel writers never leave half a file
     return pd.DatetimeIndex(pd.to_datetime(dates)), out
 
 

@@ -1460,7 +1460,8 @@ def try_rules(aoi: int, sources=RULE_SOURCES, series_root: str | None = None,
     else:
         # spawn, not fork: a forked worker inherits the parent's thread locks (GDAL / BLAS) and can hang forever
         # (5 Oct: nine workers idle for 1 h 47 min); a worker silent for 30 min raises instead of waiting
-        with ProcessPoolExecutor(n, mp_context=mp.get_context("spawn")) as ex:
+        with ProcessPoolExecutor(n, mp_context=mp.get_context("spawn"), initializer=resources.limit_worker_threads,
+                                 initargs=(max(1, r.cpus // n),)) as ex:
             results = list(ex.map(_trial, work, timeout=1800))
     cols = [res.set_index(["class", "name"])["acres"].rename(f"aoi{src} rules")
             for src, res in zip(sources, results)]

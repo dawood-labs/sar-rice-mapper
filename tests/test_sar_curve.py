@@ -195,3 +195,12 @@ def test_single_chunk_reads_the_same_values_as_the_nested_vrts(tmp_path):
     assert (d1 == d2).all()
     for pol in ("VH", "VV"):
         np.testing.assert_allclose(fast[pol], slow[pol], rtol=1e-6, equal_nan=True)
+
+
+def test_disk_cache_key_changes_with_the_bad_pass_list(tmp_path):
+    from sar_pipeline.analysis import sar_curve
+    (tmp_path / "stack_VV.vrt").write_text("<VRTDataset/>")
+    a = sar_curve._cache_file(tmp_path, "VV", 5, True, [3])
+    b = sar_curve._cache_file(tmp_path, "VV", 5, True, [3, 7])
+    c = sar_curve._cache_file(tmp_path, "VV", 5, True, [3])
+    assert a != b and a == c and a.parent.name == "cache"

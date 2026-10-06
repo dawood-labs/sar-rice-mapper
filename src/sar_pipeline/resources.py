@@ -262,3 +262,14 @@ def disk_free_bytes(path: str | Path) -> int:
     while not p.exists() and p != p.parent:
         p = p.parent
     return shutil.disk_usage(p).free
+
+
+def limit_worker_threads(threads: int) -> None:
+    """Initializer for worker processes: each worker uses ``threads`` threads (GDAL, BLAS, OpenMP), so ``n`` workers
+    share the CPUs instead of each trying to use all of them (5 Oct audit: parallel rule-set trials ran only 2.5x
+    faster with nine workers)."""
+    import os
+
+    for k in ("GDAL_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+              "NUMEXPR_NUM_THREADS"):
+        os.environ[k] = str(max(1, int(threads)))
