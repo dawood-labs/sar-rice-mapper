@@ -36,23 +36,24 @@ def test_dry_run_counts_and_writes_nothing(tmp_path, monkeypatch):
     r = rd.step_too_young(9991, dry_run=True, root=str(tmp_path))
     assert r["too_young_fields"] == 1 and r["too_young_acres"] == 0.5 and r["rice_fields"] == 2
     assert (d / "aoi9991_fields.gpkg").read_bytes() == before
-    assert not (d / "aoi9991_fields_before_too_young.gpkg").exists()
+    assert not (d / "aoi9991_fields_too_young.gpkg").exists()
 
 
-def test_step_relabels_keeps_the_before_copy_and_repeats_the_same(tmp_path, monkeypatch):
+def test_step_writes_a_new_file_and_never_touches_the_delivered_one(tmp_path, monkeypatch):
     d = _delivery(tmp_path)
     calls = []
     _fake(monkeypatch, calls)
+    before, man_before = (d / "aoi9991_fields.gpkg").read_bytes(), (d / "MANIFEST.json").read_bytes()
     rd.step_too_young(9991, root=str(tmp_path))
-    rd.step_too_young(9991, root=str(tmp_path))                 # a second run reads the kept copy again
-    f = gpd.read_file(d / "aoi9991_fields.gpkg").set_index("field_id")
+    rd.step_too_young(9991, root=str(tmp_path))                 # running again gives the same file
+    assert (d / "aoi9991_fields.gpkg").read_bytes() == before     # delivered layer unchanged (user, 7 Oct)
+    assert (d / "MANIFEST.json").read_bytes() == man_before
+    f = gpd.read_file(d / "aoi9991_fields_too_young.gpkg").set_index("field_id")
     assert f.loc["a", "major_class"] == "non-rice" and f.loc["a", "sub_class"] == rd.TOO_YOUNG_CLASS
-    assert f.loc["b", "major_class"] == "rice" and len(f) == 3                     # polygons kept, others untouched
-    b = gpd.read_file(d / "aoi9991_fields_before_too_young.gpkg").set_index("field_id")
-    assert b.loc["a", "major_class"] == "rice"                                      # the copy is the packaged layer
-    assert calls == ["aoi9991_fields.gpkg", "aoi9991_fields_before_too_young.gpkg"]
-    man = json.loads((d / "MANIFEST.json").read_text())
-    assert man["too_young"]["too_young_fields"] == 1 and "aoi9991_fields_before_too_young.gpkg" in man["files"]
+    assert f.loc["b", "major_class"] == "rice" and len(f) == 3
+    assert calls == ["aoi9991_fields.gpkg", "aoi9991_fields.gpkg"]
+    j = json.loads((d / "aoi9991_too_young.json").read_text())
+    assert j["too_young_fields"] == 1 and j["file"] == "aoi9991_fields_too_young.gpkg"
 
 
 def test_too_young_runs_between_package_and_upload():

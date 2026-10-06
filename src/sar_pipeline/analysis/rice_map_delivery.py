@@ -52,7 +52,8 @@ SEASON_FROM = "2026-03-15"
 STEPS = ("fields", "lock", "package", "too_young", "upload")
 #: Too-young rice is not delivered (manager via the user, 6 Oct 2026): a rice field goes to non-rice "too young (not
 #: delivered)" when fewer than this share of its clear pixels are NOT open water on the AOI's newest clear S2 date (at
-#: least 95 % of it still flooded). The polygon stays in the layer; only the fields file changes, not the rasters.
+#: least 95 % of it still flooded). The result is a NEW file aoi<N>_fields_too_young.gpkg beside the delivered layer,
+#: which is never overwritten (user, 7 Oct 2026); the rasters are not changed.
 TOO_YOUNG_MAX_DRY_SHARE = 0.05
 TOO_YOUNG_CLASS = "too young (not delivered)"
 
@@ -201,16 +202,15 @@ def step_package(aoi: int, fresh: str = FRESH, **kw) -> dict:
 
 
 def step_too_young(aoi: int, max_dry_share: float = TOO_YOUNG_MAX_DRY_SHARE, dry_run: bool = False, **kw) -> dict:
-    """Relabels the too-young rice fields of the packaged layer (``qc_compare.too_young_fields`` on the AOI's newest
-    clear S2 date) as non-rice :data:`TOO_YOUNG_CLASS`. The packaged layer is first kept as
-    ``aoi<N>_fields_before_too_young.gpkg`` (it goes to the bucket too: user, 6 Oct), and the rule always reads that
-    copy, so running the step again gives the same result. ``dry_run`` only counts."""
+    """Writes ``aoi<N>_fields_too_young.gpkg``: the packaged field layer with its too-young rice fields
+    (``qc_compare.too_young_fields`` on the AOI's newest clear S2 date) relabelled non-rice :data:`TOO_YOUNG_CLASS`, and
+    ``aoi<N>_too_young.json`` with the counts. The packaged ``aoi<N>_fields.gpkg`` and ``MANIFEST.json`` are NOT changed
+    (user, 7 Oct 2026: upload a new file, never overwrite the delivered one). ``dry_run`` only counts."""
     from . import qc_compare as qcm
 
     d = out_dir(aoi, **kw)
-    gp, before = d / f"aoi{aoi}_fields.gpkg", d / f"aoi{aoi}_fields_before_too_young.gpkg"
-    src = before if before.exists() else gp
-    t = qcm.too_young_fields(aoi, days=None, root=str(d.parent), max_dry_share=max_dry_share, name=src.name)
+    gp, new = d / f"aoi{aoi}_fields.gpkg", d / f"aoi{aoi}_fields_too_young.gpkg"
+    t = qcm.too_young_fields(aoi, days=None, root=str(d.parent), max_dry_share=max_dry_share, name=gp.name)
     young = t[t["too_young"]]
     res = {"s2_date": t.attrs["s2_date"], "max_dry_share": max_dry_share, "rice_fields": int(len(t)),
            "rice_acres": round(float(t["acres"].sum()), 2), "too_young_fields": int(len(young)),
@@ -218,23 +218,20 @@ def step_too_young(aoi: int, max_dry_share: float = TOO_YOUNG_MAX_DRY_SHARE, dry
            "by_class": {k: round(float(v), 2) for k, v in young.groupby("sub_class")["acres"].sum().items()}}
     if dry_run:
         return res
-    if not before.exists():
-        shutil.copy2(gp, before)
     import geopandas as gpd
 
-    f = gpd.read_file(before)
+    f = gpd.read_file(gp)
     hit = f["field_id"].isin(set(young.index))
     f.loc[hit, "major_class"] = "non-rice"
     f.loc[hit, "sub_class"] = TOO_YOUNG_CLASS
-    tmp = d / f"aoi{aoi}_fields.tmp.gpkg"
+    tmp = d / f"aoi{aoi}_fields_too_young.tmp.gpkg"
     f.to_file(tmp, driver="GPKG")
-    tmp.replace(gp)
-    fields_qml(gp)
-    man = json.loads((d / "MANIFEST.json").read_text())
-    man["files"].update({p.name: _sha(p) for p in (gp, before)})
-    man["too_young"] = {**res, "rule": "rice field with fewer than max_dry_share of its clear pixels NOT open water "
-                                        "(NDWI <= 0) on the newest clear S2 date -> non-rice, too young"}
-    (d / "MANIFEST.json").write_text(json.dumps(man, indent=1, default=str))
+    tmp.replace(new)
+    fields_qml(new)
+    rule = ("rice field with fewer than max_dry_share of its clear pixels NOT open water (NDWI <= 0) on the newest "
+            "clear S2 date -> non-rice, too young (not delivered)")
+    (d / f"aoi{aoi}_too_young.json").write_text(json.dumps({**res, "rule": rule, "file": new.name,
+                                                           "sha256": _sha(new)}, indent=1, default=str))
     _record_too_young(aoi, res)
     return res
 
@@ -317,7 +314,7 @@ def run_one(aoi: int, fresh: str = FRESH, key: str | None = None, redo=()) -> di
         st.pop(s_, None)
     if "package" in redo:
         (out_dir(aoi) / f"aoi{aoi}_fields.gpkg").unlink(missing_ok=True)
-        (out_dir(aoi) / f"aoi{aoi}_fields_before_too_young.gpkg").unlink(missing_ok=True)
+        (out_dir(aoi) / f"aoi{aoi}_fields_too_young.gpkg").unlink(missing_ok=True)
         st.pop("too_young", None)                 # a new package needs the too-young step again
     for step in STEPS:
         if st.get(step, {}).get("done"):
