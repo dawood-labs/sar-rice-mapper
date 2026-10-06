@@ -49,7 +49,12 @@ RICE_CODES = (1, 7, 3)
 CLEAR_SHARE_MIN = 0.8      # user, 5 Oct: "kam az kam 80 percent saaf"
 #: ...and only dates of the season (the same start as the notebook-08 chips and the configs' season.start).
 SEASON_FROM = "2026-03-15"
-STEPS = ("fields", "lock", "package", "upload")
+STEPS = ("fields", "lock", "package", "too_young", "upload")
+#: Too-young rice is not delivered (manager via the user, 6 Oct 2026): a rice field goes to non-rice "too young (not
+#: delivered)" when fewer than this share of its clear pixels are NOT open water on the AOI's newest clear S2 date (at
+#: least 95 % of it still flooded). The polygon stays in the layer; only the fields file changes, not the rasters.
+TOO_YOUNG_MAX_DRY_SHARE = 0.05
+TOO_YOUNG_CLASS = "too young (not delivered)"
 
 
 def out_dir(aoi: int, root: str = OUT_ROOT, name: str = DELIVERY) -> Path:
@@ -195,6 +200,61 @@ def step_package(aoi: int, fresh: str = FRESH, **kw) -> dict:
     return man
 
 
+def step_too_young(aoi: int, max_dry_share: float = TOO_YOUNG_MAX_DRY_SHARE, dry_run: bool = False, **kw) -> dict:
+    """Relabels the too-young rice fields of the packaged layer (``qc_compare.too_young_fields`` on the AOI's newest
+    clear S2 date) as non-rice :data:`TOO_YOUNG_CLASS`. The packaged layer is first kept as
+    ``aoi<N>_fields_before_too_young.gpkg`` (it goes to the bucket too: user, 6 Oct), and the rule always reads that
+    copy, so running the step again gives the same result. ``dry_run`` only counts."""
+    from . import qc_compare as qcm
+
+    d = out_dir(aoi, **kw)
+    gp, before = d / f"aoi{aoi}_fields.gpkg", d / f"aoi{aoi}_fields_before_too_young.gpkg"
+    src = before if before.exists() else gp
+    t = qcm.too_young_fields(aoi, days=None, root=str(d.parent), max_dry_share=max_dry_share, name=src.name)
+    young = t[t["too_young"]]
+    res = {"s2_date": t.attrs["s2_date"], "max_dry_share": max_dry_share, "rice_fields": int(len(t)),
+           "rice_acres": round(float(t["acres"].sum()), 2), "too_young_fields": int(len(young)),
+           "too_young_acres": round(float(young["acres"].sum()), 2),
+           "by_class": {k: round(float(v), 2) for k, v in young.groupby("sub_class")["acres"].sum().items()}}
+    if dry_run:
+        return res
+    if not before.exists():
+        shutil.copy2(gp, before)
+    import geopandas as gpd
+
+    f = gpd.read_file(before)
+    hit = f["field_id"].isin(set(young.index))
+    f.loc[hit, "major_class"] = "non-rice"
+    f.loc[hit, "sub_class"] = TOO_YOUNG_CLASS
+    tmp = d / f"aoi{aoi}_fields.tmp.gpkg"
+    f.to_file(tmp, driver="GPKG")
+    tmp.replace(gp)
+    fields_qml(gp)
+    man = json.loads((d / "MANIFEST.json").read_text())
+    man["files"].update({p.name: _sha(p) for p in (gp, before)})
+    man["too_young"] = {**res, "rule": "rice field with fewer than max_dry_share of its clear pixels NOT open water "
+                                        "(NDWI <= 0) on the newest clear S2 date -> non-rice, too young"}
+    (d / "MANIFEST.json").write_text(json.dumps(man, indent=1, default=str))
+    _record_too_young(aoi, res)
+    return res
+
+
+def _record_too_young(aoi: int, res: dict) -> None:
+    """One section in the AOI's rule record (``docs/rules/aoi<N>.md``), replaced when the step runs again."""
+    p = Path("docs/rules") / f"aoi{aoi}.md"
+    if not p.exists():
+        return
+    head = "## Too young rice (not delivered)"
+    text = p.read_text().split("\n" + head)[0].rstrip() + "\n"
+    cls = ", ".join(f"{k} {v} ac" for k, v in res["by_class"].items()) or "none"
+    text += (f"\n{head}\n\nManager's rule (6 Oct 2026): only rice older than about 40 days goes to the client; a field "
+             f"still under open water on the newest clear Sentinel-2 date ({res['s2_date']}) is too young. A rice "
+             f"field is relabelled non-rice when fewer than {int(res['max_dry_share'] * 100)} % of its clear pixels are "
+             f"not open water that day. Result: {res['too_young_fields']} of {res['rice_fields']} rice fields, "
+             f"{res['too_young_acres']} of {res['rice_acres']} ac ({cls}).\n")
+    p.write_text(text)
+
+
 def _bucket(aoi: int, key: str | None):
     import yaml
 
@@ -257,6 +317,8 @@ def run_one(aoi: int, fresh: str = FRESH, key: str | None = None, redo=()) -> di
         st.pop(s_, None)
     if "package" in redo:
         (out_dir(aoi) / f"aoi{aoi}_fields.gpkg").unlink(missing_ok=True)
+        (out_dir(aoi) / f"aoi{aoi}_fields_before_too_young.gpkg").unlink(missing_ok=True)
+        st.pop("too_young", None)                 # a new package needs the too-young step again
     for step in STEPS:
         if st.get(step, {}).get("done"):
             continue
@@ -266,6 +328,8 @@ def run_one(aoi: int, fresh: str = FRESH, key: str | None = None, redo=()) -> di
             r = step_lock(aoi, fresh)
         elif step == "package":
             r = {k: v for k, v in step_package(aoi, fresh).items() if k in ("s2_dates", "locked")}
+        elif step == "too_young":
+            r = step_too_young(aoi)
         else:
             r = step_upload(aoi, key)
         st[step] = {"done": True, "result": r, "at": str(pd.Timestamp.now().floor("s"))}
@@ -273,14 +337,39 @@ def run_one(aoi: int, fresh: str = FRESH, key: str | None = None, redo=()) -> di
     return st
 
 
+def _dry_one(aoi: int) -> dict:
+    try:
+        return {"aoi": aoi, **step_too_young(aoi, dry_run=True)}
+    except Exception as e:                            # one AOI's failure must not stop the count
+        return {"aoi": aoi, "error": f"{type(e).__name__}: {e}"}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["run", "status"])
-    p.add_argument("--aois", type=int, nargs="+", required=True)
+    p.add_argument("step", choices=["run", "status", "too-young-dry-run"])
+    p.add_argument("--aois", type=int, nargs="*", default=[], help="default: every AOI with a delivery folder")
     p.add_argument("--jobs", type=int, default=0, help="AOIs at once (0 = from the CPUs and RAM)")
     p.add_argument("--key", default=None)
     p.add_argument("--redo", nargs="*", default=[], choices=list(STEPS), help="run these steps again")
     a = p.parse_args(argv)
+    a.aois = a.aois or sorted(int(x.name[3:]) for x in Path(OUT_ROOT, DELIVERY).glob("aoi*") if (x / "MANIFEST.json").exists())
+    if a.step == "too-young-dry-run":
+        from concurrent.futures import ProcessPoolExecutor
+
+        from .. import resources
+        r = resources.detect_resources()
+        jobs = a.jobs or max(1, min(len(a.aois), r.cpus, int(r.memory_available_bytes / 3e9)))
+        with ProcessPoolExecutor(jobs, mp_context=mp.get_context("spawn"), initializer=resources.limit_worker_threads,
+                                 initargs=(max(1, r.cpus // jobs),)) as ex:
+            res = list(ex.map(_dry_one, a.aois))
+        t = pd.DataFrame(res)
+        out = Path(OUT_ROOT) / DELIVERY / "too_young_dry_run.csv"
+        t.to_csv(out, index=False)
+        print(t.drop(columns=["by_class"], errors="ignore").to_string(index=False))
+        ok = t[t["error"].isna()] if "error" in t else t
+        print(f"\n{len(ok)} AOIs: rice {ok['rice_acres'].sum():.1f} ac, too young {ok['too_young_fields'].sum()} fields "
+              f"{ok['too_young_acres'].sum():.1f} ac -> {out}")
+        return 0
     if a.step == "status":
         for aoi in a.aois:
             st = load_status(aoi)
