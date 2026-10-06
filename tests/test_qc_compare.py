@@ -85,3 +85,18 @@ def test_own_without_turns_each_switch_off_in_its_own_set(monkeypatch):
     assert s["own without YOUNG_WHILE_RADAR_LOW"]["YOUNG_WHILE_RADAR_LOW"] is False
     assert s["own without YOUNG_MIN_RISE_DAYS"]["YOUNG_MIN_RISE_DAYS"] is None
     assert s["own without all of them"] == {"YOUNG_WHILE_RADAR_LOW": False, "YOUNG_MIN_RISE_DAYS": None}
+
+
+def test_clean_keeps_rice_makes_drawn_rice_and_leaves_no_overlap_or_touch():
+    qc = _fields([
+        dict(field_id="a", major_class="rice", sub_class="rice standing transplanted", origin="x", geometry=box(0, 0, 50, 50)),
+        dict(field_id="b", major_class="rice", sub_class="young rice", origin="x", geometry=box(50, 0, 100, 50)),  # touches a
+        dict(field_id="c", major_class="non-rice", sub_class="tree/orchard", origin="x", geometry=box(200, 0, 250, 50)),
+        dict(field_id=None, major_class=None, sub_class=None, origin=None, geometry=box(40, 40, 80, 90))])     # drawn, overlaps
+    out, rep = q.clean_qc(9, qc)
+    assert rep["overlapping_pairs"] == 0 and rep["touching_pairs"] == 0 and rep["invalid"] == 0
+    assert set(out["field_id"]) == {"a", "b", "aoi9_qc001"}                       # non-rice gone, drawn got an id
+    assert out.set_index("field_id").loc["aoi9_qc001", "sub_class"] == q.DRAWN_SUB_CLASS
+    a = out.set_index("field_id").geometry
+    assert a["a"].area > 2490 and a["b"].area > 2490                             # delineated keep their shape (minus the gap)
+    assert a["aoi9_qc001"].area < 40 * 50 - 2 * 10 * 10 + 1                      # drawn lost what a and b cover

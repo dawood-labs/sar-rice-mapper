@@ -16,6 +16,7 @@ Run::
     python -m sar_pipeline.analysis.qc_compare diff --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg
     python -m sar_pipeline.analysis.qc_compare pattern --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg --s2-date 2026-09-13
     python -m sar_pipeline.analysis.qc_compare trial --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg   # the new switches
+    python -m sar_pipeline.analysis.qc_compare clean --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg   # ready to dissolve
 
 Outputs go to ``processed/_batch/s2_2026/qc/aoi<N>/`` (``diff.csv``, ``fields.csv``, ``separation.csv``).
 """
@@ -322,11 +323,108 @@ def choose_by_qc(aoi: int, qc, extra: dict | None = None, jobs: int = 0) -> pd.D
     return out
 
 
+#: Gap kept between neighbouring polygons by shrinking each one inwards by this much (metres). Why (user, 6 Oct 2026):
+#: the manager runs QGIS "dissolve" on the QC'd layer; touching or overlapping polygons would merge into one and the
+#: field boundaries from the delineation would be lost. 0.1 m each side = a 0.2 m gap, nothing against a 10 m pixel.
+SHRINK_M = 0.1
+#: Pieces smaller than this (m2) left by cutting overlaps are dropped.
+CRUMB_M2 = 10.0
+#: sub_class given to the polygons the reviewer drew (user: every drawn polygon is rice).
+DRAWN_SUB_CLASS = "rice (added in QC)"
+
+
+def _polygons(geom):
+    return [g for g in getattr(geom, "geoms", [geom]) if g.geom_type == "Polygon" and not g.is_empty]
+
+
+def clean_qc(aoi: int, qc, shrink_m: float = SHRINK_M, crumb_m2: float = CRUMB_M2):
+    """The QC'd field layer made ready for QGIS "dissolve": rice only, drawn polygons as rice, no overlaps, no two
+    polygons touching. Returns (clean GeoDataFrame, report dict).
+
+    1. Non-rice polygons are removed; polygons without ``field_id`` (drawn by the reviewer) become rice
+       (:data:`DRAWN_SUB_CLASS`, ids ``aoi<N>_qc001``...); a split field's second part gets ``_b`` (``_c``...).
+    2. Overlaps: delineated polygons keep their shape (largest first); a drawn polygon loses what a delineated one
+       already covers (user, 6 Oct: the SAMGeo outline wins).
+    3. Where a neighbour is within ``2 * shrink_m``, each polygon pulls back by ``shrink_m`` from it, so neighbours never
+       touch (a gap of ``2 * shrink_m``); edges with no neighbour keep their area.
+    Crumbs below ``crumb_m2`` are dropped, every piece is a valid single polygon, and acres are measured again."""
+    import geopandas as gpd
+    import shapely
+    from shapely.strtree import STRtree
+
+    rice = qc[(qc["major_class"] == "rice") | qc["field_id"].isna()].copy()
+    drawn = rice["field_id"].isna()
+    rice.loc[drawn, "field_id"] = [f"aoi{aoi}_qc{i + 1:03d}" for i in range(int(drawn.sum()))]
+    rice.loc[drawn, "major_class"] = "rice"
+    rice.loc[drawn, "sub_class"] = DRAWN_SUB_CLASS
+    rice.loc[drawn, "origin"] = "drawn in QC"
+    rice["drawn"] = drawn.to_numpy()
+    n = rice.groupby("field_id").cumcount()
+    rice["field_id"] = [f if k == 0 else f"{f}_{chr(ord('a') + k)}" for f, k in zip(rice["field_id"], n)]
+    rice["geometry"] = shapely.make_valid(rice.geometry.to_numpy())
+    area_in = float(rice.area.sum())
+    # delineated first (largest first), then drawn; each takes only what is still free
+    rice = rice.assign(_a=rice.area).sort_values(["drawn", "_a"], ascending=[True, False]).reset_index(drop=True)
+    taken, rows = [], []
+    for r in rice.itertuples():
+        g = r.geometry
+        if taken:
+            tree = STRtree(taken)
+            hit = [taken[i] for i in tree.query(g, predicate="intersects")]
+            if hit:
+                g = g.difference(shapely.union_all(hit))
+        for k, part in enumerate(p for p in _polygons(shapely.make_valid(g)) if p.area >= crumb_m2):
+            taken.append(part)
+            rows.append({"field_id": r.field_id if k == 0 else f"{r.field_id}_p{k + 1}", "source_id": r.field_id,
+                         "major_class": "rice",
+                         "sub_class": r.sub_class, "origin": r.origin, "drawn": r.drawn, "geometry": part})
+    cut = gpd.GeoDataFrame(rows, geometry="geometry", crs=qc.crs)
+    area_cut = float(cut.area.sum())
+    # pull back only where a neighbour is near (shared edges, touching vertices): free edges keep their area
+    geoms = list(cut.geometry)
+    tree = STRtree(geoms)
+    shrunk, dropped = [], []
+    for i, r in enumerate(cut.itertuples()):
+        near = [geoms[j] for j in tree.query(r.geometry, predicate="dwithin", distance=2 * shrink_m) if j != i]
+        g = r.geometry.difference(shapely.union_all(near).buffer(shrink_m, join_style="mitre")) if near else r.geometry
+        g = shapely.make_valid(g)
+        if not any(p.area >= crumb_m2 for p in _polygons(g)):
+            dropped.append(r.source_id)
+        for k, part in enumerate(p for p in _polygons(g) if p.area >= crumb_m2):
+            shrunk.append({**r._asdict(), "field_id": r.field_id if k == 0 else f"{r.field_id}_s{k + 1}",
+                           "geometry": part})
+    out = gpd.GeoDataFrame(shrunk, geometry="geometry", crs=qc.crs).drop(columns=["Index"], errors="ignore")
+    out["acres"] = (out.area / ACRE_M2).round(3)
+    lost = sorted(set(rice["field_id"]) - set(out["source_id"]))
+    out = out[["field_id", "major_class", "sub_class", "acres", "origin", "drawn", "geometry"]]
+    return out, {**check_layer(out), "polygons_in": len(qc), "rice_polygons_in": len(rice), "rice_ids_lost": lost,
+                 "rice_ids_lost_acres": round(float(rice[rice["field_id"].isin(lost)].area.sum()) / ACRE_M2, 3),
+                 "acres_in_rice": round(area_in / ACRE_M2, 2), "acres_after_overlap_cut": round(area_cut / ACRE_M2, 2),
+                 "acres_out": round(float(out.area.sum()) / ACRE_M2, 2),
+                 "acres_lost_to_overlap": round((area_in - area_cut) / ACRE_M2, 2),
+                 "acres_lost_to_gap": round((area_cut - float(out.area.sum())) / ACRE_M2, 2)}
+
+
+def check_layer(gdf, touch_m: float = 0.01) -> dict:
+    """Counts that must all be 0 before dissolve: invalid shapes, non-polygons, duplicate ids, pairs that overlap, and
+    pairs closer than ``touch_m`` (touching edges or vertices)."""
+    from shapely.strtree import STRtree
+
+    geoms = list(gdf.geometry)
+    tree = STRtree(geoms)
+    near = tree.query(geoms, predicate="dwithin", distance=touch_m)
+    pairs = {(int(a), int(b)) for a, b in zip(*near) if a < b}
+    overlap = sum(1 for a, b in pairs if geoms[a].intersection(geoms[b]).area > 0)
+    return {"polygons_out": len(gdf), "invalid": int((~gdf.is_valid).sum()),
+            "not_polygon": int((gdf.geom_type != "Polygon").sum()), "duplicate_ids": int(gdf["field_id"].duplicated().sum()),
+            "overlapping_pairs": overlap, "touching_pairs": len(pairs)}
+
+
 def main(argv=None) -> int:
     import geopandas as gpd
 
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["diff", "pattern", "trial", "choose", "without"])
+    p.add_argument("step", choices=["diff", "pattern", "trial", "choose", "without", "clean"])
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--qc", required=True, help="the QC'd field file (GeoPackage with the delivered field_id)")
     p.add_argument("--s2-date", help="pattern: one clear Sentinel-2 date, YYYY-MM-DD")
@@ -350,6 +448,15 @@ def main(argv=None) -> int:
         s.to_csv(out / "without.csv", index=False)
         print(f"QC rice: {s.attrs['qc_rice_ac']} ac; drawn (new) rice polygons: {s.attrs['drawn_ac']} ac")
         print(s.to_string(index=False))
+    elif a.step == "clean":
+        import json
+
+        c, rep = clean_qc(a.aoi, qc)
+        dst = Path(a.qc).with_name(Path(a.qc).stem + "_clean.gpkg")
+        c.to_file(dst, layer=f"aoi{a.aoi}_qc_clean", driver="GPKG")
+        dst.with_suffix(".json").write_text(json.dumps(rep, indent=1))
+        print(json.dumps(rep, indent=1))
+        print(f"clean layer: {dst.resolve()}")
     elif a.step == "trial":
         gp = trial(a.aoi, base=a.base)
         s = score_trial(a.aoi, qc, gp)
