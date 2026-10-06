@@ -55,6 +55,47 @@ def fetch(aoi: int, s3_prefix: str, root: str = BASEMAP) -> list[Path]:
     return sorted(d.rglob("mosaic.tif"))
 
 
+#: Buildings (user, 7 Oct 2026: "ghar bhi nikalne hn ... base map hi use kr lo"). Google Open Buildings has no
+#: polygons and no 2.5D values here, so roofs are read from the basemap itself, only where they are plain: blue roofs
+#: (blue clearly above red and green) and white / grey roofs (bright with almost no colour). Brown / red roofs look like
+#: bare soil in the dry-season basemap and are left out. Blobs of ROOF_MIN_M2..ROOF_MAX_M2, widened by
+#: BUILDING_BUFFER_M, are cut like trees.
+ROOF_BLUE_MARGIN = 25.0
+ROOF_BLUE_BRIGHT = 120.0
+ROOF_BRIGHT = 195.0
+ROOF_GREY_SPREAD = 18.0
+#: A roof is compact: blobs whose rotated box is more than this many times longer than wide (roads, bunds) are dropped.
+ROOF_MAX_ELONGATION = 4.0
+ROOF_MIN_M2 = 12.0
+ROOF_MAX_M2 = 1500.0
+BUILDING_BUFFER_M = 2.0
+#: A whole rice field becomes non-rice when trees and buildings (any blob, edge or inside) cover more than this share.
+FIELD_NON_RICE_SHARE = 0.5
+
+
+def roof_mask(img: np.ndarray) -> np.ndarray:
+    """Plain roofs on the 1 m basemap (see :data:`ROOF_BLUE_MARGIN`): blue or white / grey blobs of a house's size."""
+    from scipy import ndimage
+
+    r, g, b = img
+    blue = (b > r + ROOF_BLUE_MARGIN) & (b > g + ROOF_BLUE_MARGIN / 2) & ((r + g + b) / 3 > ROOF_BLUE_BRIGHT)
+    hi, lo = np.maximum(np.maximum(r, g), b), np.minimum(np.minimum(r, g), b)
+    grey = ((r + g + b) / 3 > ROOF_BRIGHT) & (hi - lo < ROOF_GREY_SPREAD)
+    m = ndimage.binary_opening(blue | grey, iterations=1)
+    lab, n = ndimage.label(m)
+    if not n:
+        return m
+    size = ndimage.sum(m, lab, range(1, n + 1))
+    ok = (size >= ROOF_MIN_M2) & (size <= ROOF_MAX_M2)
+    for k, sl in enumerate(ndimage.find_objects(lab)):       # compact blobs only (a road is long and thin)
+        if ok[k]:
+            h, w = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+            fill = size[k] / max(h * w, 1)
+            if max(h, w) / max(min(h, w), 1) > ROOF_MAX_ELONGATION or fill < 0.35:
+                ok[k] = False
+    return np.isin(lab, 1 + np.flatnonzero(ok))
+
+
 def mosaic(aoi: int, root: str = BASEMAP, crs: str = "EPSG:32646", res: float = 1.0) -> Path:
     """Joins the AOI's downloaded tiles (``<root>/aoi<N>/<tile>/<zoom>/mosaic.tif``) and warps them to ``crs`` at
     ``res`` metres (block average). All cores (GDAL_NUM_THREADS)."""
@@ -297,7 +338,8 @@ def merge_slivers(rice, tree, min_m2: float = SLIVER_M2, width_m: float = SLIVER
     return to(side["rice"]), to(side["tree"])
 
 
-def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, edge_m: float = EDGE_M):
+def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, edge_m: float = EDGE_M,
+                   built=None, field_share: float = FIELD_NON_RICE_SHARE):
     """Rice polygons with the tree blobs that touch their edge cut off. Returns (layer, per-field table). A cut piece
     becomes ``tree/orchard`` (non-rice) with the id ``<field_id>_t``; blobs inside the field that do not reach the edge,
     and blobs smaller than ``min_tree_m2``, are left."""
@@ -325,8 +367,12 @@ def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, ed
         t = transform * transform.translation(c0, r0)
         blobs = [shape(g) for g, v in rf.shapes(sub.astype("uint8"), mask=sub, transform=t) if v]
         edge = r.geometry.boundary.buffer(edge_m)
-        cut = [b.intersection(r.geometry) for b in blobs]
-        cut = [c for c in cut if c.area >= min_tree_m2 and c.intersects(edge)]
+        allb = [b.intersection(r.geometry) for b in blobs]
+        allb = [c for c in allb if c.area >= min_tree_m2]
+        if allb and sum(c.area for c in allb) > field_share * r.geometry.area:
+            cut = [r.geometry]                   # mostly trees / buildings: the whole field goes
+        else:
+            cut = [c for c in allb if c.intersects(edge)]
         if not cut:
             rows.append(r._asdict())
             stats.append({"field_id": r.field_id, "cut_m2": 0.0})
@@ -339,7 +385,8 @@ def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, ed
             continue
         if not rest.is_empty:
             rows.append({**r._asdict(), "geometry": rest})
-        rows.append({**r._asdict(), "field_id": f"{r.field_id}_t", "major_class": "non-rice", "sub_class": "tree/orchard",
+        kind = "building" if built is not None and trees.intersection(built).area > 0.5 * trees.area else "tree/orchard"
+        rows.append({**r._asdict(), "field_id": f"{r.field_id}_t", "major_class": "non-rice", "sub_class": kind,
                      "geometry": trees})
         stats.append({"field_id": r.field_id, "cut_m2": float(trees.area)})
     out = gpd.GeoDataFrame(rows, geometry="geometry", crs=fields.crs).drop(columns=["Index"], errors="ignore")
@@ -454,6 +501,7 @@ def main(argv=None) -> int:
     p.add_argument("--s3-prefix", help="fetch: the tiles folder of the AOI's delineation basemap cache")
     p.add_argument("--train-aoi", type=int, help="cut: learn the trees from this AOI's QC (default: --aoi itself)")
     p.add_argument("--fields", help="cut: the field layer to cut (default: the AOI's delivered fields)")
+    p.add_argument("--buildings", action="store_true", help="cut: also cut plain roofs seen on the basemap (+2 m)")
     p.add_argument("--p-min", type=float, default=TREE_P)
     p.add_argument("--min-m2", type=float, default=MIN_TREE_M2)
     p.add_argument("--aoi", type=int, required=True)
@@ -482,13 +530,28 @@ def main(argv=None) -> int:
         model = train(X, tree_, rice_)
         del X
     tree, transform, crs, _ = tree_mask(a.aoi, qc, model=model, p_min=a.p_min)
+    built = None
+    if a.buildings:
+        import shapely
+        from rasterio import features as rf
+        from scipy import ndimage
+        from shapely.geometry import shape
+
+        roofs = roof_mask(read(a.aoi)[0])
+        roofs = ndimage.binary_dilation(roofs, iterations=int(BUILDING_BUFFER_M))     # the 2 m margin (1 m pixels)
+        geoms = [shape(g) for g, v in rf.shapes(roofs.astype("uint8"), mask=roofs, transform=transform) if v]
+        built = shapely.union_all(geoms) if geoms else None
+        tree |= roofs
+        gpd.GeoDataFrame(geometry=geoms, crs=crs).to_file(Path(BASEMAP) / f"aoi{a.aoi}" / f"aoi{a.aoi}_roofs.gpkg",
+                                                          driver="GPKG")
+        print(f"roof blobs (with margin): {len(geoms)}, {sum(g.area for g in geoms) / ACRE_M2:.2f} ac")
     fields = gpd.read_file(a.fields) if a.fields else q.delivered_fields(a.aoi)
-    layer, stats = cut_edge_trees(fields.to_crs(crs), tree, transform, min_tree_m2=a.min_m2)
+    layer, stats = cut_edge_trees(fields.to_crs(crs), tree, transform, min_tree_m2=a.min_m2, built=built)
     layer, rep = absorb_layer_slivers(layer)
     print(rep)
     if a.train_aoi is not None and a.train_aoi != a.aoi:
         stem = Path(a.fields).stem if a.fields else f"aoi{a.aoi}_fields"
-        out = Path(q.OUT) / f"aoi{a.aoi}" / f"{stem}_edge_trees_cut.gpkg"
+        out = Path(q.OUT) / f"aoi{a.aoi}" / f"{stem}_edge_{'trees_buildings' if a.buildings else 'trees'}_cut.gpkg"
         out.parent.mkdir(parents=True, exist_ok=True)
         layer.to_file(out, driver="GPKG")
         from . import rice_map_delivery as rd
