@@ -1,4 +1,5 @@
 """Second fresh start: the relative (own-scale) hybrid rule, radar first."""
+import numpy as np
 import pandas as pd
 
 from sar_pipeline.analysis import curve_rules as cr
@@ -235,7 +236,7 @@ def test_try_rules_runs_each_finished_aois_rule_set_in_its_own_folder(tmp_path, 
 
     def fake_run(aoi, series_root, fresh):
         assert (tmp_path / "out" / Path(fresh).name / f"aoi{aoi}" / f"aoi{aoi}_step1_cover.tif").exists()
-        seen.append((Path(fresh).name, cr.AGE_LOW_SHARE, cr.YOUNG_WHILE_RADAR_LOW))
+        seen.append((Path(fresh).name, cr.AGE_LOW_SHARE, cr.YOUNG_WHILE_RADAR_LOW, cr.RADAR_DECIDES_WITHOUT_OPTICAL))
         return pd.DataFrame({"class": [1, 7], "name": ["a", "b"], "acres": [cr.AGE_LOW_SHARE, 1.0]})
 
     from pathlib import Path
@@ -244,8 +245,10 @@ def test_try_rules_runs_each_finished_aois_rule_set_in_its_own_folder(tmp_path, 
     (tmp_path / "fresh" / "aoi5" / "aoi5_step1_cover.tif").write_bytes(b"x")
     monkeypatch.setattr(cr, "_run", fake_run)
     t = cr.try_rules(5, series_root="s", fresh=str(tmp_path / "fresh"), out=str(tmp_path / "out"), jobs=1)
-    assert seen == [("rules_aoi160", 0.2, False), ("rules_aoi28", 0.05, False), ("rules_aoi72", 0.05, True)]
-    assert list(t.columns) == ["class", "name", "aoi160 rules", "aoi28 rules", "aoi72 rules"]
+    # each set as reviewed (curve_rules.REVIEWED_SETS), in its own folder; no extra switches laid over it
+    assert [x[0] for x in seen] == [f"rules_aoi{a}" for a in cr.RULE_SOURCES]
+    assert [x[1] for x in seen] == [cr.REVIEWED_SETS.get(a, {}).get("AGE_LOW_SHARE", 0.2) for a in cr.RULE_SOURCES]
+    assert list(t.columns) == ["class", "name", *[f"aoi{a} rules" for a in cr.RULE_SOURCES]]
     assert cr.AGE_LOW_SHARE == 0.2 and (tmp_path / "out" / "aoi5_rule_trials.csv").exists()
     assert not (tmp_path / "fresh" / "aoi5" / "aoi5_rel_class.tif").exists()      # the AOI's own outputs untouched
 
@@ -323,8 +326,8 @@ def test_young_while_radar_low_can_require_the_radar_to_be_still_climbing(monkey
 def test_one_wet_pass_spell_is_aoi39_only():
     import inspect
 
-    assert cr.WATER_SPELL_MIN_PASSES == 2 and cr.AOI_OVERRIDES[39]["WATER_SPELL_MIN_PASSES"] == 1
-    assert all("WATER_SPELL_MIN_PASSES" not in cr.AOI_OVERRIDES.get(a, {}) for a in (160, 28, 72, 116))
+    assert cr.WATER_SPELL_MIN_PASSES == 2 and cr.REVIEWED_SETS[39]["WATER_SPELL_MIN_PASSES"] == 1
+    assert all("WATER_SPELL_MIN_PASSES" not in cr.REVIEWED_SETS.get(a, {}) for a in (160, 28, 72, 116))
     assert "counts >= WATER_SPELL_MIN_PASSES" in inspect.getsource(cr.own_range_features)
 
 
@@ -566,10 +569,276 @@ def test_never_emptied_by_the_fitted_curve_is_other_vegetation_despite_one_dark_
 
 def test_long_flood_switches_only_on_the_field_reviewed_aois():
     for a in (83, 117, 155):
-        r = cr.AOI_OVERRIDES[a]
+        r = cr.REVIEWED_SETS[a]
         assert (r["LONG_WATER_LEVEL"], r["LONG_WATER_WET_VIEW"], r["LONG_WATER_GREEN_LEAD"]) == (0.4, True, 0)
     for a in (160, 28, 72, 116, 39, 118):                 # locked before the long-flood switches
-        assert not {"LONG_WATER_LEVEL", "LONG_WATER_WET_VIEW", "LONG_WATER_LAST"} & set(cr.AOI_OVERRIDES.get(a, {}))
-    assert cr.AOI_OVERRIDES[160] == {"ANY_WATER_TRANSPLANTED": True} and cr.AOI_OVERRIDES[28]["ANY_WATER_TRANSPLANTED"]
-    assert not any(cr.AOI_OVERRIDES[a].get("ANY_WATER_TRANSPLANTED") for a in (20, 33, 72, 116, 39, 118))
+        assert not {"LONG_WATER_LEVEL", "LONG_WATER_WET_VIEW", "LONG_WATER_LAST"} & set(cr.REVIEWED_SETS.get(a, {}))
+    assert cr.REVIEWED_SETS[160] == {"ANY_WATER_TRANSPLANTED": True} and cr.REVIEWED_SETS[28]["ANY_WATER_TRANSPLANTED"]
+    assert not any(cr.REVIEWED_SETS[a].get("ANY_WATER_TRANSPLANTED") for a in (20, 33, 72, 116, 39, 118))
     assert cr.LONG_WATER_LEVEL is None and cr.LONG_WATER_WET_VIEW is False and cr.LONG_WATER_LAST is False
+
+
+def test_aoi63_starts_as_a_copy_of_the_aoi39_rules_with_the_new_aoi_switches():
+    """User, 5 Oct: aoi63 uses the aoi39 rules; a later aoi63 change must not reach the locked aoi39 entry."""
+    own = {"HARVEST_NOT_IF_RADAR_RISING": False, "CANOPY_NOT_FLOODED": True,      # aoi63's own (12923, 20447,
+           "RADAR_STORY_IN_GAP": True, "WATER_SMALL_UNSEEN": True,                 # the 3 Jul - 26 Sep gap, 31277,
+           "POND_NEEDS_NO_CROP": True, "CANOPY_OVER_RADAR_WATER": True,             # 41938, 13571,
+           "GREEN_VIEW_NOT_FLOODED": True}                                          # 36796 / 23348)
+    assert cr.REVIEWED_SETS[63] == dict(cr.REVIEWED_SETS[39], **own)
+    assert cr.REVIEWED_SETS[39]["HARVEST_NOT_IF_RADAR_RISING"] and "CANOPY_NOT_FLOODED" not in cr.REVIEWED_SETS[39]
+    assert cr.REVIEWED_SETS[63]["RADAR_DECIDES_WITHOUT_OPTICAL"] and "TONE_AND_CURVE" not in cr.REVIEWED_SETS[63]
+    assert 63 in cr.LOCKED_AOIS                  # locked 5 Oct (user)
+
+
+def test_a_closing_canopy_with_the_radar_falling_is_not_flooded_when_switched_on(monkeypatch):
+    """aoi63 pixel 20447 (user, 5 Oct): water late June, newest view NDVI 0.86 = season's greenest, VV / VH falling."""
+    row = dict(radar_rise_days=84.0, vh_pos_end=0.47, vh_slope_end=-0.28, vh_step_end=-0.18, vh_rise_recent=0.09,
+               vv_step_end=-0.1, vv_rise_recent=0.16, water_depth=1.97, ndvi_low_peak=0.29, ndvi_low_day=20574.0,
+               ndvi_left=1.0, last_view_water=0, dry_water_share=0, ndvi_slope_end=0.06, ndvi_rise_seen=148.0,
+               ndvi_rise_days=50.0, days_since_peak=0.0, days_at_top=0.0, days_off_top=0.0, crop_age=104.0,
+               water_spell=1, views_in_water=0, water_views_in_water=0)
+    f = pd.DataFrame([row, dict(row, crop_age=30.0), dict(row, ndvi_left=0.6)])
+    assert cr.classify_relative(f).tolist() == ["flooded / bare"] * 3
+    monkeypatch.setattr(cr, "CANOPY_NOT_FLOODED", True)
+    # old crop standing, a young one young, and a field whose newest view is NOT its greenest stays flooded
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "young rice", "flooded / bare"]
+
+
+def test_where_the_optical_never_saw_the_green_up_the_radar_tells_the_story(monkeypatch):
+    """aoi63 (user, 5 Oct): no clear view 3 Jul - 26 Sep; the NDVI timing between is the fit's line."""
+    base = dict(radar_rise_days=84.0, vh_pos_end=0.47, vh_slope_end=-0.28, vh_step_end=-0.18, vh_rise_recent=0.09,
+                vv_step_end=-0.1, vv_rise_recent=0.16, water_depth=1.97, ndvi_low_peak=0.29, ndvi_low_day=20574.0,
+                ndvi_left=1.0, last_view_water=0, dry_water_share=0, ndvi_slope_end=0.06, ndvi_rise_seen=148.0,
+                ndvi_rise_days=20.0, days_since_peak=0.0, days_at_top=0.0, days_off_top=0.0, crop_age=104.0,
+                water_spell=1, views_in_water=0, water_views_in_water=0, rise_unseen=1)
+    f = pd.DataFrame([
+        base,                                                     # green now, water spell, old: standing transplanted
+        dict(base, water_spell=0, water_depth=-1.0, radar_rise_days=30.0),   # green, never wet, radar up 30 d: young
+        dict(base, ndvi_left=0.26, vh_pos_end=1.0, vh_rise_recent=0.6, vv_rise_recent=1.0),  # cut paddy (12923)
+        dict(base, ndvi_left=0.26, water_spell=0, water_depth=-1.0),          # bare, never held water
+        dict(base, ndvi_low_peak=0.6),                            # never emptied BUT stood in water: not a tree
+        dict(base, ndvi_low_peak=0.6, water_spell=0, water_depth=-1.0),       # never emptied, never wet: tree
+        dict(base, rise_unseen=0),                                # green-up seen: the usual NDVI tests
+    ])
+    off = cr.classify_relative(f).tolist()
+    assert off[0] == "flooded / bare"                            # 20447 before: the radar low read as water
+    monkeypatch.setattr(cr, "RADAR_STORY_IN_GAP", True)
+    assert cr.classify_relative(f).tolist() == [
+        "rice standing transplanted", "young rice", "rice harvested", "flooded / bare",
+        "rice standing transplanted", "tree/orchard", off[6]]
+
+
+def test_a_crop_grown_unseen_after_a_summer_crop_is_judged_green_on_the_whole_year(monkeypatch):
+    """aoi63 pixel 31277 (user, 5 Oct): summer crop 0.94 in May, July water, 0.81 on 28 Sep -> transplanted rice."""
+    row = dict(radar_rise_days=60.0, vh_pos_end=0.75, vh_slope_end=-0.17, vh_step_end=0.02, vh_rise_recent=0.66,
+               vv_step_end=-0.01, vv_rise_recent=0.26, water_depth=1.38, ndvi_low_peak=0.79, ndvi_low_day=20607.0,
+               ndvi_left=0.38, ndvi_left_year=0.68, last_view_water=0, dry_water_share=0.07, ndvi_slope_end=0.11,
+               ndvi_rise_days=np.nan, ndvi_rise_seen=np.nan, days_since_peak=145.0, days_at_top=145.0,
+               days_off_top=145.0, crop_age=87.0, water_spell=1, views_in_water=0, water_views_in_water=0,
+               rise_unseen=0, crop_unseen=1)
+    f = pd.DataFrame([row, dict(row, crop_unseen=0)])
+    assert cr.classify_relative(f).tolist()[0] == "tree/orchard"
+    monkeypatch.setattr(cr, "RADAR_STORY_IN_GAP", True)
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "tree/orchard"]
+
+
+def test_a_field_flooded_in_the_dry_season_but_green_now_is_not_a_pond_when_switched_on(monkeypatch):
+    """aoi63 pixel 41938 (user, 5 Oct): early-April water, summer crop, July water, NDVI 0.86 on 28 Sep -> transplanted."""
+    row = dict(radar_rise_days=87.5, vh_pos_end=0.4, vh_slope_end=-0.09, vh_step_end=0.73, vh_rise_recent=0.64,
+               vv_step_end=-0.15, vv_rise_recent=0.57, water_depth=2.84, ndvi_low_peak=0.63, ndvi_low_day=20577.0,
+               ndvi_left=0.91, ndvi_left_year=0.97, last_view_water=0, dry_water_share=0.64, ndvi_slope_end=0.2,
+               ndvi_rise_seen=5.0, ndvi_rise_days=5.0, days_since_peak=140.0, days_at_top=140.0, days_off_top=140.0,
+               crop_age=73.0, water_spell=1, views_in_water=0, water_views_in_water=0, rise_unseen=1, crop_unseen=1)
+    f = pd.DataFrame([row, dict(row, ndvi_left_year=0.1, ndvi_left=0.1)])      # second: not green now -> pond
+    for k in ("POND_IF_DRY_WATER", "RADAR_STORY_IN_GAP"):
+        monkeypatch.setattr(cr, k, True)
+    assert cr.classify_relative(f).tolist() == ["flooded / bare"] * 2
+    monkeypatch.setattr(cr, "POND_NEEDS_NO_CROP", True)
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "flooded / bare"]
+
+
+def test_a_radar_low_under_the_years_greenest_view_is_a_canopy_when_switched_on(monkeypatch):
+    """aoi63 pixel 13571 (user, 5 Oct): seen empty early May, NDVI 0.81 on 28 Sep, radar at its low -> transplanted."""
+    row = dict(radar_rise_days=24.0, vh_pos_end=0.09, vh_slope_end=-0.24, vh_step_end=-0.42, vh_rise_recent=0.21,
+               vv_step_end=-0.35, vv_rise_recent=0.18, water_depth=6.61, ndvi_low_peak=0.19, ndvi_low_day=20577.0,
+               ndvi_left=1.0, ndvi_left_year=1.0, days_since_ndvi_low=147.0, last_view_water=0, dry_water_share=0,
+               ndvi_slope_end=0.04, ndvi_rise_seen=140.0, ndvi_rise_days=140.0, days_since_peak=0.0, days_at_top=5.0,
+               days_off_top=0.0, crop_age=28.0, water_spell=1, views_in_water=0, water_views_in_water=0,
+               rise_unseen=0, crop_unseen=1)
+    f = pd.DataFrame([row, dict(row, days_since_ndvi_low=30.0), dict(row, ndvi_left_year=0.7)])
+    monkeypatch.setattr(cr, "RADAR_DECIDES_WITHOUT_OPTICAL", True)
+    assert cr.classify_relative(f).tolist() == ["flooded / bare"] * 3
+    monkeypatch.setattr(cr, "CANOPY_OVER_RADAR_WATER", True)
+    # seen empty only 30 days before, or not the year's greenest now: the radar's water stands
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "flooded / bare", "flooded / bare"]
+
+
+def test_a_late_radar_low_under_the_years_greenest_view_does_not_make_a_crop_young(monkeypatch):
+    """aoi63 pixel 18853 (user, 5 Oct): seen empty 150 days before, NDVI 0.80 now, radar low -> standing, not young."""
+    row = dict(radar_rise_days=78.0, vh_pos_end=0.03, vh_slope_end=-0.04, vh_step_end=-0.08, vh_rise_recent=0.07,
+               vv_step_end=-0.03, vv_rise_recent=0.11, water_depth=0.96, ndvi_low_peak=0.27, ndvi_low_day=20574.0,
+               days_since_ndvi_low=150.0, ndvi_left=1.0, ndvi_left_year=1.0, last_view_water=0, dry_water_share=0,
+               ndvi_slope_end=0.18, ndvi_rise_seen=150.0, ndvi_rise_days=140.0, days_since_peak=0.0, days_at_top=5.0,
+               days_off_top=0.0, crop_age=37.0, water_spell=1, views_in_water=0, water_views_in_water=0,
+               rise_unseen=0, crop_unseen=1)
+    f = pd.DataFrame([row,
+                      dict(row, vh_pos_end=0.8),                  # radar not low now: the switch does not apply
+                      dict(row, crop_age=104.0),                  # water from late June (20447): transplanted
+                      dict(row, water_depth=6.61)])               # deep water (13571): transplanted
+    monkeypatch.setattr(cr, "CANOPY_NOT_FLOODED", True)
+    before = cr.classify_relative(f).tolist()
+    assert before[0] == "young rice"
+    monkeypatch.setattr(cr, "CANOPY_OVER_RADAR_WATER", True)
+    # user, 5 Oct: 18853 is direct seeded (its "water" was only the late canopy)
+    assert cr.classify_relative(f).tolist() == ["rice standing direct seeded", before[1], "rice standing transplanted",
+                                                "rice standing transplanted"]
+
+
+def test_a_green_newest_view_is_never_flooded_when_switched_on(monkeypatch):
+    """aoi63 (user, 5 Oct): 36796 transplanted (water 3 Jul + radar dip), 23348 direct seeded (no water spell)."""
+    a = dict(radar_rise_days=42.0, vh_pos_end=0.49, vh_slope_end=-0.46, vh_step_end=-0.17, vh_rise_recent=0.5,
+             vv_step_end=-0.19, vv_rise_recent=0.3, water_depth=5.39, ndvi_low_peak=0.09, ndvi_low_day=20637.0,
+             days_since_ndvi_low=87.0, ndvi_left=0.83, ndvi_left_year=0.81, last_view_water=0, dry_water_share=0,
+             ndvi_slope_end=0.01, ndvi_rise_seen=np.nan, ndvi_rise_days=np.nan, days_since_peak=145.0,
+             days_at_top=145.0, days_off_top=145.0, crop_age=76.0, water_spell=1, views_in_water=0,
+             water_views_in_water=0, rise_unseen=0, crop_unseen=1)
+    b = dict(a, water_depth=3.15, days_since_ndvi_low=52.0, ndvi_left=1.0, ndvi_left_year=0.94, crop_age=145.0,
+             water_spell=0, vh_pos_end=0.43, vh_rise_recent=0.41, vv_rise_recent=0.32)
+    f = pd.DataFrame([a, b, dict(a, last_view_water=1), dict(a, ndvi_left_year=0.3), dict(b, days_since_ndvi_low=30.0)])
+    monkeypatch.setattr(cr, "RADAR_DECIDES_WITHOUT_OPTICAL", True)
+    assert cr.classify_relative(f).tolist() == ["flooded / bare"] * 5
+    monkeypatch.setattr(cr, "GREEN_VIEW_NOT_FLOODED", True)
+    # water on the newest view, or not green now: still flooded; seen empty 30 days ago: young
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "rice standing direct seeded",
+                                                "flooded / bare", "flooded / bare", "young rice"]
+
+
+def test_young_rice_with_a_clear_radar_dip_is_transplanted_when_switched_on(monkeypatch):
+    """aoi13 (user, 5 Oct): a clear VV / VH dip -> transplanted rice even at 30 days; a short radar rise stays flooded."""
+    row = dict(radar_rise_days=35.0, vh_pos_end=0.7, vh_slope_end=0.3, vh_step_end=0.1, vh_rise_recent=0.6,
+               vv_step_end=0.1, vv_rise_recent=0.7, water_depth=6.3, ndvi_low_peak=0.1, ndvi_low_day=20682.0,
+               days_since_ndvi_low=45.0, ndvi_left=0.9, ndvi_left_year=0.9, last_view_water=0, dry_water_share=0,
+               ndvi_slope_end=0.3, ndvi_rise_seen=40.0, ndvi_rise_days=40.0, days_since_peak=0.0, days_at_top=0.0,
+               days_off_top=0.0, crop_age=30.0, water_spell=1, views_in_water=2, water_views_in_water=2,
+               rise_unseen=0, crop_unseen=0)
+    f = pd.DataFrame([row, dict(row, water_depth=1.0), dict(row, radar_rise_days=18.0, vh_pos_end=0.4,
+                                                            last_view_water=1)])
+    monkeypatch.setattr(cr, "YOUNG_MIN_RISE_DAYS", 30)
+    before = cr.classify_relative(f).tolist()
+    assert before[:2] == ["young rice", "young rice"] and before[2] == "flooded / bare"
+    monkeypatch.setattr(cr, "DIP_MAKES_TRANSPLANTED", True)
+    # deep dip -> transplanted; shallow -> stays young; radar risen only 18 days -> still flooded
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "young rice", "flooded / bare"]
+
+
+def test_the_radar_sowing_is_never_later_than_the_crop_seen_rising():
+    """aoi13 pixel 14994 (user, 5 Oct): water view 18 Jul, NDVI 0.33 on 17 Aug, radar water end 29 Aug -> sown 18 Jul."""
+    d = lambda x: (pd.Timestamp(x) - pd.Timestamp("1970-01-01")).days        # noqa: E731
+    tdays = np.array([d("2026-06-23"), d("2026-07-18"), d("2026-08-17"), d("2026-10-01")])
+    v = np.array([[0.07, 0.07], [0.02, 0.02], [0.33, 0.05], [0.80, 0.80]])
+    ok = np.ones_like(v, dtype=bool)
+    lo, amp = v.min(axis=0), v.max(axis=0) - v.min(axis=0)
+    ilo = v.argmin(axis=0)
+    sowing = np.array([d("2026-08-29")] * 2)
+    new, moved = cr.sowing_not_after_seen_crop(sowing, sowing, ok, v, lo, amp, ilo, tdays)
+    # pixel 1: the crop was seen at 0.33 on 17 Aug -> sown at the 18 Jul low; pixel 2: not seen rising -> radar date
+    assert moved.tolist() == [True, False]
+    assert new.tolist() == [d("2026-07-18"), d("2026-08-29")]
+
+
+def test_an_old_water_view_does_not_beat_a_radar_that_rose_since_in_the_radar_story(monkeypatch):
+    """aoi13 pixel 11791 (user, 5 Oct): last view water 19 Aug, VV / VH up since, deep dip -> transplanted."""
+    row = dict(radar_rise_days=30.0, vh_pos_end=0.58, vh_slope_end=0.48, vh_step_end=0.23, vh_rise_recent=0.77,
+               vv_step_end=0.27, vv_rise_recent=1.01, water_depth=6.01, ndvi_low_peak=-0.7, ndvi_low_day=20652.0,
+               days_since_ndvi_low=32.0, ndvi_left=0.54, ndvi_left_year=0.34, last_view_water=1, dry_water_share=0,
+               ndvi_slope_end=0.48, ndvi_rise_seen=np.nan, ndvi_rise_days=15.0, days_since_peak=135.0,
+               days_at_top=135.0, days_off_top=130.0, crop_age=75.0, water_spell=1, views_in_water=3,
+               water_views_in_water=3, rise_unseen=1, crop_unseen=0)
+    f = pd.DataFrame([row, dict(row, vh_rise_recent=0.1, vv_rise_recent=0.1, vv_step_end=0.0)])   # radar not up
+    for k, v in (("RADAR_STORY_IN_GAP", True), ("YOUNG_MIN_RISE_DAYS", 30), ("DIP_MAKES_TRANSPLANTED", True)):
+        monkeypatch.setattr(cr, k, v)
+    assert cr.classify_relative(f).tolist() == ["flooded / bare"] * 2
+    monkeypatch.setattr(cr, "STORY_YOUNG_AFTER_LAST_WATER", True)
+    assert cr.classify_relative(f).tolist() == ["rice standing transplanted", "flooded / bare"]
+
+
+def test_a_short_radar_rise_under_a_green_newest_view_stays_young_when_switched_on(monkeypatch):
+    """aoi13 (user, 5 Oct): 16003 radar up 24 days, 1 Oct NDVI 0.67 -> young; 9643 1 Oct view water -> flooded."""
+    row = dict(radar_rise_days=24.0, vh_pos_end=0.54, vh_slope_end=0.42, vh_step_end=-0.01, vh_rise_recent=0.58,
+               vv_step_end=0.13, vv_rise_recent=1.01, water_depth=3.44, ndvi_low_peak=-0.32, ndvi_low_day=20652.0,
+               days_since_ndvi_low=75.0, ndvi_left=1.0, ndvi_left_year=0.81, last_view_water=0, dry_water_share=0,
+               ndvi_slope_end=0.66, ndvi_rise_seen=45.0, ndvi_rise_days=60.0, days_since_peak=0.0, days_at_top=5.0,
+               days_off_top=0.0, crop_age=30.0, water_spell=1, views_in_water=4, water_views_in_water=4,
+               rise_unseen=0, crop_unseen=0)
+    f = pd.DataFrame([row, dict(row, last_view_water=1, ndvi_left_year=0.3, ndvi_left=0.3),
+                      dict(row, radar_rise_days=35.0)])
+    for k, v in (("YOUNG_MIN_RISE_DAYS", 30), ("DIP_MAKES_TRANSPLANTED", True)):
+        monkeypatch.setattr(cr, k, v)
+    before = cr.classify_relative(f).tolist()
+    assert before[0] == "flooded / bare" and before[2] == "rice standing transplanted"
+    monkeypatch.setattr(cr, "SHORT_RISE_GREEN_YOUNG", True)
+    after = cr.classify_relative(f).tolist()
+    # green on the newest view: young; newest view water: unchanged; risen 30+ days with a deep dip: transplanted
+    assert after[0] == "young rice" and after[1] == before[1] and after[2] == "rice standing transplanted"
+
+
+def test_a_pixel_still_empty_on_the_latest_image_is_not_rice_when_switched_on(monkeypatch):
+    """aoi13 (user, 5 Oct): empty on the latest image -> flooded / bare; cloudy there -> the curve decides."""
+    row = dict(radar_rise_days=36.0, vh_pos_end=0.7, vh_slope_end=0.4, vh_step_end=0.15, vh_rise_recent=0.6,
+               vv_step_end=0.35, vv_rise_recent=0.7, water_depth=8.0, ndvi_low_peak=-0.35, ndvi_low_day=20682.0,
+               days_since_ndvi_low=45.0, ndvi_left=0.9, ndvi_left_year=0.9, last_view_water=0, dry_water_share=0,
+               ndvi_slope_end=0.4, ndvi_rise_seen=40.0, ndvi_rise_days=40.0, days_since_peak=0.0, days_at_top=0.0,
+               days_off_top=0.0, crop_age=40.0, water_spell=1, views_in_water=0, water_views_in_water=0,
+               rise_unseen=0, crop_unseen=0, seen_on_latest=1)
+    f = pd.DataFrame([row, dict(row, ndvi_left_year=0.1), dict(row, ndvi_left_year=0.1, seen_on_latest=0)])
+    before = cr.classify_relative(f).tolist()
+    monkeypatch.setattr(cr, "NEWEST_EMPTY_NOT_RICE", True)
+    assert cr.classify_relative(f).tolist() == [before[0], "flooded / bare", before[2]]
+
+
+def test_change_since_reads_the_radar_after_the_view():
+    pday = np.array([0, 12, 24, 36])
+    pos = np.array([[0.9, 0.2], [0.8, np.nan], [0.2, 0.3], [0.1, 0.9]])
+    ch = cr.change_since(pday, pos, np.array([12.0, 12.0]))
+    # pixel 0: 0.8 at the view, 0.15 on its last two passes -> fell; pixel 1: NaN on the view pass -> the pass
+    # before (0.2), 0.6 after -> rose
+    assert np.allclose(ch, [0.15 - 0.8, 0.6 - 0.2])
+    assert np.isnan(cr.change_since(pday, pos, np.array([40.0, np.nan]))).all()   # no pass after / no view
+
+
+def test_universal_tone_and_curve_rules(monkeypatch):
+    """User, 5 Oct: a class must fit the latest clear view's tone; the newer news wins; harvested needs VV and VH."""
+    base = dict(radar_rise_days=60.0, vh_pos_end=0.8, vh_slope_end=0.0, vh_step_end=0.0, vh_rise_recent=0.1,
+                vv_step_end=0.0, vv_rise_recent=0.1, vh_fall_recent=0.1, vv_fall_recent=0.1, water_depth=4.0,
+                ndvi_low_peak=0.1, ndvi_low_day=20600.0, days_since_ndvi_low=90.0, ndvi_left=0.9, ndvi_left_year=0.9,
+                last_view_water=0, dry_water_share=0, ndvi_slope_end=0.0, ndvi_rise_seen=60.0, ndvi_rise_days=60.0,
+                days_since_peak=10.0, days_at_top=30.0, days_off_top=5.0, crop_age=90.0, water_spell=1,
+                views_in_water=0, water_views_in_water=0, rise_unseen=0, crop_unseen=0, view_day=20700.0,
+                vh_since_view=0.0, vv_since_view=0.0)
+    f = pd.DataFrame([
+        dict(base),                                                          # green, standing: unchanged
+        dict(base, vh_since_view=-0.7, vv_since_view=-0.6),                  # green 13 Sep, both fell after: harvested
+        dict(base, vh_since_view=-0.7, vv_since_view=0.1),                   # only VH fell: still standing
+        dict(base, ndvi_left_year=0.1, ndvi_left=0.1),                       # empty now, no radar move: not rice
+        dict(base, ndvi_left_year=0.1, ndvi_left=0.1, vh_since_view=0.6, vv_since_view=0.8),  # empty, both rose: crop
+        dict(base, last_view_water=1, ndvi_left_year=0.0, ndvi_left=0.0),   # water now: not standing rice
+        dict(base, view_day=np.nan),                                         # no clear view: the curve decides
+    ])
+    out = ["rice standing transplanted"] * 7
+    monkeypatch.setattr(cr, "TONE_AND_CURVE", True)
+    assert cr.tone_and_curve(f, out) == [
+        "rice standing transplanted", "rice harvested", "rice standing transplanted", "flooded / bare",
+        "rice standing transplanted", "flooded / bare", "rice standing transplanted"]
+    # harvested needs both polarisations
+    g = pd.DataFrame([dict(base, vh_fall_recent=0.8, vv_fall_recent=0.1, view_day=np.nan),
+                      dict(base, vh_fall_recent=0.8, vv_fall_recent=0.7, view_day=np.nan)])
+    monkeypatch.setattr(cr, "HARVEST_NEEDS_BOTH_POLS", True)
+    assert cr.tone_and_curve(g, ["rice harvested"] * 2) == ["rice standing transplanted", "rice harvested"]
+
+
+def test_nearest_locked_orders_the_locked_aois_by_distance():
+    index = pd.DataFrame({"aoi": [1, 2, 3, 4], "lon": [96.0, 96.1, 97.0, 96.0], "lat": [17.0, 17.0, 17.0, 18.0],
+                          "acres": [10.0, 20.0, 30.0, 40.0]})
+    t = cr.nearest_locked(1, index, locked=[2, 3, 4])
+    assert t.locked_aoi.tolist() == [2, 3, 4]                 # ~10.6 km, ~106 km, ~111 km
+    assert 10 < t.km[0] < 11.5

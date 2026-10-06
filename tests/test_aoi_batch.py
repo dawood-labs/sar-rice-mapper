@@ -23,7 +23,7 @@ def test_status_marks_are_resumable(tmp_path, monkeypatch):
 
 def test_candidate_sets_exist_as_reviewed_sets():
     from sar_pipeline.analysis import curve_rules as cr
-    assert all(s == 160 or s in cr.REVIEWED_SETS for s in b.CANDIDATE_SETS)
+    assert all(s == 160 or s in cr.REVIEWED_SETS or s in cr.NAMED_SETS for s in b.CANDIDATE_SETS)
 
 
 def test_flow_with_nothing_to_do_returns_at_once(tmp_path, monkeypatch):
@@ -52,3 +52,11 @@ def test_resample_never_removes_an_earlier_rounds_lock(tmp_path, monkeypatch):
     assert not (tmp_path / "fresh" / "locked" / "aoi1").exists()       # made by this runner: removed
     assert (tmp_path / "fresh" / "locked" / "aoi2").exists()           # an earlier round's lock: kept
     assert not b._done(1, "sheets") and not b._done(2, "sheets")
+
+
+def test_universal_set_is_a_named_candidate():
+    from sar_pipeline.analysis import curve_rules as cr
+    assert "universal" in b.CANDIDATE_SETS and 63 in b.CANDIDATE_SETS
+    assert cr.NAMED_SETS["universal"] == cr.NEW_AOI_SWITCHES and cr.NAMED_SETS["universal"]["TONE_AND_CURVE"]
+    b._fill_universal()
+    assert b.CANDIDATE_SWITCHES["universal"] == cr.NEW_AOI_SWITCHES

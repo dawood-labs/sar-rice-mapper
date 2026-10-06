@@ -21,6 +21,7 @@ The GDAL command-line tools do the mosaicking (``gdalbuildvrt``, ``gdal_translat
 from __future__ import annotations
 
 import subprocess
+import textwrap
 from pathlib import Path
 
 import pandas as pd
@@ -299,7 +300,8 @@ RULE_FEATURE_NAMES = {
 
 #: Where the rule's sowing date came from (``curve_rules.own_range_features`` column ``sowing_from``), for the plot.
 SOWING_SOURCES = {0: "NDVI: end of the empty spell", 1: "radar: end of the water spell (transplanting)",
-                  2: "radar: VH leaves its low (no clear view)", 3: "radar: start of the water spell"}
+                  2: "radar: VH leaves its low (no clear view)", 3: "radar: start of the water spell",
+                  4: "NDVI: last empty view (crop seen before the radar water end)"}
 
 
 def _sowing_label(rule: dict) -> str:
@@ -318,6 +320,10 @@ def _sowing(rule: dict, fresh: dict):
     return d if d is not None and not pd.isna(d) else fresh.get("sowing_date")
 
 
+#: Characters per title line on the curve figure (the figure is ~14 inches wide at fontsize 11).
+TITLE_WRAP = 130
+
+
 def annotate_rule(fig, rule: dict) -> None:
     """Writes the rule's class (and the user's label) in the curve figure's title and the features in a box."""
     if fig is None or not rule:
@@ -328,15 +334,15 @@ def annotate_rule(fig, rule: dict) -> None:
     if rule.get("your_labels"):
         head += "   |   your label: " + "; ".join(rule["your_labels"].values())
     if rule.get("rule_set"):
-        head += f"\nrules used: {rule['rule_set']}"
+        # wrapped: an AOI with many switches made one very long line, the saved figure became that wide and the
+        # curves shrank to a strip in the notebook (user, 5 Oct, aoi63)
+        head += "\n" + textwrap.fill(f"rules used: {rule['rule_set']}", TITLE_WRAP)
     if rule.get("inputs"):
-        head += f"\ninputs: {rule['inputs']}"
+        head += "\n" + textwrap.fill(f"inputs: {rule['inputs']}", TITLE_WRAP)
     # Wrapped title and the feature box INSIDE the figure (user, 5 Oct: "the curves plot is too small"): a long
     # "rules used" line (an AOI with many own switches) or a box drawn outside the axes widened the saved figure, and
     # the notebook shrank the whole figure, curves included, to its cell width.
-    import textwrap
-
-    head = "\n".join(textwrap.fill(h, 170, subsequent_indent="    ") for h in head.split("\n"))
+    head = "\n".join(textwrap.fill(h, TITLE_WRAP, subsequent_indent="    ") for h in head.split("\n"))
     n_head = head.count("\n") + 1
     fig.set_size_inches(20, 10 + 0.25 * n_head)
     fig.subplots_adjust(left=0.05, right=0.80, bottom=0.06, top=1 - (0.35 + 0.25 * n_head) / (10 + 0.25 * n_head),
