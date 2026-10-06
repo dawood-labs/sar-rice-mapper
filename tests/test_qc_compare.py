@@ -100,3 +100,11 @@ def test_clean_keeps_rice_makes_drawn_rice_and_leaves_no_overlap_or_touch():
     a = out.set_index("field_id").geometry
     assert a["a"].area > 2490 and a["b"].area > 2490                             # delineated keep their shape (minus the gap)
     assert a["aoi9_qc001"].area < 40 * 50 - 2 * 10 * 10 + 1                      # drawn lost what a and b cover
+
+
+def test_latest_clear_date_is_the_newest_date_marked_clear(tmp_path):
+    d = tmp_path / "aoi5"
+    d.mkdir()
+    pd.DataFrame({"date": ["2026-09-03", "2026-09-13", "2026-09-18"], "clear_share": [0.0, 0.99, 0.2],
+                  "delivered": [False, True, False]}).to_csv(d / "aoi5_s2_dates.csv", index=False)
+    assert q.latest_clear_date(5, root=str(tmp_path)) == "2026-09-13"

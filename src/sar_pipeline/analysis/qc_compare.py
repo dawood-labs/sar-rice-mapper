@@ -17,6 +17,7 @@ Run::
     python -m sar_pipeline.analysis.qc_compare pattern --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg --s2-date 2026-09-13
     python -m sar_pipeline.analysis.qc_compare trial --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg   # the new switches
     python -m sar_pipeline.analysis.qc_compare clean --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg   # ready to dissolve
+    python -m sar_pipeline.analysis.qc_compare too-young --aoi 39      # delivered fields minus too-young rice
 
 Outputs go to ``processed/_batch/s2_2026/qc/aoi<N>/`` (``diff.csv``, ``fields.csv``, ``separation.csv``).
 """
@@ -102,14 +103,13 @@ def s2_bands(aoi: int, date: str, pids, s2_dir: str = S2_DIR) -> pd.DataFrame:
     return t.add_prefix("s2_")
 
 
-def removed_vs_kept(aoi: int, qc, s2_date: str | None = None, root: str = DELIVERY) -> pd.DataFrame:
-    """Per delivered RICE field: the median of every rule feature and of the S2 date's bands over its pixels, and
-    ``deleted`` (True when the QC dropped the field). The features are computed with the AOI's own rule set."""
+def rice_field_features(aoi: int, s2_date: str | None = None, root: str = DELIVERY) -> pd.DataFrame:
+    """Per delivered RICE field: the median of every rule feature and of one S2 date's bands over its pixels. The
+    features are computed with the AOI's own rule set."""
     from . import curve_rules as cr
 
     o = delivered_fields(aoi, root)
     rice = o[o["major_class"] == "rice"].reset_index(drop=True)
-    gone = set(rice["field_id"]) - set(qc["field_id"].dropna())
     px = _field_pixels(aoi, rice, root)
     with cr.rules_for(aoi):
         f = cr.own_range_features(aoi, px["pid"].to_numpy())
@@ -120,9 +120,60 @@ def removed_vs_kept(aoi: int, qc, s2_date: str | None = None, root: str = DELIVE
         f = f.join(s)
     t = f.groupby("field_id").median(numeric_only=True)
     t["pixels"] = f.groupby("field_id").size()
-    t = rice.set_index("field_id")[["sub_class", "acres"]].join(t)
-    t["deleted"] = t.index.isin(gone)
+    return rice.set_index("field_id")[["sub_class", "acres"]].join(t)
+
+
+def removed_vs_kept(aoi: int, qc, s2_date: str | None = None, root: str = DELIVERY) -> pd.DataFrame:
+    """:func:`rice_field_features` plus ``deleted`` (True when the QC dropped the field)."""
+    t = rice_field_features(aoi, s2_date, root)
+    t["deleted"] = ~t.index.isin(set(qc["field_id"].dropna()))
     return t
+
+
+#: The manager's minimum age (via the user, 6 Oct 2026): only rice older than this many days, counted from water that
+#: was seen, goes to the client.
+TOO_YOUNG_DAYS = 40
+
+
+def latest_clear_date(aoi: int, root: str = DELIVERY) -> str:
+    """The newest S2 date the delivery counted as clear (at least ``rice_map_delivery.CLEAR_SHARE_MIN`` of the AOI)."""
+    d = pd.read_csv(Path(root) / f"aoi{aoi}" / f"aoi{aoi}_s2_dates.csv")
+    return str(d[d.iloc[:, 2].astype(str) == "True"].iloc[-1, 0])
+
+
+def too_young_fields(aoi: int, days: int = TOO_YOUNG_DAYS, root: str = DELIVERY) -> pd.DataFrame:
+    """Per delivered rice field: ``too_young`` when most of its pixels show OPEN water (NDVI below 0) on their newest
+    clear view, or showed it within ``days`` of the series end. The same rule as ``curve_rules.TOO_YOUNG_OPEN_WATER_DAYS``,
+    judged per field (median of its pixels), as the reviewer judged it. Why (user, 6 Oct 2026): fields flooded in
+    September (aoi19, aoi39) are too young for the client; on the aoi19 QC this caught all 42 such deletions.
+    The newest clear S2 date's NDVI / NDWI are added, so the call can be checked in a 5-3-2 view."""
+    date = latest_clear_date(aoi, root)
+    t = rice_field_features(aoi, date, root)
+    t["too_young"] = (t["last_view_open_water"] >= 0.5) | (t["days_since_open_water_view"] <= days)
+    t.attrs["s2_date"] = date
+    return t
+
+
+def remove_too_young(aoi: int, days: int = TOO_YOUNG_DAYS, root: str = DELIVERY, out_root: str = OUT):
+    """The delivered field layer without its too-young rice fields (:func:`too_young_fields`); the delivery itself is
+    not touched. Writes ``<out_root>/aoi<N>/aoi<N>_fields_no_too_young.gpkg`` and ``aoi<N>_too_young_removed.gpkg``
+    (the removed fields with their numbers, for checking in QGIS) and returns (kept layer, removed table)."""
+    from . import rice_map_delivery as rd
+
+    t = too_young_fields(aoi, days, root)
+    o = delivered_fields(aoi, root)
+    gone = set(t.index[t["too_young"]])
+    out = Path(out_root) / f"aoi{aoi}"
+    out.mkdir(parents=True, exist_ok=True)
+    kept = o[~o["field_id"].isin(gone)]
+    kept.to_file(out / f"aoi{aoi}_fields_no_too_young.gpkg", driver="GPKG")
+    rd.fields_qml(out / f"aoi{aoi}_fields_no_too_young.gpkg")
+    cols = ["field_id", "sub_class", "acres", "last_view_open_water", "days_since_open_water_view", "s2_ndvi", "s2_ndwi",
+            "radar_rise_days", "geometry"]
+    removed = o[o["field_id"].isin(gone)].merge(t.reset_index().drop(columns=["sub_class", "acres"]), on="field_id")
+    removed[[c for c in cols if c in removed]].to_file(out / f"aoi{aoi}_too_young_removed.gpkg", driver="GPKG")
+    t.to_csv(out / f"aoi{aoi}_rice_field_features.csv")
+    return kept, t
 
 
 def separation(t: pd.DataFrame, min_fields: int = 5) -> pd.DataFrame:
@@ -424,16 +475,24 @@ def main(argv=None) -> int:
     import geopandas as gpd
 
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["diff", "pattern", "trial", "choose", "without", "clean"])
+    p.add_argument("step", choices=["diff", "pattern", "trial", "choose", "without", "clean", "too-young"])
     p.add_argument("--aoi", type=int, required=True)
-    p.add_argument("--qc", required=True, help="the QC'd field file (GeoPackage with the delivered field_id)")
+    p.add_argument("--qc", help="the QC'd field file (GeoPackage with the delivered field_id); not for too-young")
     p.add_argument("--s2-date", help="pattern: one clear Sentinel-2 date, YYYY-MM-DD")
     p.add_argument("--switches", nargs="*", default=[], help="without: switches of the AOI's own set to turn off")
     p.add_argument("--base", help="trial: a rule set in place of the AOI's own, e.g. aoi160 (the best of 'choose')")
     a = p.parse_args(argv)
-    qc = gpd.read_file(a.qc)
+    qc = gpd.read_file(a.qc) if a.qc else None
     out = Path(OUT) / f"aoi{a.aoi}"
     out.mkdir(parents=True, exist_ok=True)
+    if a.step == "too-young":
+        kept, t = remove_too_young(a.aoi)
+        y = t[t["too_young"]]
+        print(f"newest clear S2 date: {t.attrs['s2_date']}")
+        print(f"rice fields {len(t)} ({t['acres'].sum():.1f} ac); too young {len(y)} ({y['acres'].sum():.1f} ac)")
+        print(y.groupby("sub_class")["acres"].agg(["count", "sum"]).round(1).to_string())
+        print(f"kept layer: {(out / f'aoi{a.aoi}_fields_no_too_young.gpkg').resolve()}")
+        return 0
     if a.step == "diff":
         d = diff(delivered_fields(a.aoi), qc)
         d.to_csv(out / "diff.csv", index=False)
