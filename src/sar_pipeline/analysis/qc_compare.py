@@ -144,12 +144,13 @@ def separation(t: pd.DataFrame, min_fields: int = 5) -> pd.DataFrame:
 
 
 #: The rule switches tried on aoi19 after its QC (user + manager, 6 Oct 2026); see curve_rules / field_polygons.
-QC_SWITCHES = {"TOO_YOUNG_OPEN_WATER_DAYS": 40, "TREE_IF_NEVER_EMPTIED": (0.30, 3.5),
-               "field_polygons.STRIP_MAX_WIDTH_M": 15.0}
+QC_SWITCHES = {"TOO_YOUNG_OPEN_WATER_DAYS": 40, "TREE_IF_NEVER_EMPTIED": (0.35, 3.5),
+               "field_polygons.STRIP_MAX_WIDTH_M": 15.0, "field_polygons.RICE_GROUP_MAJORITY": True,
+               "field_polygons.TREE_CUT_MIN_WIDTH_M": 10.0}
 
 
 def trial(aoi: int, overrides: dict | None = None, fresh: str = "processed/_batch/s2_2026/rice_fresh",
-          out_root: str = OUT) -> Path:
+          out_root: str = OUT, base: str | None = None) -> Path:
     """Map, sieve and fields of one AOI with its own rules PLUS ``overrides`` (default :data:`QC_SWITCHES`), written
     only to ``<out_root>/aoi<N>/trial/``; the real map, the lock and the delivery are not touched. Writes
     ``aoi<N>_fields_trial.gpkg`` in the delivery's attribute format, so it can be laid over the delivered layer in
@@ -162,14 +163,24 @@ def trial(aoi: int, overrides: dict | None = None, fresh: str = "processed/_batc
     from . import rice_map_delivery as rd
 
     overrides = QC_SWITCHES if overrides is None else overrides
-    root = Path(out_root) / f"aoi{aoi}" / "trial"
+    root = Path(out_root) / f"aoi{aoi}" / ("trial" if base is None else f"trial_{base}")
     (root / f"aoi{aoi}").mkdir(parents=True, exist_ok=True)
     shutil.copy2(Path(fresh) / f"aoi{aoi}" / f"aoi{aoi}_step1_cover.tif", root / f"aoi{aoi}")
-    with cr.switches(overrides, "qc trial"):
-        cr.run(aoi, fresh=str(root), force=True)                     # force: only the trial folder is written
-        with cr.rules_for(aoi):
-            cr.sieve(aoi, fresh=str(root), force=True)
-        cr.fields(aoi, fresh=str(root), force=True)
+    own = cr.AOI_OVERRIDES.get(aoi)
+    if base is not None:          # another rule set in place of the AOI's own (e.g. "aoi160", the QC's best; see choose)
+        cr.AOI_OVERRIDES[aoi] = dict(cr.NAMED_SETS[base] if base in cr.NAMED_SETS
+                                     else cr.REVIEWED_SETS.get(int(base.removeprefix("aoi")), {}))
+    try:
+        with cr.switches(overrides, "qc trial"):
+            cr.run(aoi, fresh=str(root), force=True)                     # force: only the trial folder is written
+            with cr.rules_for(aoi):
+                cr.sieve(aoi, fresh=str(root), force=True)
+            cr.fields(aoi, fresh=str(root), force=True)
+    finally:
+        if own is None:
+            cr.AOI_OVERRIDES.pop(aoi, None)
+        else:
+            cr.AOI_OVERRIDES[aoi] = own
     tag = f"{int(round(rd.SLIVER_ACRES * 100)):03d}"
     f = gpd.read_file(root / f"aoi{aoi}" / f"aoi{aoi}_rel_fields_sliver{tag}.gpkg")
     rice = {cr.MAP_CLASSES[k][0] for k in rd.RICE_CODES}
@@ -206,14 +217,121 @@ def score_trial(aoi: int, qc, trial_gpkg) -> pd.DataFrame:
         {"what": "  ... of it, the trial removed too", "acres": a(dr.difference(qr).difference(tr))}])
 
 
+def qc_truth_pixels(aoi: int, qc, root: str = DELIVERY):
+    """Pixels the QC judged, with ``True`` for rice: every pixel inside a delivered field or a QC polygon; rice where a QC
+    rice polygon or a newly drawn one (no ``field_id``; the user: all new polygons are rice) covers it."""
+    import rasterio
+    from rasterio import features
+
+    with rasterio.open(Path(root) / f"aoi{aoi}" / f"aoi{aoi}_class_raw.tif") as ds:
+        shape, transform = ds.shape, ds.transform
+    burn = lambda geoms: features.rasterize(((g, 1) for g in geoms), out_shape=shape, transform=transform, fill=0,
+                                            dtype="uint8").ravel().astype(bool)
+    judged = burn(delivered_fields(aoi, root).geometry) | burn(qc.geometry)
+    rice = burn(qc[(qc["major_class"] == "rice") | qc["field_id"].isna()].geometry)
+    px = np.flatnonzero(judged)
+    return px, rice[px]
+
+
+def score_sets(aoi: int, qc, sets: dict, extra: dict | None = None, jobs: int = 0) -> pd.DataFrame:
+    """Each full rule set in ``sets`` ({name: switches}) plus ``extra``'s pixel switches, scored pixel by pixel against
+    the QC (:func:`qc_truth_pixels`): % agreement on rice / non-rice, rice acres, QC rice missed, rice the QC does not
+    have, and how much of the QC's newly drawn rice polygons comes out as rice. One process per set."""
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+
+    import rasterio
+    from rasterio import features
+
+    from .. import resources
+    from . import curve_rules as cr
+    from .field_review import _classify
+
+    extra = QC_SWITCHES if extra is None else extra
+    px, truth = qc_truth_pixels(aoi, qc)
+    with rasterio.open(Path(DELIVERY) / f"aoi{aoi}" / f"aoi{aoi}_class_raw.tif") as ds:
+        shape, transform = ds.shape, ds.transform
+    new = qc[qc["field_id"].isna()]
+    drawn = (features.rasterize(((g, 1) for g in new.geometry), out_shape=shape, transform=transform, fill=0,
+                                dtype="uint8").ravel()[px] == 1) if len(new) else np.zeros(len(px), bool)
+    pix = {k: v for k, v in extra.items() if not k.startswith("field_polygons.")}   # strips etc. are a field step
+    rice_codes = [k for k, v in cr.MAP_CLASSES.items() if v[0] in cr.RICE_NAMES]
+    acre = 100 / ACRE_M2                                     # one 10 m pixel in acres
+    r = resources.detect_resources()
+    n = jobs or max(1, min(len(sets), r.cpus, int(r.memory_available_bytes / 3e9)))
+    work = [(aoi, {**rules, **pix}, px) for rules in sets.values()]
+    with ProcessPoolExecutor(n, mp_context=mp.get_context("spawn"), initializer=resources.limit_worker_threads,
+                             initargs=(max(1, r.cpus // n),)) as ex:
+        codes = list(ex.map(_classify, work, timeout=3600))
+    rows = []
+    for name, c in zip(sets, codes):
+        rice = np.isin(c, rice_codes)
+        rows.append({"rule set": name, "agree_pct": round(100 * float((rice == truth).mean()), 2),
+                     "rice_ac": round(rice.sum() * acre, 1), "qc_rice_missed_ac": round((truth & ~rice).sum() * acre, 1),
+                     "extra_rice_ac": round((rice & ~truth).sum() * acre, 1),
+                     "drawn_rice_as_rice_ac": round((rice & drawn).sum() * acre, 1)})
+    out = pd.DataFrame(rows)
+    out.attrs["qc_rice_ac"] = round(truth.sum() * acre, 1)
+    out.attrs["drawn_ac"] = round(drawn.sum() * acre, 1)
+    return out
+
+
+def own_without(aoi: int, names) -> dict:
+    """The AOI's own set, and the same with each named switch turned off (``False`` / ``None``), one set per name."""
+    from . import curve_rules as cr
+
+    own = dict(cr.AOI_OVERRIDES.get(aoi, {}))
+    off = lambda v: False if isinstance(v, bool) else None
+    sets = {"own": own}
+    for k in names:
+        sets[f"own without {k}"] = {**own, k: off(own.get(k, getattr(cr, k)))}
+    if len(names) > 1:
+        sets["own without all of them"] = {**own, **{k: off(own.get(k, getattr(cr, k))) for k in names}}
+    return sets
+
+
+def choose_by_qc(aoi: int, qc, extra: dict | None = None, jobs: int = 0) -> pd.DataFrame:
+    """Every candidate rule set of the batch (``aoi_batch.CANDIDATE_SETS``), and each batch switch on top of the best,
+    with ``extra`` (default :data:`QC_SWITCHES`) laid over each, scored pixel by pixel against the QC's rice / non-rice
+    in acres. Why (6 Oct 2026, aoi19): the set the batch chose from agent verdicts turned green rice that the QC drew
+    back in into "flooded / bare" (RADAR_DECIDES_WITHOUT_OPTICAL, YOUNG_WHILE_RADAR_LOW); a manager's QC is a better
+    truth than the agents' 20 fields per group."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    from .. import resources
+    from . import aoi_batch as ab
+    from . import curve_rules as cr
+    from .field_review import _classify
+
+    extra = QC_SWITCHES if extra is None else extra
+    px, truth = qc_truth_pixels(aoi, qc)
+    pix = {k: v for k, v in extra.items() if not k.startswith("field_polygons.")}   # strips are a field step
+    ab._fill_universal()
+    sets = {(s if isinstance(s, str) else f"aoi{s}"): dict(cr.NAMED_SETS[s] if isinstance(s, str)
+                                                          else cr.REVIEWED_SETS.get(s, {})) for s in ab.CANDIDATE_SETS}
+    sets["batch choice"] = dict(cr.AOI_OVERRIDES.get(aoi, {}))
+    rice_codes = [k for k, v in cr.MAP_CLASSES.items() if v[0] in cr.RICE_NAMES]
+    acre = 100 / ACRE_M2                                     # one 10 m pixel in acres
+
+    first = score_sets(aoi, qc, sets, extra, jobs).sort_values("agree_pct", ascending=False)
+    best = first.iloc[0]["rule set"]
+    on_top = {f"{best}+{n}": {**sets[best], **sw} for n, sw in ab.CANDIDATE_SWITCHES.items()}
+    second = score_sets(aoi, qc, on_top, extra, jobs)
+    out = pd.concat([first, second], ignore_index=True).sort_values("agree_pct", ascending=False)
+    out.attrs["qc_rice_ac"] = round(truth.sum() * acre, 1)
+    return out
+
+
 def main(argv=None) -> int:
     import geopandas as gpd
 
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["diff", "pattern", "trial"])
+    p.add_argument("step", choices=["diff", "pattern", "trial", "choose", "without"])
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--qc", required=True, help="the QC'd field file (GeoPackage with the delivered field_id)")
     p.add_argument("--s2-date", help="pattern: one clear Sentinel-2 date, YYYY-MM-DD")
+    p.add_argument("--switches", nargs="*", default=[], help="without: switches of the AOI's own set to turn off")
+    p.add_argument("--base", help="trial: a rule set in place of the AOI's own, e.g. aoi160 (the best of 'choose')")
     a = p.parse_args(argv)
     qc = gpd.read_file(a.qc)
     out = Path(OUT) / f"aoi{a.aoi}"
@@ -222,10 +340,20 @@ def main(argv=None) -> int:
         d = diff(delivered_fields(a.aoi), qc)
         d.to_csv(out / "diff.csv", index=False)
         print(d.groupby(["change", "sub_class"], dropna=False)["acres"].agg(["count", "sum"]).round(2).to_string())
+    elif a.step == "choose":
+        s = choose_by_qc(a.aoi, qc)
+        s.to_csv(out / "choose_by_qc.csv", index=False)
+        print(f"QC rice: {s.attrs['qc_rice_ac']} ac")
+        print(s.to_string(index=False))
+    elif a.step == "without":
+        s = score_sets(a.aoi, qc, own_without(a.aoi, a.switches))
+        s.to_csv(out / "without.csv", index=False)
+        print(f"QC rice: {s.attrs['qc_rice_ac']} ac; drawn (new) rice polygons: {s.attrs['drawn_ac']} ac")
+        print(s.to_string(index=False))
     elif a.step == "trial":
-        gp = trial(a.aoi)
+        gp = trial(a.aoi, base=a.base)
         s = score_trial(a.aoi, qc, gp)
-        s.to_csv(out / "trial_score.csv", index=False)
+        s.to_csv(gp.parent / "trial_score.csv", index=False)
         print(s.to_string(index=False))
         print(f"trial layer: {gp.resolve()}")
     else:

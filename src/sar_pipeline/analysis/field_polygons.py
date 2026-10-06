@@ -61,6 +61,16 @@ MIN_FIELD_WIDTH_M = 14.0
 STRIP_MAX_WIDTH_M = None
 STRIP_LABEL = 9
 STRIP_FROM_LABELS = (1, 7, 3)
+#: Judge a polygon as RICE (all rice classes together) against each other class. Why (user, aoi19 trial, 6 Oct): a
+#: small tree inside a rice field turned the whole polygon into tree, because 35 % tree beat each rice class alone
+#: (direct seeded / transplanted / young). Tree (or anything else) now wins only with more pixels than all rice
+#: together; the piece keeps its most common rice class. Off = False.
+RICE_GROUP_MAJORITY = False
+#: A tree block on a rice field's edge is cut off with smaller limits than other cuts (MIN_SPLIT_WIDTH_M,
+#: MIN_PIXELS): the reviewer still reshaped rice fields by hand to cut edge trees (aoi19 QC). None = off.
+TREE_CUT_MIN_WIDTH_M = None
+TREE_CUT_MIN_PIXELS = 4
+TREE_LABEL = 6
 MIN_ORPHAN_ACRES = 0.15
 MIN_RECTANGULARITY = 0.45
 MIN_COMPACTNESS = 0.18
@@ -186,9 +196,14 @@ def _label_one(geom, xs, ys, cls, n_classes: int, depth: int, origin: str):  # n
     if n == 0:
         return [({"label": -1, "label_share": np.nan, "pixels": 0, "origin": origin,
                   "decision": "no pixel centre inside"}, geom)]
-    counts = np.bincount(cls, minlength=n_classes)
+    grouped = RICE_GROUP_MAJORITY or TREE_CUT_MIN_WIDTH_M is not None
+    rice_px = np.isin(cls, STRIP_FROM_LABELS)
+    judge = np.where(rice_px, STRIP_FROM_LABELS[0], cls) if grouped else cls    # all rice as one class
+    counts = np.bincount(judge, minlength=n_classes)
     top = int(counts.argmax())
     share = float(counts[top] / n)
+    if grouped and top == STRIP_FROM_LABELS[0]:
+        top = int(np.bincount(cls[rice_px], minlength=n_classes).argmax())         # the piece's own rice class
     row = {"label": top, "label_share": round(share, 3), "pixels": int(n), "origin": origin}
     if n < MIN_PIXELS:
         return [(dict(row, decision="too small to judge, majority label"), geom)]
@@ -197,13 +212,22 @@ def _label_one(geom, xs, ys, cls, n_classes: int, depth: int, origin: str):  # n
     if depth >= CUT_DEPTH:
         return [(dict(row, decision="mixed, majority label (cut depth reached)"), geom)]
     th = _orientation(geom)
-    angle, offset, purity = best_cut(xs, ys, cls, (th, th + np.pi / 2), n_classes)
+    tree_cut = TREE_CUT_MIN_WIDTH_M is not None and (judge == TREE_LABEL).sum() >= TREE_CUT_MIN_PIXELS
+    min_px = min(MIN_PIXELS, TREE_CUT_MIN_PIXELS) if tree_cut else MIN_PIXELS
+    angle, offset, purity = best_cut(xs, ys, judge, (th, th + np.pi / 2), n_classes, min_pixels=min_px)
     if purity - share < MIN_CUT_GAIN:
         return [(dict(row, decision="mixed, majority label (a cut does not help)"), geom)]
     a, b = _halves(geom, angle, offset)
-    if not (field_like(a, MIN_SPLIT_WIDTH_M) and field_like(b, MIN_SPLIT_WIDTH_M)):
-        return [(dict(row, decision="mixed, cut would leave a sliver"), geom)]
     hi = xs * np.cos(angle) + ys * np.sin(angle) > offset
+    width = MIN_SPLIT_WIDTH_M
+    if tree_cut:                                  # one side tree, the other rice: the smaller edge-tree limits
+        maj = [np.bincount(judge[sel], minlength=n_classes).argmax() if sel.any() else -1 for sel in (hi, ~hi)]
+        if sorted(maj) == sorted([TREE_LABEL, STRIP_FROM_LABELS[0]]):
+            width = TREE_CUT_MIN_WIDTH_M
+        elif min((hi).sum(), (~hi).sum()) < MIN_PIXELS:
+            return [(dict(row, decision="mixed, majority label (a cut does not help)"), geom)]
+    if not (field_like(a, width) and field_like(b, width)):
+        return [(dict(row, decision="mixed, cut would leave a sliver"), geom)]
     out = []
     for part, sel in ((a, hi), (b, ~hi)):
         for piece in getattr(part, "geoms", [part]):

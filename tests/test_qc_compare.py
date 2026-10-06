@@ -56,3 +56,32 @@ def test_strip_width_is_the_short_side_of_the_rotated_box():
     g = gpd.GeoDataFrame({"label": [7, 7, 4]}, geometry=[box(0, 0, 200, 10), box(0, 50, 60, 110), box(0, 200, 200, 210)])
     w = fl.short_side_m(g)
     assert list(np.round(w)) == [10, 60, 10]
+
+
+def test_rice_group_majority_keeps_a_field_with_a_small_tree_as_rice(monkeypatch):
+    import numpy as np
+    from shapely.geometry import box as sbox
+
+    from sar_pipeline.analysis import field_polygons as fl
+
+    xs, ys = np.meshgrid(np.arange(5, 100, 10.0), np.arange(5, 100, 10.0))
+    xs, ys = xs.ravel(), ys.ravel()
+    cls = np.array([1] * 33 + [7] * 32 + [6] * 35)              # 35 % tree, rice split over two classes
+    rng = np.random.default_rng(0)
+    cls = cls[rng.permutation(len(cls))]                        # mixed, so no clean cut helps
+    g = sbox(0, 0, 100, 100)
+    plain = fl._label_one(g, xs, ys, cls, 10, 0, "delineation")
+    assert all(r["label"] == 6 for r, _ in plain)              # before: tree wins on its own
+    monkeypatch.setattr(fl, "RICE_GROUP_MAJORITY", True)
+    grouped = fl._label_one(g, xs, ys, cls, 10, 0, "delineation")
+    assert all(r["label"] in (1, 7) for r, _ in grouped)       # rice together (65 %) beats tree
+
+
+def test_own_without_turns_each_switch_off_in_its_own_set(monkeypatch):
+    from sar_pipeline.analysis import curve_rules as cr
+
+    monkeypatch.setitem(cr.AOI_OVERRIDES, -7, {"YOUNG_WHILE_RADAR_LOW": True, "YOUNG_MIN_RISE_DAYS": 40})
+    s = q.own_without(-7, ["YOUNG_WHILE_RADAR_LOW", "YOUNG_MIN_RISE_DAYS"])
+    assert s["own without YOUNG_WHILE_RADAR_LOW"]["YOUNG_WHILE_RADAR_LOW"] is False
+    assert s["own without YOUNG_MIN_RISE_DAYS"]["YOUNG_MIN_RISE_DAYS"] is None
+    assert s["own without all of them"] == {"YOUNG_WHILE_RADAR_LOW": False, "YOUNG_MIN_RISE_DAYS": None}
