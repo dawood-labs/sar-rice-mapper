@@ -60,3 +60,23 @@ def test_universal_set_is_a_named_candidate():
     assert cr.NAMED_SETS["universal"] == cr.NEW_AOI_SWITCHES and cr.NAMED_SETS["universal"]["TONE_AND_CURVE"]
     b._fill_universal()
     assert b.CANDIDATE_SWITCHES["universal"] == cr.NEW_AOI_SWITCHES
+
+
+def test_stage_summary_counts_each_aoi_once_from_its_files(tmp_path, monkeypatch):
+    from sar_pipeline.analysis import field_review as fr
+
+    monkeypatch.setattr(b, "STATE", tmp_path / "state")
+    monkeypatch.setattr(fr, "review_dir", lambda a, fresh=None: tmp_path / f"r{a}")
+    b._mark(1, "imagery", {})
+    b._mark(2, "imagery", {})
+    b._mark(2, "sheets", {"fields": 2})
+    b._mark(3, "sheets", {"fields": 2})
+    (tmp_path / "r3" / "verdicts").mkdir(parents=True)
+    (tmp_path / "r3" / "verdicts" / "a.json").write_text("{}")
+    b._mark(4, "sheets", {"fields": 1})
+    (tmp_path / "r4" / "verdicts").mkdir(parents=True)
+    (tmp_path / "r4" / "verdicts" / "a.json").write_text("{}")
+    b._mark(5, "finish", {})
+    s = b.stage_summary([1, 2, 3, 4, 5, 6, 7], first_round=[7]).set_index("stage")["aois"]
+    assert s.sum() == 7
+    assert [s[b.STAGES[i]] for i in range(7)] == [1, 1, 1, 1, 1, 1, 1]

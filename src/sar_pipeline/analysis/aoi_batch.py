@@ -529,6 +529,37 @@ def pending_review(order) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["aoi", "lines"])
 
 
+STAGES = ("delivered (first round, locked)", "delivered", "verdicts in: choosing / finishing", "under review",
+          "sheets ready, waiting for review", "preparing (inputs, rule trials, sheets)",
+          "imagery (Earth Engine / download)")
+
+
+def stage_of(aoi: int, first_round=()) -> str:
+    """The one stage an AOI is in now, read from its status file and its verdicts folder. Why (6 Oct): the user asks
+    how many AOIs are done, in process and pending; this answers from the files, not from log lines."""
+    from . import field_review as fr
+
+    st = status(aoi)
+    if _done(aoi, "finish"):
+        return STAGES[1]
+    if not st and aoi in set(first_round):
+        return STAGES[0]
+    if _done(aoi, "sheets"):
+        want = int((st["sheets"].get("result") or {}).get("fields", 0)) if isinstance(st["sheets"].get("result"),
+                                                                                       dict) else 0
+        v = fr.review_dir(aoi) / "verdicts"
+        have = len(list(v.glob("*.json"))) if v.exists() else 0
+        return STAGES[2] if want and have >= want else STAGES[3] if have else STAGES[4]
+    return STAGES[5] if _done(aoi, "imagery") else STAGES[6]
+
+
+def stage_summary(aois, first_round=()) -> pd.DataFrame:
+    """One row per stage: how many AOIs and which ones."""
+    s = pd.Series({a: stage_of(a, first_round) for a in aois})
+    return pd.DataFrame([{"stage": g, "aois": int((s == g).sum()), "ids": " ".join(str(a) for a in sorted(s.index[s == g]))}
+                         for g in STAGES])
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("step", choices=["order", "imagery", "flow", "autofinish", "resample", "pending", "prepare", "choose",
@@ -565,6 +596,10 @@ def main(argv=None) -> int:
     elif a.step == "finish":
         for aoi in a.aois:
             print(aoi, finish(aoi), flush=True)
+    elif not a.aois:                                  # no AOIs given: the stage of every AOI, counted
+        allaois = neighbour_order([72])
+        print(stage_summary(allaois, first_round=a.skip).to_string(index=False))
+        print(f"total: {len(allaois)} AOIs")
     else:
         steps = ("imagery", "inputs", "trials", "sheets", "choose", "map", "finish")
         for aoi in a.aois:

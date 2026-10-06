@@ -372,6 +372,34 @@ prefix plus a single digit also matches ordinary code, such as the EPSG:4326 hel
 
 ---
 
+## Mapping every AOI in one batch (`aoi_batch`)
+
+`sar_pipeline.analysis.aoi_batch` takes every AOI from imagery to a delivered map without a person in the loop
+except the field review. Each AOI goes through the same steps, and each step writes its result to
+`processed/_batch/s2_2026/aoi_batch/aoi<N>/status.json`, so a stopped batch picks up where it stopped.
+
+| Step | What happens | Why |
+|---|---|---|
+| imagery | radar and optical exports in Earth Engine (a rolling window of AOIs), then download and stack | Earth Engine runs many tasks at once; a window keeps it full without flooding it |
+| inputs, trials | the series, then every candidate rule set (`CANDIDATE_SETS`) on the AOI | the rule set of a reviewed neighbour is often right for the next AOI |
+| sheets | a field sample (5 % of the fields of at least 0.1 ac, 200 to 400) and one review sheet per field | the reviewers need the curves and the clear views of each field |
+| review | reviewer agents give each field one of the seven classes (`docs/field_review_agent_brief.md`) | there is no ground truth; the review is the truth the rules are scored on |
+| choose | each candidate set, then each switch on top of the best, scored on the verdicts; the winner goes to `aoi_rules_chosen.json` and its reasons to `docs/rules/aoi<N>.md` | the AOI gets the rules that agree with the most reviewed fields, and the reasons are kept |
+| map, finish | map, sieve 0.15 ac, field labels, lock, delivery package and upload | the same finishing steps for every AOI |
+
+```bash
+# imagery, inputs, trials and sheets for all AOIs in neighbour order (prints "READY aoi<N>" when sheets are out)
+python -m sar_pipeline.analysis.aoi_batch flow --start 72 116 39 --skip <locked AOIs> --window 30
+# choose + finish each AOI as soon as its verdicts are complete (prints "DELIVERED aoi<N>")
+python -m sar_pipeline.analysis.aoi_batch autofinish --start 72 116 39 --skip <locked AOIs>
+# which AOIs have sheets out but verdicts missing, with the groups.txt lines still to review
+python -m sar_pipeline.analysis.aoi_batch pending
+# how many AOIs are in each stage, and which ones (pass the first-round AOIs as --skip)
+python -m sar_pipeline.analysis.aoi_batch status --skip <locked AOIs>
+# the steps of a few AOIs
+python -m sar_pipeline.analysis.aoi_batch status --aois 63 88
+```
+
 ## Bringing in newer imagery without changing accepted AOIs
 
 **Why this needs care.** The rule reads two inputs per AOI: a Sentinel-1 *run* (`processed/<aoi>/<season>/runs/<run>/`)
