@@ -141,37 +141,52 @@ def latest_clear_date(aoi: int, root: str = DELIVERY) -> str:
     return str(d[d.iloc[:, 2].astype(str) == "True"].iloc[-1, 0])
 
 
-def too_young_fields(aoi: int, days: int = TOO_YOUNG_DAYS, root: str = DELIVERY) -> pd.DataFrame:
+def too_young_fields(aoi: int, days: int | None = TOO_YOUNG_DAYS, root: str = DELIVERY,
+                     radar_max: float | None = None) -> pd.DataFrame:
     """Per delivered rice field: ``too_young`` when most of its pixels show OPEN water (NDVI below 0) on their newest
     clear view, or showed it within ``days`` of the series end. The same rule as ``curve_rules.TOO_YOUNG_OPEN_WATER_DAYS``,
     judged per field (median of its pixels), as the reviewer judged it. Why (user, 6 Oct 2026): fields flooded in
     September (aoi19, aoi39) are too young for the client; on the aoi19 QC this caught all 42 such deletions.
-    The newest clear S2 date's NDVI / NDWI are added, so the call can be checked in a 5-3-2 view."""
+    The newest clear S2 date's NDVI / NDWI are added, so the call can be checked in a 5-3-2 view.
+
+    Lighter forms (user, 6 Oct, aoi39: "too aggressive"): ``days=None`` judges only the AOI's newest CLEAR date (open
+    water there: field NDWI > 0), not partly cloudy later views; ``radar_max`` also needs the radar to be still low now
+    (VH position in its own range below it), the manager's "radar backscatter not high"."""
     date = latest_clear_date(aoi, root)
     t = rice_field_features(aoi, date, root)
-    t["too_young"] = (t["last_view_open_water"] >= 0.5) | (t["days_since_open_water_view"] <= days)
+    if days is None:
+        young = t["s2_ndwi"] > 0
+    else:
+        young = (t["last_view_open_water"] >= 0.5) | (t["days_since_open_water_view"] <= days)
+    if radar_max is not None:
+        young &= t["vh_pos_end"] < radar_max
+    t["too_young"] = young
     t.attrs["s2_date"] = date
     return t
 
 
-def remove_too_young(aoi: int, days: int = TOO_YOUNG_DAYS, root: str = DELIVERY, out_root: str = OUT):
+def remove_too_young(aoi: int, days: int | None = TOO_YOUNG_DAYS, root: str = DELIVERY, out_root: str = OUT,
+                     radar_max: float | None = None):
     """The delivered field layer without its too-young rice fields (:func:`too_young_fields`); the delivery itself is
     not touched. Writes ``<out_root>/aoi<N>/aoi<N>_fields_no_too_young.gpkg`` and ``aoi<N>_too_young_removed.gpkg``
     (the removed fields with their numbers, for checking in QGIS) and returns (kept layer, removed table)."""
     from . import rice_map_delivery as rd
 
-    t = too_young_fields(aoi, days, root)
+    t = too_young_fields(aoi, days, root, radar_max)
     o = delivered_fields(aoi, root)
     gone = set(t.index[t["too_young"]])
+    tag = ("" if days == TOO_YOUNG_DAYS else "_clear_date" if days is None else f"_{days}d") + \
+        ("" if radar_max is None else f"_radar{radar_max:g}")
     out = Path(out_root) / f"aoi{aoi}"
     out.mkdir(parents=True, exist_ok=True)
     kept = o[~o["field_id"].isin(gone)]
-    kept.to_file(out / f"aoi{aoi}_fields_no_too_young.gpkg", driver="GPKG")
-    rd.fields_qml(out / f"aoi{aoi}_fields_no_too_young.gpkg")
+    kept.to_file(out / f"aoi{aoi}_fields_no_too_young{tag}.gpkg", driver="GPKG")
+    rd.fields_qml(out / f"aoi{aoi}_fields_no_too_young{tag}.gpkg")
+    t.attrs["tag"] = tag
     cols = ["field_id", "sub_class", "acres", "last_view_open_water", "days_since_open_water_view", "s2_ndvi", "s2_ndwi",
-            "radar_rise_days", "geometry"]
+            "vh_pos_end", "vh_since_view", "radar_rise_days", "geometry"]
     removed = o[o["field_id"].isin(gone)].merge(t.reset_index().drop(columns=["sub_class", "acres"]), on="field_id")
-    removed[[c for c in cols if c in removed]].to_file(out / f"aoi{aoi}_too_young_removed.gpkg", driver="GPKG")
+    removed[[c for c in cols if c in removed]].to_file(out / f"aoi{aoi}_too_young_removed{tag}.gpkg", driver="GPKG")
     t.to_csv(out / f"aoi{aoi}_rice_field_features.csv")
     return kept, t
 
@@ -480,18 +495,22 @@ def main(argv=None) -> int:
     p.add_argument("--qc", help="the QC'd field file (GeoPackage with the delivered field_id); not for too-young")
     p.add_argument("--s2-date", help="pattern: one clear Sentinel-2 date, YYYY-MM-DD")
     p.add_argument("--switches", nargs="*", default=[], help="without: switches of the AOI's own set to turn off")
+    p.add_argument("--days", type=int, default=TOO_YOUNG_DAYS, help="too-young: open water seen within this many days")
+    p.add_argument("--clear-date-only", action="store_true", help="too-young: judge only the newest clear S2 date")
+    p.add_argument("--radar-max", type=float, help="too-young: also need VH still below this position of its own range")
     p.add_argument("--base", help="trial: a rule set in place of the AOI's own, e.g. aoi160 (the best of 'choose')")
     a = p.parse_args(argv)
     qc = gpd.read_file(a.qc) if a.qc else None
     out = Path(OUT) / f"aoi{a.aoi}"
     out.mkdir(parents=True, exist_ok=True)
     if a.step == "too-young":
-        kept, t = remove_too_young(a.aoi)
+        kept, t = remove_too_young(a.aoi, None if a.clear_date_only else a.days, radar_max=a.radar_max)
         y = t[t["too_young"]]
         print(f"newest clear S2 date: {t.attrs['s2_date']}")
         print(f"rice fields {len(t)} ({t['acres'].sum():.1f} ac); too young {len(y)} ({y['acres'].sum():.1f} ac)")
         print(y.groupby("sub_class")["acres"].agg(["count", "sum"]).round(1).to_string())
-        print(f"kept layer: {(out / f'aoi{a.aoi}_fields_no_too_young.gpkg').resolve()}")
+        tag = t.attrs["tag"]
+        print(f"kept layer: {(out / f'aoi{a.aoi}_fields_no_too_young{tag}.gpkg').resolve()}")
         return 0
     if a.step == "diff":
         d = diff(delivered_fields(a.aoi), qc)
