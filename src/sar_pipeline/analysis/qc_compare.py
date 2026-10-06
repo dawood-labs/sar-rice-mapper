@@ -120,6 +120,8 @@ def rice_field_features(aoi: int, s2_date: str | None = None, root: str = DELIVE
         f = f.join(s)
     t = f.groupby("field_id").median(numeric_only=True)
     t["pixels"] = f.groupby("field_id").size()
+    if "s2_ndwi" in f:                            # share of the field's clear pixels that show open water on that date
+        t["s2_water_share"] = f.assign(w=f["s2_ndwi"] > 0).dropna(subset=["s2_ndwi"]).groupby("field_id")["w"].mean()
     return rice.set_index("field_id")[["sub_class", "acres"]].join(t)
 
 
@@ -142,7 +144,7 @@ def latest_clear_date(aoi: int, root: str = DELIVERY) -> str:
 
 
 def too_young_fields(aoi: int, days: int | None = TOO_YOUNG_DAYS, root: str = DELIVERY,
-                     radar_max: float | None = None) -> pd.DataFrame:
+                     radar_max: float | None = None, max_dry_share: float | None = None) -> pd.DataFrame:
     """Per delivered rice field: ``too_young`` when most of its pixels show OPEN water (NDVI below 0) on their newest
     clear view, or showed it within ``days`` of the series end. The same rule as ``curve_rules.TOO_YOUNG_OPEN_WATER_DAYS``,
     judged per field (median of its pixels), as the reviewer judged it. Why (user, 6 Oct 2026): fields flooded in
@@ -151,10 +153,14 @@ def too_young_fields(aoi: int, days: int | None = TOO_YOUNG_DAYS, root: str = DE
 
     Lighter forms (user, 6 Oct, aoi39: "too aggressive"): ``days=None`` judges only the AOI's newest CLEAR date (open
     water there: field NDWI > 0), not partly cloudy later views; ``radar_max`` also needs the radar to be still low now
-    (VH position in its own range below it), the manager's "radar backscatter not high"."""
+    (VH position in its own range below it), the manager's "radar backscatter not high". ``max_dry_share`` (with
+    ``days=None``): the field goes only when fewer than this share of its clear pixels are NOT water on that date
+    (user, 6 Oct: a field with even some dry / green pixels stays; 0.10 = at least 90 % of it under open water)."""
     date = latest_clear_date(aoi, root)
     t = rice_field_features(aoi, date, root)
-    if days is None:
+    if days is None and max_dry_share is not None:
+        young = (1 - t["s2_water_share"]) < max_dry_share
+    elif days is None:
         young = t["s2_ndwi"] > 0
     else:
         young = (t["last_view_open_water"] >= 0.5) | (t["days_since_open_water_view"] <= days)
@@ -166,17 +172,18 @@ def too_young_fields(aoi: int, days: int | None = TOO_YOUNG_DAYS, root: str = DE
 
 
 def remove_too_young(aoi: int, days: int | None = TOO_YOUNG_DAYS, root: str = DELIVERY, out_root: str = OUT,
-                     radar_max: float | None = None):
+                     radar_max: float | None = None, max_dry_share: float | None = None):
     """The delivered field layer without its too-young rice fields (:func:`too_young_fields`); the delivery itself is
     not touched. Writes ``<out_root>/aoi<N>/aoi<N>_fields_no_too_young.gpkg`` and ``aoi<N>_too_young_removed.gpkg``
     (the removed fields with their numbers, for checking in QGIS) and returns (kept layer, removed table)."""
     from . import rice_map_delivery as rd
 
-    t = too_young_fields(aoi, days, root, radar_max)
+    t = too_young_fields(aoi, days, root, radar_max, max_dry_share)
     o = delivered_fields(aoi, root)
     gone = set(t.index[t["too_young"]])
     tag = ("" if days == TOO_YOUNG_DAYS else "_clear_date" if days is None else f"_{days}d") + \
-        ("" if radar_max is None else f"_radar{radar_max:g}")
+        ("" if radar_max is None else f"_radar{radar_max:g}") + \
+        ("" if max_dry_share is None else f"_dry{int(round(max_dry_share * 100))}")
     out = Path(out_root) / f"aoi{aoi}"
     out.mkdir(parents=True, exist_ok=True)
     kept = o[~o["field_id"].isin(gone)]
@@ -184,7 +191,7 @@ def remove_too_young(aoi: int, days: int | None = TOO_YOUNG_DAYS, root: str = DE
     rd.fields_qml(out / f"aoi{aoi}_fields_no_too_young{tag}.gpkg")
     t.attrs["tag"] = tag
     cols = ["field_id", "sub_class", "acres", "last_view_open_water", "days_since_open_water_view", "s2_ndvi", "s2_ndwi",
-            "vh_pos_end", "vh_since_view", "radar_rise_days", "geometry"]
+            "s2_water_share", "vh_pos_end", "vh_since_view", "radar_rise_days", "geometry"]
     removed = o[o["field_id"].isin(gone)].merge(t.reset_index().drop(columns=["sub_class", "acres"]), on="field_id")
     removed[[c for c in cols if c in removed]].to_file(out / f"aoi{aoi}_too_young_removed{tag}.gpkg", driver="GPKG")
     t.to_csv(out / f"aoi{aoi}_rice_field_features.csv")
@@ -497,6 +504,8 @@ def main(argv=None) -> int:
     p.add_argument("--switches", nargs="*", default=[], help="without: switches of the AOI's own set to turn off")
     p.add_argument("--days", type=int, default=TOO_YOUNG_DAYS, help="too-young: open water seen within this many days")
     p.add_argument("--clear-date-only", action="store_true", help="too-young: judge only the newest clear S2 date")
+    p.add_argument("--max-dry-share", type=float,
+                   help="too-young, with --clear-date-only: remove only fields with fewer than this share of non-water pixels")
     p.add_argument("--radar-max", type=float, help="too-young: also need VH still below this position of its own range")
     p.add_argument("--base", help="trial: a rule set in place of the AOI's own, e.g. aoi160 (the best of 'choose')")
     a = p.parse_args(argv)
@@ -504,7 +513,8 @@ def main(argv=None) -> int:
     out = Path(OUT) / f"aoi{a.aoi}"
     out.mkdir(parents=True, exist_ok=True)
     if a.step == "too-young":
-        kept, t = remove_too_young(a.aoi, None if a.clear_date_only else a.days, radar_max=a.radar_max)
+        kept, t = remove_too_young(a.aoi, None if a.clear_date_only else a.days, radar_max=a.radar_max,
+                                   max_dry_share=a.max_dry_share)
         y = t[t["too_young"]]
         print(f"newest clear S2 date: {t.attrs['s2_date']}")
         print(f"rice fields {len(t)} ({t['acres'].sum():.1f} ac); too young {len(y)} ({y['acres'].sum():.1f} ac)")
