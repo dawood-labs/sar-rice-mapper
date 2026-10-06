@@ -400,6 +400,40 @@ python -m sar_pipeline.analysis.aoi_batch status --skip <locked AOIs>
 python -m sar_pipeline.analysis.aoi_batch status --aois 63 88
 ```
 
+## After a hand QC: making the field layer ready for dissolve (`qc_compare`)
+
+A reviewer QCs a delivered field layer in QGIS:
+- deletes the polygons that are not rice;
+- cuts trees out of rice polygons;
+- draws the rice the map missed (new polygons, with no `field_id`).
+
+Before the layer can be dissolved, it has to be cleaned. QGIS "dissolve" merges every pair of polygons that overlap or
+even touch at one vertex, so the field boundaries from the delineation would be lost.
+
+```bash
+# rice only, drawn polygons become rice, overlaps cut, a 0.2 m gap only where neighbours meet
+python -m sar_pipeline.analysis.qc_compare clean --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg
+#   -> ../data/qc/aoi19_qc_2026-10-06_clean.gpkg  and  ..._clean.json (the checks)
+```
+
+| Step | Why |
+|---|---|
+| keep rice only (`major_class == "rice"`) | the delivery is rice; the reviewer's non-rice polygons are not needed |
+| drawn polygons (no `field_id`) become rice, `sub_class` "rice (added in QC)", ids `aoi<N>_qc001`... | the reviewer draws only rice |
+| a split field's second part gets `_b` | every polygon needs its own id |
+| overlaps: the delineated polygon keeps its outline, the drawn one loses the shared part | the delineation outline is the better boundary; no acre is counted twice |
+| a gap of 2 x `SHRINK_M` (0.1 m) where two polygons are within 0.2 m | dissolve then cannot merge neighbours; free edges keep their area (aoi19: 0.83 ac of 510, 0.16 %) |
+| acres measured again | the QC moved outlines, so the old `acres` were stale |
+
+The `.json` report must show 0 for `overlapping_pairs`, `touching_pairs`, `invalid`, `not_polygon` and `duplicate_ids`.
+It also lists the rice ids that did not survive (aoi19: four 0.0 ac split leftovers).
+
+The same module also compares a QC with the delivery:
+- `diff`: what changed;
+- `pattern`: which features split the deleted fields from the kept ones;
+- `choose` / `without`: rule sets scored against the QC by pixel;
+- `trial`: one AOI re-mapped with extra switches in its own folder.
+
 ## Bringing in newer imagery without changing accepted AOIs
 
 **Why this needs care.** The rule reads two inputs per AOI: a Sentinel-1 *run* (`processed/<aoi>/<season>/runs/<run>/`)
