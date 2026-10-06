@@ -1197,6 +1197,17 @@ AOI_OVERRIDES[125] = {"ANY_WATER_TRANSPLANTED": True, "SIEVE_ACRES": 0.15, "YOUN
 #: (the first locks are kept in locked/aoi<N>_v1/).
 AOI_OVERRIDES[160] = {"ANY_WATER_TRANSPLANTED": True}
 AOI_OVERRIDES[28] = dict(AOI_OVERRIDES[28], ANY_WATER_TRANSPLANTED=True)
+#: The hand-made rule sets as they were reviewed, kept apart so the batch runner (``aoi_batch``) always compares the
+#: same candidates, even after an AOI got a new chosen set.
+REVIEWED_SETS = {k: dict(v) for k, v in AOI_OVERRIDES.items()}
+#: Rule sets chosen by the batch runner from the reviewers' verdicts (``aoi_rules_chosen.json``, tracked): they replace
+#: the AOI's entry, so its map can be rebuilt exactly.
+_CHOSEN = Path(__file__).with_name("aoi_rules_chosen.json")
+if _CHOSEN.exists():
+    import json as _json
+
+    for _k, _v in _json.loads(_CHOSEN.read_text()).items():
+        AOI_OVERRIDES[int(_k)] = dict(_v["rules"])
 
 
 @contextmanager
@@ -1451,7 +1462,7 @@ def try_rules(aoi: int, sources=RULE_SOURCES, series_root: str | None = None,
         d = out / f"rules_aoi{src}"
         (d / f"aoi{aoi}").mkdir(parents=True, exist_ok=True)
         shutil.copy2(step1, d / f"aoi{aoi}" / step1.name)          # the rule's output grid / profile
-        work.append((aoi, AOI_OVERRIDES.get(src, {}), series_root, str(d)))
+        work.append((aoi, REVIEWED_SETS.get(src, AOI_OVERRIDES.get(src, {})), series_root, str(d)))
     # one process per rule set (5 Oct audit: nine sets one after another took 3.5 min on a large AOI)
     r = resources.detect_resources()
     n = jobs or max(1, min(len(work), r.cpus, int(r.memory_available_bytes / 4e9)))
