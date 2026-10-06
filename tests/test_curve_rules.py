@@ -269,10 +269,10 @@ def test_radar_sowing_is_an_aoi116_switch_only_and_the_feature_code_keeps_its_so
     import inspect
 
     assert cr.SOWING_FROM_RADAR is False and cr.TREE_NEEDS_NO_WATER is False
-    assert cr.AOI_OVERRIDES[116]["SOWING_FROM_RADAR"] and cr.AOI_OVERRIDES[116]["TREE_NEEDS_NO_WATER"]
+    assert cr.REVIEWED_SETS[116]["SOWING_FROM_RADAR"] and cr.REVIEWED_SETS[116]["TREE_NEEDS_NO_WATER"]
     for locked in (160, 28, 72):
-        assert "SOWING_FROM_RADAR" not in cr.AOI_OVERRIDES.get(locked, {})
-        assert "TREE_NEEDS_NO_WATER" not in cr.AOI_OVERRIDES.get(locked, {})
+        assert "SOWING_FROM_RADAR" not in cr.REVIEWED_SETS.get(locked, {})
+        assert "TREE_NEEDS_NO_WATER" not in cr.REVIEWED_SETS.get(locked, {})
     src = inspect.getsource(cr.own_range_features)
     assert 'out["sowing_from"]' in src and "_water_level_end" in src
 
@@ -288,8 +288,8 @@ def test_notebook_names_where_the_sowing_date_came_from():
 def test_water_end_from_the_earliest_track_is_aoi116_only():
     import inspect
 
-    assert cr.WATER_END_TRACKS == "median" and cr.AOI_OVERRIDES[116]["WATER_END_TRACKS"] == "earliest_unless_wet_view"
-    assert all("WATER_END_TRACKS" not in cr.AOI_OVERRIDES.get(a, {}) for a in (160, 28, 72))
+    assert cr.WATER_END_TRACKS == "median" and cr.REVIEWED_SETS[116]["WATER_END_TRACKS"] == "earliest_unless_wet_view"
+    assert all("WATER_END_TRACKS" not in cr.REVIEWED_SETS.get(a, {}) for a in (160, 28, 72))
     assert "earliest_unless_wet_view" in inspect.getsource(cr.own_range_features)
 
 
@@ -304,8 +304,8 @@ def test_behind_nearly_all_fields_tie_break_is_aoi_relative_and_aoi116_only():
 def test_vv_only_water_fall_is_aoi116_only():
     import inspect
 
-    assert cr.WATER_FALL_POLS == "both" and cr.AOI_OVERRIDES[116]["WATER_FALL_POLS"] == "VV"
-    assert all("WATER_FALL_POLS" not in cr.AOI_OVERRIDES.get(a, {}) for a in (160, 28, 72))
+    assert cr.WATER_FALL_POLS == "both" and cr.REVIEWED_SETS[116]["WATER_FALL_POLS"] == "VV"
+    assert all("WATER_FALL_POLS" not in cr.REVIEWED_SETS.get(a, {}) for a in (160, 28, 72))
     assert inspect.getsource(cr.own_range_features).count('WATER_FALL_POLS == "VV"') == 2
 
 
@@ -517,10 +517,10 @@ def test_try_rules_cli_takes_the_rule_set_aois(monkeypatch):
 
 
 def test_aoi118_rules_drop_radar_sowing_and_vv_jump_alone():
-    r = cr.AOI_OVERRIDES[118]
+    r = cr.REVIEWED_SETS[118]
     assert r["SOWING_FROM_RADAR"] is False and r["VV_JUMP"] == float("inf")
     assert {k: v for k, v in r.items() if k not in ("SOWING_FROM_RADAR", "VV_JUMP")} == \
-        {k: v for k, v in cr.AOI_OVERRIDES[116].items() if k not in ("SOWING_FROM_RADAR", "VV_JUMP")}
+        {k: v for k, v in cr.REVIEWED_SETS[116].items() if k not in ("SOWING_FROM_RADAR", "VV_JUMP")}
     assert 118 in cr.LOCKED_AOIS
 
 
@@ -540,12 +540,12 @@ def test_never_emptied_without_water_is_other_vegetation_only_when_switched_on(m
 
 
 def test_aoi83_rules_are_the_aoi118_set_plus_three_switches():
-    r = dict(cr.AOI_OVERRIDES[83])
+    r = dict(cr.REVIEWED_SETS[83])
     assert (r.pop("LONG_WATER_DAYS"), r.pop("NEVER_EMPTY_OTHER_VEG"), r.pop("TREE_LOW_BEFORE")) == (30, 0.35, "2026-07-01")
     for k in ("LONG_WATER_LEVEL", "LONG_WATER_WET_VIEW", "LONG_WATER_GREEN_LEAD", "ANY_WATER_TRANSPLANTED"):
         r.pop(k)
-    assert r == cr.AOI_OVERRIDES[118]
-    assert all(k not in cr.AOI_OVERRIDES.get(a, {}) for a in (72, 116, 39, 118)
+    assert r == cr.REVIEWED_SETS[118]
+    assert all(k not in cr.REVIEWED_SETS.get(a, {}) for a in (72, 116, 39, 118)
                for k in ("LONG_WATER_DAYS", "NEVER_EMPTY_OTHER_VEG"))
     assert "first_green" in __import__("inspect").getsource(cr.own_range_features)
 
