@@ -205,6 +205,17 @@ GREEN_VIEW_NOT_FLOODED = False
 #: to 30 for this AOI only, and wherever VV and VH show a clear dip put it in transplanted rice even at 30 days").
 #: Off for the locked AOIs.
 DIP_MAKES_TRANSPLANTED = False
+
+#: Manager's delivery rule (via the user, 6 Oct 2026, aoi19 QC): the client gets only rice older than about 40 days.
+#: A rice pixel whose newest clear view shows OPEN water (NDVI below 0, flooded in a 5-3-2 view), or that showed open
+#: water on a clear view within this many days of the series end, becomes "too young (not delivered)". The age starts
+#: at water that was SEEN, because the sowing estimate itself can be wrong (aoi19: fields flooded on 13 Sep got a
+#: sowing-based age of 69-90 days). None = off. Measured on aoi19 (field medians): all 42 "too young" deletions caught.
+TOO_YOUNG_OPEN_WATER_DAYS = None
+#: Trees / orchards inside rice (aoi19 QC: tree parts cut out, never-emptied fields deleted): a rice pixel whose NDVI
+#: never fell below this share of its own peak (``ndvi_low_peak``) AND whose VH hardly swings (``vh_range_rel`` below
+#: the second value) becomes tree/orchard. None = off. aoi19 at (0.30, 3.5): 23 tree deletions, 36 kept fields hit.
+TREE_IF_NEVER_EMPTIED = None
 #: With ``SOWING_FROM_RADAR``: the sowing is never later than the optical saw the crop rising. When a clear view after
 #: the field's lowest (empty / water) view already shows the crop above ``AGE_LOW_SHARE`` of its own NDVI amplitude, and
 #: that view is earlier than the radar's end of the water spell, the crop was planted at that lowest view; a later radar
@@ -1406,7 +1417,31 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
             np.zeros(len(f), dtype=bool)
         out = ["rice standing transplanted" if c == "young rice" and sp == 1 and np.isfinite(d) and d >= WATER_DEPTH_K
                and not sh else c for c, d, sp, sh in zip(out, depth, spell, short)]
+    out = delivery_age_and_trees(f, out)
     return pd.Series(out, index=f.index)
+
+
+RICE_NAMES = ("rice standing direct seeded", "rice standing transplanted", "young rice")
+
+
+def delivery_age_and_trees(f: pd.DataFrame, out: list) -> list:
+    """The last word on rice pixels (``TREE_IF_NEVER_EMPTIED``, ``TOO_YOUNG_OPEN_WATER_DAYS``); both off by default.
+    Trees first: a tree is not young rice even when its last view is wet."""
+    out = list(out)
+    rice = np.isin(np.asarray(out, dtype=object), RICE_NAMES)
+    if TREE_IF_NEVER_EMPTIED is not None:
+        lp_min, vr_max = TREE_IF_NEVER_EMPTIED
+        lp = pd.to_numeric(f.get("ndvi_low_peak"), errors="coerce").to_numpy()
+        vr = pd.to_numeric(f.get("vh_range_rel"), errors="coerce").to_numpy()
+        tree = rice & np.isfinite(lp) & (lp > lp_min) & np.isfinite(vr) & (vr < vr_max)
+        out = ["tree/orchard" if t else c for c, t in zip(out, tree)]
+        rice &= ~tree
+    if TOO_YOUNG_OPEN_WATER_DAYS is not None:
+        lw = pd.to_numeric(f.get("last_view_open_water"), errors="coerce").to_numpy()
+        dw = pd.to_numeric(f.get("days_since_open_water_view"), errors="coerce").to_numpy()
+        young = rice & ((lw == 1) | (np.isfinite(dw) & (dw <= TOO_YOUNG_OPEN_WATER_DAYS)))
+        out = ["too young (not delivered)" if y else c for c, y in zip(out, young)]
+    return out
 
 
 # ------------------------------------------------------------------------------------------ locked AOIs and overrides
@@ -1705,6 +1740,7 @@ def _guard(aoi: int, force: bool) -> None:
 MAP_CLASSES = {1: ("rice standing direct seeded", "#1a9850"), 7: ("rice standing transplanted", "#00441b"),
                2: ("rice harvested", "#fee08b"), 3: ("young rice", "#9ecae1"),
                4: ("flooded / bare", "#2166ac"), 5: ("other vegetation", "#e3a21a"), 6: ("tree/orchard", "#1b5e20"),
+               8: ("too young (not delivered)", "#c6dbef"), 9: ("strip (road / path)", "#969696"),
                0: ("no data", "#d9d9d9")}
 
 

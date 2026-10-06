@@ -55,6 +55,12 @@ MIN_SPLIT_WIDTH_M = 20.0
 CUT_DEPTH = 2
 #: Derived (no-polygon) blocks: opening radius = half this width, smallest kept area, shape gates, simplify tolerance.
 MIN_FIELD_WIDTH_M = 14.0
+#: A RICE polygon narrower than this (short side of its rotated bounding box) is a road / path strip, not a field.
+#: Why (aoi19 QC, 6 Oct 2026): the reviewer deleted narrow strips on pathways and roads; below 15 m (1.5 pixels) this
+#: caught 20 of them and 27 kept polygons (1.8 ac). None = off.
+STRIP_MAX_WIDTH_M = None
+STRIP_LABEL = 9
+STRIP_FROM_LABELS = (1, 7, 3)
 MIN_ORPHAN_ACRES = 0.15
 MIN_RECTANGULARITY = 0.45
 MIN_COMPACTNESS = 0.18
@@ -424,6 +430,16 @@ def overlap_acres(frame) -> float:
     return float(shapely.area(shapely.intersection(g[left[keep]], g[right[keep]])).sum() / SQM_PER_ACRE)
 
 
+def short_side_m(gdf) -> np.ndarray:
+    """Short side of each polygon's minimum rotated rectangle (metres): the width of a strip."""
+    out = []
+    for g in gdf.geometry.minimum_rotated_rectangle():
+        x, y = g.exterior.coords.xy
+        a, b = np.hypot(x[1] - x[0], y[1] - y[0]), np.hypot(x[2] - x[1], y[2] - y[1])
+        out.append(min(a, b))
+    return np.asarray(out)
+
+
 def run(fields, classes, transform, crs, class_names: dict, nodata: int = 255, sliver_acres=(0.10,)):
     """The field layer for one AOI: (labelled pieces before sliver absorption, {threshold: final layer})."""
     import geopandas as gpd
@@ -449,6 +465,9 @@ def run(fields, classes, transform, crs, class_names: dict, nodata: int = 255, s
     finals = {}
     for thr in sliver_acres:
         fin = absorb_slivers(pieces, thr)
+        if STRIP_MAX_WIDTH_M is not None and STRIP_LABEL in class_names:
+            fin = fin.copy()
+            fin.loc[fin["label"].isin(STRIP_FROM_LABELS) & (short_side_m(fin) < STRIP_MAX_WIDTH_M), "label"] = STRIP_LABEL
         fin["class_name"] = fin["label"].map(class_names)
         fin.insert(0, "polygon_id", [f"p{i:06d}" for i in range(len(fin))])
         finals[thr] = fin

@@ -15,6 +15,7 @@ Run::
 
     python -m sar_pipeline.analysis.qc_compare diff --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg
     python -m sar_pipeline.analysis.qc_compare pattern --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg --s2-date 2026-09-13
+    python -m sar_pipeline.analysis.qc_compare trial --aoi 19 --qc ../data/qc/aoi19_qc_2026-10-06.gpkg   # the new switches
 
 Outputs go to ``processed/_batch/s2_2026/qc/aoi<N>/`` (``diff.csv``, ``fields.csv``, ``separation.csv``).
 """
@@ -142,11 +143,74 @@ def separation(t: pd.DataFrame, min_fields: int = 5) -> pd.DataFrame:
     return s.sort_values("strength", ascending=False).drop(columns="strength")
 
 
+#: The rule switches tried on aoi19 after its QC (user + manager, 6 Oct 2026); see curve_rules / field_polygons.
+QC_SWITCHES = {"TOO_YOUNG_OPEN_WATER_DAYS": 40, "TREE_IF_NEVER_EMPTIED": (0.30, 3.5),
+               "field_polygons.STRIP_MAX_WIDTH_M": 15.0}
+
+
+def trial(aoi: int, overrides: dict | None = None, fresh: str = "processed/_batch/s2_2026/rice_fresh",
+          out_root: str = OUT) -> Path:
+    """Map, sieve and fields of one AOI with its own rules PLUS ``overrides`` (default :data:`QC_SWITCHES`), written
+    only to ``<out_root>/aoi<N>/trial/``; the real map, the lock and the delivery are not touched. Writes
+    ``aoi<N>_fields_trial.gpkg`` in the delivery's attribute format, so it can be laid over the delivered layer in
+    QGIS. Why (user, 6 Oct): see the new rules on one AOI before they go anywhere else."""
+    import shutil
+
+    import geopandas as gpd
+
+    from . import curve_rules as cr
+    from . import rice_map_delivery as rd
+
+    overrides = QC_SWITCHES if overrides is None else overrides
+    root = Path(out_root) / f"aoi{aoi}" / "trial"
+    (root / f"aoi{aoi}").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(Path(fresh) / f"aoi{aoi}" / f"aoi{aoi}_step1_cover.tif", root / f"aoi{aoi}")
+    with cr.switches(overrides, "qc trial"):
+        cr.run(aoi, fresh=str(root), force=True)                     # force: only the trial folder is written
+        with cr.rules_for(aoi):
+            cr.sieve(aoi, fresh=str(root), force=True)
+        cr.fields(aoi, fresh=str(root), force=True)
+    tag = f"{int(round(rd.SLIVER_ACRES * 100)):03d}"
+    f = gpd.read_file(root / f"aoi{aoi}" / f"aoi{aoi}_rel_fields_sliver{tag}.gpkg")
+    rice = {cr.MAP_CLASSES[k][0] for k in rd.RICE_CODES}
+    out = gpd.GeoDataFrame({
+        "field_id": [f"aoi{aoi}_{p}" for p in f["polygon_id"]],
+        "major_class": np.where(f["class_name"].isin(rice), "rice", "non-rice"),
+        "sub_class": f["class_name"].to_numpy(), "acres": f["acres"].round(3).to_numpy(),
+        "label_share": f["label_share"].round(2).to_numpy(), "origin": f["origin"].to_numpy()},
+        geometry=f.geometry, crs=f.crs)
+    gp = root / f"aoi{aoi}_fields_trial.gpkg"
+    out.to_file(gp, driver="GPKG")
+    rd.fields_qml(gp)
+    return gp
+
+
+def score_trial(aoi: int, qc, trial_gpkg) -> pd.DataFrame:
+    """Agreement of a trial field layer with the QC, by area: of the QC's rice, how much the trial calls rice, and of
+    the QC's non-rice / empty ground inside the delivered rice, how much the trial left out. Acres, both ways."""
+    import geopandas as gpd
+
+    t = gpd.read_file(trial_gpkg)
+    o = delivered_fields(aoi)
+    qr = qc[(qc["major_class"] == "rice") | qc["field_id"].isna()].union_all()      # the QC's rice (new polygons are rice)
+    tr = t[t["major_class"] == "rice"].union_all()
+    dr = o[o["major_class"] == "rice"].union_all()
+    a = lambda g: round(g.area / ACRE_M2, 1)
+    return pd.DataFrame([
+        {"what": "QC rice", "acres": a(qr)},
+        {"what": "delivered rice", "acres": a(dr)}, {"what": "trial rice", "acres": a(tr)},
+        {"what": "QC rice the trial also calls rice", "acres": a(qr.intersection(tr))},
+        {"what": "QC rice the trial misses", "acres": a(qr.difference(tr))},
+        {"what": "trial rice the QC does not have", "acres": a(tr.difference(qr))},
+        {"what": "delivered rice the QC removed", "acres": a(dr.difference(qr))},
+        {"what": "  ... of it, the trial removed too", "acres": a(dr.difference(qr).difference(tr))}])
+
+
 def main(argv=None) -> int:
     import geopandas as gpd
 
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["diff", "pattern"])
+    p.add_argument("step", choices=["diff", "pattern", "trial"])
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--qc", required=True, help="the QC'd field file (GeoPackage with the delivered field_id)")
     p.add_argument("--s2-date", help="pattern: one clear Sentinel-2 date, YYYY-MM-DD")
@@ -158,6 +222,12 @@ def main(argv=None) -> int:
         d = diff(delivered_fields(a.aoi), qc)
         d.to_csv(out / "diff.csv", index=False)
         print(d.groupby(["change", "sub_class"], dropna=False)["acres"].agg(["count", "sum"]).round(2).to_string())
+    elif a.step == "trial":
+        gp = trial(a.aoi)
+        s = score_trial(a.aoi, qc, gp)
+        s.to_csv(out / "trial_score.csv", index=False)
+        print(s.to_string(index=False))
+        print(f"trial layer: {gp.resolve()}")
     else:
         t = removed_vs_kept(a.aoi, qc, a.s2_date)
         t.to_csv(out / "fields.csv")
