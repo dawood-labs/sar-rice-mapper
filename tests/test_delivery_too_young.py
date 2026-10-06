@@ -60,3 +60,17 @@ def test_step_writes_a_new_file_and_never_touches_the_delivered_one(tmp_path, mo
 
 def test_too_young_runs_between_package_and_upload():
     assert rd.STEPS.index("package") < rd.STEPS.index("too_young") < rd.STEPS.index("upload")
+
+
+def test_trees_cut_runs_after_too_young_and_before_upload():
+    assert rd.STEPS.index("too_young") < rd.STEPS.index("trees_cut") < rd.STEPS.index("upload")
+
+
+def test_a_failing_trees_cut_is_recorded_and_does_not_stop_the_delivery(tmp_path, monkeypatch):
+    from sar_pipeline.analysis import basemap_trees as bt
+
+    d = _delivery(tmp_path)
+    monkeypatch.setattr(rd, "OUT_ROOT", str(tmp_path))
+    monkeypatch.setattr(bt, "cut_aoi", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("credentials expired")))
+    r = rd.step_trees_cut(9991, root=str(tmp_path))
+    assert "credentials expired" in r["error"] and not (d / "aoi9991_fields_trees_cut.gpkg").exists()

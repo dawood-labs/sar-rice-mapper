@@ -50,7 +50,7 @@ RICE_CODES = (1, 7, 3)
 CLEAR_SHARE_MIN = 0.8      # user, 5 Oct: "kam az kam 80 percent saaf"
 #: ...and only dates of the season (the same start as the notebook-08 chips and the configs' season.start).
 SEASON_FROM = "2026-03-15"
-STEPS = ("fields", "lock", "package", "too_young", "upload")
+STEPS = ("fields", "lock", "package", "too_young", "trees_cut", "upload")
 #: Too-young rice is not delivered (manager via the user, 6 Oct 2026): a rice field goes to non-rice "too young (not
 #: delivered)" when fewer than this share of its clear pixels are NOT open water on the AOI's newest clear S2 date (at
 #: least 95 % of it still flooded). The result is a NEW file aoi<N>_fields_too_young.gpkg beside the delivered layer,
@@ -333,6 +333,12 @@ def run_one(aoi: int, fresh: str = FRESH, key: str | None = None, redo=()) -> di
             r = {k: v for k, v in step_package(aoi, fresh).items() if k in ("s2_dates", "locked")}
         elif step == "too_young":
             r = step_too_young(aoi)
+        elif step == "trees_cut":
+            r = step_trees_cut(aoi)
+            if "error" in r:                          # recorded, not done: the delivery goes on, the step runs later
+                st[step] = {"done": False, "result": r, "at": str(pd.Timestamp.now().floor("s"))}
+                _save_status(aoi, st)
+                continue
         else:
             r = step_upload(aoi, key)
         st[step] = {"done": True, "result": r, "at": str(pd.Timestamp.now().floor("s"))}
@@ -346,6 +352,72 @@ def remote_files(aoi: int, key: str | None = None) -> dict:
     bucket, base = _bucket(aoi, key)
     dest = f"{base}/{DELIVERY}/aoi{aoi}/"
     return {b.name[len(dest):]: b.md5_hash for b in bucket.list_blobs(prefix=dest) if "/" not in b.name[len(dest):]}
+
+
+def step_trees_cut(aoi: int, **kw) -> dict:
+    """Writes ``aoi<N>_fields_trees_cut.gpkg`` (+ .qml, ``aoi<N>_trees_cut.json``): the too-young layer with the trees and
+    plain roofs on rice-field edges cut off (``basemap_trees.cut_aoi``). Kept once written, like the too-young file. A
+    failure (e.g. storage credentials expired) is recorded and does not stop the delivery; the step is run again later
+    (user, 7 Oct 2026: on every AOI, delivered or still to come, as a new file)."""
+    from . import basemap_trees as bt
+
+    d = out_dir(aoi, **kw)
+    out, js = d / f"aoi{aoi}_fields_trees_cut.gpkg", d / f"aoi{aoi}_trees_cut.json"
+    if out.exists() and js.exists():
+        return json.loads(js.read_text())
+    src = d / f"aoi{aoi}_fields_too_young.gpkg"
+    try:
+        res = bt.cut_aoi(aoi, src if src.exists() else d / f"aoi{aoi}_fields.gpkg", out)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+    res["from"] = src.name if src.exists() else f"aoi{aoi}_fields.gpkg"
+    js.write_text(json.dumps({**res, "file": out.name, "sha256": _sha(out)}, indent=1, default=str))
+    return res
+
+
+def _upload_new_only(aoi: int, names: list[str], key: str | None = None) -> dict:
+    """Uploads ``names`` from the AOI's delivery folder; refuses to replace a DIFFERENT file of the same name, skips an
+    identical one, and checks afterwards that every file that was in the bucket before still has its md5."""
+    d = out_dir(aoi)
+    bucket, base = _bucket(aoi, key)
+    dest = f"{base}/{DELIVERY}/aoi{aoi}"
+    before = remote_files(aoi, key)
+    local = {n: base64.b64encode(hashlib.md5((d / n).read_bytes()).digest()).decode() for n in names}
+    clash = [n for n in names if n in before and before[n] != local[n]]
+    if clash:
+        raise RuntimeError(f"aoi{aoi}: a different file is already in the bucket, not replaced: {clash}")
+    for n in names:
+        if n not in before:
+            bucket.blob(f"{dest}/{n}").upload_from_filename(str(d / n), timeout=600)
+    after = remote_files(aoi, key)
+    changed = [n for n, m in before.items() if after.get(n) != m]
+    if changed:
+        raise RuntimeError(f"aoi{aoi}: files changed in the bucket: {changed}")
+    bad = [n for n in names if after.get(n) != local[n]]
+    if bad:
+        raise RuntimeError(f"aoi{aoi}: upload md5 mismatch: {bad}")
+    return {"uploaded": names, "old_files_unchanged": len(before)}
+
+
+def trees_cut_apply(aoi: int, key: str | None = None) -> dict:
+    """For a delivered AOI: :func:`step_trees_cut`, then upload ONLY its new files."""
+    res = step_trees_cut(aoi)
+    if "error" in res:
+        raise RuntimeError(res["error"])
+    names = [f"aoi{aoi}_fields_trees_cut.gpkg", f"aoi{aoi}_fields_trees_cut.qml", f"aoi{aoi}_trees_cut.json"]
+    up = _upload_new_only(aoi, names, key)
+    st = load_status(aoi)
+    st["trees_cut"] = {"done": True, "result": res, "at": str(pd.Timestamp.now().floor("s"))}
+    st["trees_cut_upload"] = {"done": True, "result": up, "at": str(pd.Timestamp.now().floor("s"))}
+    _save_status(aoi, st)
+    return {"aoi": aoi, **{k: v for k, v in res.items() if k not in ("model",)}, "old_files_checked": up["old_files_unchanged"]}
+
+
+def _trees_one(aoi: int) -> dict:
+    try:
+        return trees_cut_apply(aoi)
+    except Exception as e:
+        return {"aoi": aoi, "error": f"{type(e).__name__}: {e}"}
 
 
 def too_young_apply(aoi: int, key: str | None = None) -> dict:
@@ -397,7 +469,7 @@ def _dry_one(aoi: int) -> dict:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["run", "status", "too-young-dry-run", "too-young-apply", "remote"])
+    p.add_argument("step", choices=["run", "status", "too-young-dry-run", "too-young-apply", "trees-cut-apply", "remote"])
     p.add_argument("--aois", type=int, nargs="*", default=[], help="default: every AOI with a delivery folder")
     p.add_argument("--jobs", type=int, default=0, help="AOIs at once (0 = from the CPUs and RAM)")
     p.add_argument("--key", default=None)
@@ -412,6 +484,22 @@ def main(argv=None) -> int:
         out = Path(OUT_ROOT) / DELIVERY / "too_young_applied.csv"
         t.to_csv(out, index=False)
         print(t.drop(columns=["by_class"], errors="ignore").to_string(index=False))
+        print(f"-> {out}")
+        return 0
+    if a.step == "trees-cut-apply":
+        from concurrent.futures import ProcessPoolExecutor
+
+        from .. import resources
+        r = resources.detect_resources()
+        jobs = a.jobs or max(1, min(len(a.aois), r.cpus // 4, int(r.memory_available_bytes / 12e9)))
+        rows = []
+        with ProcessPoolExecutor(jobs, mp_context=mp.get_context("spawn"), initializer=resources.limit_worker_threads,
+                                 initargs=(max(1, r.cpus // jobs),)) as ex:
+            for res in ex.map(_trees_one, a.aois):
+                rows.append(res)
+                print(json.dumps(res, default=str), flush=True)
+        out = Path(OUT_ROOT) / DELIVERY / "trees_cut_applied.csv"
+        pd.DataFrame(rows).to_csv(out, index=False)
         print(f"-> {out}")
         return 0
     if a.step == "remote":

@@ -536,6 +536,96 @@ def score_against_qc(aoi: int, qc, layer) -> dict:
             "missed_ac": a(qc_cut.difference(tool)), "false_cut_in_qc_rice_ac": a(tool.intersection(qr))}
 
 
+#: The tree model used on every AOI: learnt once from the aoi19 QC (the only hand QC so far) and kept on disk.
+MODEL_AOI = 19
+MODEL_QC = str(Path(BASEMAP).parent / "qc" / "aoi19_qc_2026-10-06.gpkg")
+P_MIN = 0.85
+CUT_MIN_M2 = 100.0
+
+
+def model_path(root: str = BASEMAP) -> Path:
+    return Path(root) / "models" / f"trees_rf_aoi{MODEL_AOI}.joblib"
+
+
+def load_model(root: str = BASEMAP):
+    """The saved tree model, learnt from the aoi19 QC on first use. Why: one model for all AOIs, so every delivery is
+    cut by the same rule, and it is not relearnt (20 s) per AOI."""
+    import geopandas as gpd
+    import joblib
+
+    p = model_path(root)
+    if p.exists():
+        return joblib.load(p)
+    img, tr, _, fine = read(MODEL_AOI, root)
+    X = features(img, fine)
+    tree, rice = labels_from_qc(MODEL_AOI, gpd.read_file(MODEL_QC), img.shape[1:], tr)
+    m = train(X, tree, rice)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(m, p)
+    return m
+
+
+def tiles_prefix(aoi: int) -> str:
+    """The AOI's tiles folder from the local, untracked ``config/basemap_local.yaml`` (``s3_tiles_template``)."""
+    import yaml
+
+    from .. import config as config_mod
+
+    cfg = yaml.safe_load((config_mod.repo_root() / "config" / "basemap_local.yaml").read_text())
+    return cfg["s3_tiles_template"].format(aoi=aoi)
+
+
+def cut_aoi(aoi: int, fields_path, out_path, root: str = BASEMAP, keep_tiles: bool = False,
+            cleanup: bool = True) -> dict:
+    """Everything for one AOI: tiles fetched (read only) and mosaicked if needed (the raw tiles then deleted; they can
+    be fetched again), trees from the saved model plus plain roofs, cut off ``fields_path``'s rice polygons, cleaned (no
+    slivers, tails or fingers, straight cuts), written to ``out_path`` (+ .qml). Returns the counts. ``cleanup``: the
+    AOI's whole basemap folder (tiles and mosaics) is deleted afterwards, so the disk does not fill up (user, 7 Oct
+    2026); the saved tree model is kept."""
+    import shutil
+
+    import geopandas as gpd
+    import shapely
+    from rasterio import features as rf
+    from scipy import ndimage
+    from shapely.geometry import shape
+
+    d = Path(root) / f"aoi{aoi}"
+    if not (d / f"aoi{aoi}_basemap_fine_utm.tif").exists():
+        fetch(aoi, tiles_prefix(aoi), root)
+        mosaic(aoi, root)
+    if not keep_tiles:
+        for t in [p for p in d.iterdir() if p.is_dir()]:
+            shutil.rmtree(t)                          # local copies of the stored tiles only
+        (d / "mosaic.vrt").unlink(missing_ok=True)
+    tree, transform, crs, _ = tree_mask(aoi, model=load_model(root), p_min=P_MIN)
+    roofs = ndimage.binary_dilation(roof_mask(read(aoi, root)[0]), iterations=int(BUILDING_BUFFER_M))
+    geoms = [shape(g) for g, v in rf.shapes(roofs.astype("uint8"), mask=roofs, transform=transform) if v]
+    built = shapely.union_all(geoms) if geoms else None
+    tree |= roofs
+    fields = gpd.read_file(fields_path).to_crs(crs)
+    layer, stats = cut_edge_trees(fields, tree, transform, min_tree_m2=CUT_MIN_M2, built=built)
+    layer, r1 = absorb_layer_slivers(layer)
+    layer, r2 = absorb_layer_slivers(layer)
+    layer = layer.to_crs(fields.crs) if layer.crs != fields.crs else layer
+    out_path = Path(out_path)
+    tmp = out_path.with_name(out_path.stem + ".tmp.gpkg")
+    layer.to_file(tmp, driver="GPKG")
+    tmp.replace(out_path)
+    from . import rice_map_delivery as rd
+    rd.fields_qml(out_path)
+    if cleanup:
+        load_model(root)                              # the model is saved before its source AOI's mosaic can go
+        shutil.rmtree(d, ignore_errors=True)
+    rice = lambda g: float(g.loc[g["major_class"] == "rice"].area.sum()) / ACRE_M2
+    return {"fields_cut": int((stats["cut_m2"] > 0).sum()), "rice_fields": int(len(stats)),
+            "rice_acres_before": round(rice(fields), 2), "rice_acres_after": round(rice(layer), 2),
+            "tree_acres": round(float(layer.loc[layer["sub_class"] == "tree/orchard"].area.sum()) / ACRE_M2
+                                - float(fields.loc[fields["sub_class"] == "tree/orchard"].area.sum()) / ACRE_M2, 2),
+            "slivers_dropped": r1["slivers_dropped"] + r2["slivers_dropped"], "slivers_left": r2["slivers_left"],
+            "roof_blobs": len(geoms), "model": model_path(root).name, "p_min": P_MIN, "min_cut_m2": CUT_MIN_M2}
+
+
 def main(argv=None) -> int:
     import geopandas as gpd
 
