@@ -21,6 +21,7 @@ Each AOI has ``processed/_batch/s2_2026/aoi_batch/aoi<N>/status.json``; a finish
 Use::
 
     python -m sar_pipeline.analysis.aoi_batch order --start 72 116 39            # neighbour order of all AOIs
+    python -m sar_pipeline.analysis.aoi_batch flow --start 72 116 39 --skip 160 28 ...   # all AOIs, rolling window
     python -m sar_pipeline.analysis.aoi_batch imagery --aois 72 116 39
     python -m sar_pipeline.analysis.aoi_batch prepare --aois 72 116 39
     python -m sar_pipeline.analysis.aoi_batch choose  --aois 72
@@ -174,6 +175,113 @@ def imagery(aois, logs: Path) -> None:
             print(f"aoi{a}: imagery done (run {runs[a]})", flush=True)
 
 
+# ---------------------------------------------------------------------------------------------------------- flow
+def _download_stack(aoi: int, run: str, logs: Path) -> int:
+    cfg = f"config/aoi{aoi}_monsoon2026.yaml"
+    _sh(PY + ["sar_pipeline", "--config", cfg, "download", "--run", run, "--yes"], logs / f"aoi{aoi}_download.log")
+    _sh(PY + ["sar_pipeline", "--config", cfg, "stack", "--run", run], logs / f"aoi{aoi}_stack.log")
+    return aoi
+
+
+def _submit(aoi: int, logs: Path) -> tuple[int, str]:
+    run = status(aoi).get("run") or _new_run(aoi, logs)
+    st = status(aoi)
+    st["run"] = run
+    _status_path(aoi).parent.mkdir(parents=True, exist_ok=True)
+    _status_path(aoi).write_text(json.dumps(st, indent=1, default=str))
+    _sh(PY + ["sar_pipeline", "--config", f"config/aoi{aoi}_monsoon2026.yaml", "export", "--run", run, "--all", "--yes"],
+        logs / f"aoi{aoi}_export.log")
+    return aoi, run
+
+
+def flow(order, logs: Path, window: int = 30, prep_jobs: int = 0, poll: float = 30.0, sleep=None) -> None:
+    """The whole imagery-to-sheets stage as one flow (user, 6 Oct: keep the Earth Engine queue full, check every 30 s,
+    go on with each AOI the moment its data is there):
+
+    * ``window`` AOIs are always in Earth Engine; when one AOI's exports are all finished the next one is submitted,
+    * every ``poll`` seconds ONE project task listing serves all AOIs (one shared Earth Engine backend: its listing is
+      re-used for ``poll`` seconds), then each run's monitor round (refresh + resubmit failures) runs on it,
+    * a finished AOI is downloaded and stacked at once, then prepared (inputs, trials, sample, sheets) in a process
+      pool; ``READY aoi<N>`` is printed when its sheets are done (the reviewers' turn).
+    Resumable: AOIs already past a step (``status.json``) skip it."""
+    import time as _time
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+
+    from .. import auth, cli, export
+    from .. import config as cm
+    from .. import resources
+
+    sleep = sleep or _time.sleep
+    logs.mkdir(parents=True, exist_ok=True)
+    queue = [a for a in order if not _done(a, "imagery")]
+    r = resources.detect_resources()
+    prep = ProcessPoolExecutor(prep_jobs or max(1, min(3, int(r.memory_available_bytes / 15e9))),
+                               mp_context=mp.get_context("spawn"))
+    io = ThreadPoolExecutor(8)
+    backend, inflight, downloads, preps = None, {}, {}, {}
+    for a in order:                                   # imagery already done earlier: straight to preparation
+        if _done(a, "imagery") and not _done(a, "sheets"):
+            preps[a] = prep.submit(_prepare_one, a, str(logs))
+    say = (lambda m: print(f"{pd.Timestamp.now():%H:%M:%S} {m}", flush=True))
+    while queue or inflight or downloads or preps:
+        free = window - len(inflight) - len(downloads)
+        if free > 0 and queue:
+            take, queue[:] = queue[:free], queue[free:]
+            for a in take:
+                _set_season_end(a)
+            try:
+                _sh(PY + ["sar_pipeline.optical_export", "dates", "--configs",
+                          *[f"config/aoi{a}_monsoon2026.yaml" for a in take], "--start", S2_NEW[0], "--end", S2_NEW[1]],
+                    logs / "s2_dates.log")
+            except RuntimeError as e:
+                say(f"S2 dates for {take} FAILED ({e}); radar goes on")
+            for f in [io.submit(_submit, a, logs) for a in take]:
+                try:
+                    a, run = f.result()
+                except Exception as e:
+                    say(f"submit FAILED: {e}")
+                    continue
+                cfg, rp = cli.load_run_context(cm.load_config(f"config/aoi{a}_monsoon2026.yaml"), run,
+                                               warn=lambda m: None)
+                if backend is None:
+                    auth.init_ee(cfg)
+                    backend = export.EEBackend()
+                inflight[a] = (cfg, rp, run)
+                say(f"aoi{a}: submitted (run {run}); in Earth Engine: {len(inflight)}")
+        for a, (cfg, rp, run) in list(inflight.items()):
+            try:
+                df = export.monitor(cfg, rp, backend=backend, confirmed=True, max_cycles=1)
+            except Exception as e:                    # one run's trouble must not stop the others
+                say(f"aoi{a}: monitor round failed ({type(e).__name__}: {e}); next round")
+                continue
+            if not df["state"].isin(export._OPEN_STATES).any():
+                n_failed = int(df["state"].isin(["FAILED"]).sum())
+                say(f"aoi{a}: exports finished ({len(df)} tasks, {n_failed} failed); downloading")
+                del inflight[a]
+                downloads[a] = (io.submit(_download_stack, a, run, logs), run)
+        for a, (f, run) in list(downloads.items()):
+            if f.done():
+                del downloads[a]
+                try:
+                    f.result()
+                    _mark(a, "imagery", {"run": run})
+                    preps[a] = prep.submit(_prepare_one, a, str(logs))
+                except Exception as e:
+                    say(f"aoi{a}: download / stack FAILED: {e}")
+        for a, f in list(preps.items()):
+            if f.done():
+                del preps[a]
+                try:
+                    f.result()
+                    say(f"READY aoi{a}: sheets done, groups in {Path(FRESH) / f'aoi{a}' / 'field_review' / 'groups.txt'}")
+                except Exception as e:
+                    say(f"aoi{a}: prepare FAILED: {type(e).__name__}: {e}")
+        if queue or inflight or downloads or preps:
+            sleep(poll)
+    prep.shutdown()
+    io.shutdown()
+
+
 # ------------------------------------------------------------------------------------------------------- prepare
 def _prepare_one(aoi: int, logs: str) -> str:
     """Screening, pins, series, steps 1-2, rule-set trials, field sample and blind sheets for one AOI."""
@@ -302,17 +410,22 @@ def finish(aoi: int) -> dict:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["order", "imagery", "prepare", "choose", "finish", "status"])
+    p.add_argument("step", choices=["order", "imagery", "flow", "prepare", "choose", "finish", "status"])
     p.add_argument("--aois", type=int, nargs="*", default=[])
     p.add_argument("--start", type=int, nargs="*", default=[])
     p.add_argument("--logs", default="logs/aoi_batch")
     p.add_argument("--jobs", type=int, default=0)
+    p.add_argument("--window", type=int, default=30, help="flow: AOIs kept in Earth Engine at once")
+    p.add_argument("--skip", type=int, nargs="*", default=[], help="flow: AOIs left out (finished earlier)")
     a = p.parse_args(argv)
     logs = Path(a.logs)
     if a.step == "order":
         print(" ".join(map(str, neighbour_order(a.start or [72]))))
     elif a.step == "imagery":
         imagery(a.aois, logs)
+    elif a.step == "flow":
+        order = a.aois or [x for x in neighbour_order(a.start or [72]) if x not in set(a.skip)]
+        flow(order, logs, window=a.window, prep_jobs=a.jobs)
     elif a.step == "prepare":
         prepare(a.aois, logs, a.jobs)
     elif a.step == "choose":
