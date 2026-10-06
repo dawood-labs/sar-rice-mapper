@@ -24,6 +24,7 @@ Written by `sar_pipeline.analysis.rule_records`; the switches are in `curve_rule
 ## History
 
 
+
 ### 2026-10-06 05:50:00 - rule set chosen
 
 `aoi39+any_water_transplanted` (switches below)
@@ -47,3 +48,7 @@ Why: best of 15 sets / switches on 200 fields judged by reviewers
 | aoi83 | 66.5 | 78.0 |
 | aoi20 | 50.5 | 78.0 |
 | aoi33 | 49.0 | 77.0 |
+
+### 2026-10-06 05:50:00 - locked and delivered
+
+<bucket>/rice_map_2026-10-05/aoi75/ (13 S2 dates >= 80 % clear)

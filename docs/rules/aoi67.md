@@ -4,13 +4,31 @@ Written by `sar_pipeline.analysis.rule_records`; the switches are in `curve_rule
 
 ## Switches now
 
-- `AGE_FROM_LOW_VIEW` = `True`
+- `AGE_FROM_WATER` = `True`
 - `AGE_LOW_SHARE` = `0.05`
-- `LAST_CROP_ONLY` = `True`
+- `ANY_WATER_TRANSPLANTED` = `True`
+- `LONG_WATER_DAYS` = `30`
+- `LONG_WATER_GREEN_LEAD` = `0`
+- `LONG_WATER_LEVEL` = `0.4`
+- `LONG_WATER_WET_VIEW` = `True`
+- `NEVER_EMPTY_OTHER_VEG` = `0.35`
 - `SIEVE_ACRES` = `0.15`
+- `SOWING_FROM_RADAR` = `False`
+- `TREE_LOW_BEFORE` = `2026-07-01`
+- `TREE_NEEDS_NO_WATER` = `True`
+- `VV_JUMP` = `inf`
+- `WATER_BOTTOM` = `0.3`
+- `WATER_END_TRACKS` = `earliest_unless_wet_view`
+- `WATER_FALL_LOOKBACK_DAYS` = `45`
+- `WATER_FALL_POLS` = `VV`
+- `WATER_SPELL_DAYS` = `30`
+- `YOUNG_AFTER_LAST_WATER` = `True`
 - `YOUNG_NEEDS_AGE` = `True`
+- `YOUNG_WHILE_RADAR_LOW` = `True`
 
 ## History
+
+
 
 
 
@@ -39,5 +57,33 @@ Why: best of 15 sets / switches on 23 fields judged by reviewers
 | aoi20+any_water_transplanted | 13.0 | 39.1 |
 
 ### 2026-10-06 05:41:00 - locked and delivered
+
+<bucket>/rice_map_2026-10-05/aoi67/ (17 S2 dates >= 80 % clear)
+
+### 2026-10-06 06:02:00 - rule set chosen
+
+`aoi83` (switches below)
+
+Why: best of 15 sets / switches on 60 fields judged by reviewers
+
+| rule set | fields right % | standing/young merged % |
+|---|---|---|
+| aoi83+young_while_radar_low | 38.3 | 50.0 |
+| aoi83+long_flood | 38.3 | 50.0 |
+| aoi83 | 38.3 | 50.0 |
+| aoi83+any_water_transplanted | 38.3 | 50.0 |
+| aoi160 | 36.7 | 48.3 |
+| aoi28 | 36.7 | 48.3 |
+| aoi125 | 36.7 | 48.3 |
+| aoi83+sowing_from_radar | 36.7 | 50.0 |
+| aoi13 | 35.0 | 48.3 |
+| aoi39 | 21.7 | 53.3 |
+| aoi20 | 16.7 | 51.7 |
+| aoi33 | 16.7 | 51.7 |
+| aoi72 | 15.0 | 48.3 |
+| aoi116 | 15.0 | 48.3 |
+| aoi118 | 15.0 | 48.3 |
+
+### 2026-10-06 06:03:00 - locked and delivered
 
 <bucket>/rice_map_2026-10-05/aoi67/ (17 S2 dates >= 80 % clear)
