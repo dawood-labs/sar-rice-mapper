@@ -300,6 +300,23 @@ def sweep(aoi: int, qc, ps=(0.5, 0.7, 0.85), min_m2s=(50.0, 100.0, 200.0)) -> pd
     return pd.DataFrame(rows)
 
 
+#: Straight cuts (user, 7 Oct 2026: "kaatne k baad shape seedhi honi chahiye, fuzzy nhi"): the tree / roof blob is
+#: closed and opened by STRAIGHT_SMOOTH_M (fills the pixel teeth) and simplified to STRAIGHT_TOLERANCE_M, so the cut
+#: line runs in straight segments instead of 1 m pixel steps. The field's own outline is not touched.
+STRAIGHT_SMOOTH_M = 2.0
+STRAIGHT_TOLERANCE_M = 2.5
+
+
+def straighten(g, smooth_m: float = STRAIGHT_SMOOTH_M, tol_m: float = STRAIGHT_TOLERANCE_M):
+    """A pixel-stepped blob as a polygon with straight edges."""
+    if g.is_empty:
+        return g
+    s = g.buffer(smooth_m, join_style="mitre").buffer(-smooth_m, join_style="mitre")      # close the teeth
+    s = s.buffer(-smooth_m / 2, join_style="mitre").buffer(smooth_m / 2, join_style="mitre")  # open the spurs
+    s = s.simplify(tol_m, preserve_topology=True).buffer(0)
+    return s if not s.is_empty else g
+
+
 def _sliver(g, min_m2: float = SLIVER_M2, width_m: float = SLIVER_WIDTH_M) -> bool:
     return g.area < min_m2 or g.buffer(-width_m / 2).is_empty
 
@@ -377,7 +394,7 @@ def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, ed
             rows.append(r._asdict())
             stats.append({"field_id": r.field_id, "cut_m2": 0.0})
             continue
-        trees = shapely.union_all(cut).simplify(0.7).buffer(0).intersection(r.geometry)   # smooth the pixel steps
+        trees = straighten(shapely.union_all(cut)).intersection(r.geometry)
         rest, trees = merge_slivers(r.geometry.difference(trees), trees)
         if trees.is_empty:
             rows.append(r._asdict())
@@ -405,7 +422,7 @@ DESPIKE_M = 0.25
 
 def despike(g, d: float = DESPIKE_M):
     """``g`` without zero-width tails and needles; corners keep their shape (mitre joins). Falls back to ``g`` when the
-    opening would lose more than 1 % of the area (a polygon that is itself very thin)."""
+    opening would lose more than 1 % of the area or 5 m2, whichever is larger (a polygon that is itself very thin)."""
     import shapely
 
     polys = lambda x: shapely.union_all([p for p in getattr(x, "geoms", [x]) if p.geom_type in ("Polygon", "MultiPolygon")])
@@ -414,7 +431,7 @@ def despike(g, d: float = DESPIKE_M):
     o = shapely.make_valid(o.intersection(gv))
     o = shapely.union_all([p for p in getattr(o, "geoms", [o]) if p.geom_type == "Polygon" and p.area > 1.0]) \
         if not o.is_empty else o
-    return o if (not o.is_empty and o.area >= 0.99 * gv.area) else gv
+    return o if (not o.is_empty and gv.area - o.area <= max(0.01 * gv.area, 5.0)) else gv
 
 
 def absorb_layer_slivers(layer, min_m2: float = SLIVER_M2, width_m: float = SLIVER_WIDTH_M, touch_m: float = 0.5):
@@ -548,7 +565,8 @@ def main(argv=None) -> int:
     fields = gpd.read_file(a.fields) if a.fields else q.delivered_fields(a.aoi)
     layer, stats = cut_edge_trees(fields.to_crs(crs), tree, transform, min_tree_m2=a.min_m2, built=built)
     layer, rep = absorb_layer_slivers(layer)
-    print(rep)
+    layer, rep2 = absorb_layer_slivers(layer)        # a second pass: tails split off by the first become slivers here
+    print(rep, rep2)
     if a.train_aoi is not None and a.train_aoi != a.aoi:
         stem = Path(a.fields).stem if a.fields else f"aoi{a.aoi}_fields"
         out = Path(q.OUT) / f"aoi{a.aoi}" / f"{stem}_edge_{'trees_buildings' if a.buildings else 'trees'}_cut.gpkg"

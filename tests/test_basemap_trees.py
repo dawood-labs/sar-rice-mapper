@@ -44,3 +44,11 @@ def test_despike_removes_a_tail_and_keeps_the_corners():
     tail = Polygon([(0, 0), (40, 0), (40, 40), (20, 40), (20, 70), (20, 40), (0, 40)])   # a zero-width line on top
     d = bt.despike(tail)
     assert d.bounds == (0, 0, 40, 40) and abs(d.area - 1600) < 1
+
+
+def test_straighten_turns_pixel_steps_into_straight_edges():
+    import shapely
+    from shapely.geometry import box as b
+    steps = shapely.union_all([b(i, 0, i + 1, 20 + (i % 2)) for i in range(30)])   # a 1 m saw-tooth top edge
+    s = bt.straighten(steps)
+    assert len(s.exterior.coords) < 12 and abs(s.area - steps.area) < 0.05 * steps.area
