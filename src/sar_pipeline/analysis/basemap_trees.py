@@ -44,6 +44,17 @@ TREE_P = 0.5
 ACRE_M2 = 4046.856
 
 
+def fetch(aoi: int, s3_prefix: str, root: str = BASEMAP) -> list[Path]:
+    """Copies the AOI's cached delineation tiles (``*/mosaic.tif`` under ``s3_prefix``) to ``<root>/aoi<N>/``. Read only on
+    the storage side (``aws s3 cp``); the credentials come from the environment. ``s3_prefix`` is given at run time
+    (the tiles folder of the AOI's delineation), so no storage path lives in this public repository."""
+    d = Path(root) / f"aoi{aoi}"
+    d.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["aws", "s3", "cp", "--recursive", "--quiet", "--exclude", "*", "--include", "*mosaic.tif",
+                    s3_prefix.rstrip("/") + "/", str(d) + "/"], check=True, env=_env())
+    return sorted(d.rglob("mosaic.tif"))
+
+
 def mosaic(aoi: int, root: str = BASEMAP, crs: str = "EPSG:32646", res: float = 1.0) -> Path:
     """Joins the AOI's downloaded tiles (``<root>/aoi<N>/<tile>/<zoom>/mosaic.tif``) and warps them to ``crs`` at
     ``res`` metres (block average). All cores (GDAL_NUM_THREADS)."""
@@ -439,12 +450,19 @@ def main(argv=None) -> int:
     from . import qc_compare as q
 
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["mosaic", "evaluate", "sweep", "cut"])
+    p.add_argument("step", choices=["fetch", "mosaic", "evaluate", "sweep", "cut"])
+    p.add_argument("--s3-prefix", help="fetch: the tiles folder of the AOI's delineation basemap cache")
+    p.add_argument("--train-aoi", type=int, help="cut: learn the trees from this AOI's QC (default: --aoi itself)")
+    p.add_argument("--fields", help="cut: the field layer to cut (default: the AOI's delivered fields)")
     p.add_argument("--p-min", type=float, default=TREE_P)
     p.add_argument("--min-m2", type=float, default=MIN_TREE_M2)
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--qc", help="a QC'd field file to learn trees from")
     a = p.parse_args(argv)
+    if a.step == "fetch":
+        for t in fetch(a.aoi, a.s3_prefix):
+            print(t)
+        return 0
     if a.step == "mosaic":
         print(mosaic(a.aoi))
         return 0
@@ -456,10 +474,27 @@ def main(argv=None) -> int:
     if a.step == "sweep":
         print(sweep(a.aoi, qc).to_string(index=False))
         return 0
-    tree, transform, crs, _ = tree_mask(a.aoi, qc, p_min=a.p_min)
-    layer, stats = cut_edge_trees(q.delivered_fields(a.aoi).to_crs(crs), tree, transform, min_tree_m2=a.min_m2)
+    model = None
+    if a.train_aoi is not None and a.train_aoi != a.aoi:         # learn on one AOI's QC, use on another AOI
+        img, tr_, _, fine = read(a.train_aoi)
+        X = features(img, fine)
+        tree_, rice_ = labels_from_qc(a.train_aoi, qc, img.shape[1:], tr_)
+        model = train(X, tree_, rice_)
+        del X
+    tree, transform, crs, _ = tree_mask(a.aoi, qc, model=model, p_min=a.p_min)
+    fields = gpd.read_file(a.fields) if a.fields else q.delivered_fields(a.aoi)
+    layer, stats = cut_edge_trees(fields.to_crs(crs), tree, transform, min_tree_m2=a.min_m2)
     layer, rep = absorb_layer_slivers(layer)
     print(rep)
+    if a.train_aoi is not None and a.train_aoi != a.aoi:
+        stem = Path(a.fields).stem if a.fields else f"aoi{a.aoi}_fields"
+        out = Path(q.OUT) / f"aoi{a.aoi}" / f"{stem}_edge_trees_cut.gpkg"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        layer.to_file(out, driver="GPKG")
+        from . import rice_map_delivery as rd
+        rd.fields_qml(out)
+        print(f"fields cut: {(stats['cut_m2'] > 0).sum()} of {len(stats)} rice fields; layer: {out.resolve()}")
+        return 0
     out = Path(q.OUT) / f"aoi{a.aoi}" / f"aoi{a.aoi}_fields_edge_trees_cut.gpkg"
     out.parent.mkdir(parents=True, exist_ok=True)
     layer.to_file(out, driver="GPKG")
