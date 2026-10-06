@@ -346,14 +346,39 @@ def agreement(scored: pd.DataFrame) -> pd.Series:
     return pd.Series({s: round(100 * float((scored[s] == scored["verdict"]).mean()), 1) for s in sets})
 
 
+RICE_NAMES = ("rice standing direct seeded", "rice standing transplanted", "young rice")
+
+
+def compare_verdicts(aoi: int, a: str = "verdicts", b: str = "verdicts_sonnet", fresh: str = FRESH) -> dict:
+    """Agreement of two reviewers' verdict folders on the fields both judged: the exact class, standing / young taken
+    as one rice class, and rice vs non-rice. Why (user, 7 Oct 2026): a cheaper review model is used only if it agrees
+    with the reviewed verdicts on at least 90 % of the fields."""
+    d0 = review_dir(aoi, fresh)
+    load = lambda f: {p.stem: clean_class(json.loads(p.read_text()).get("class")) for p in (d0 / f).glob("*.json")}
+    va, vb = load(a), load(b)
+    ids = sorted(set(va) & set(vb))
+    t = pd.DataFrame({"a": [va[i] for i in ids], "b": [vb[i] for i in ids]}, index=ids)
+    rice = lambda x: x.isin(RICE_NAMES)
+    merged = lambda x: x.where(~rice(x), "rice")
+    pct = lambda m: round(100 * float(m.mean()), 1) if len(m) else float("nan")
+    return {"fields": len(t), "exact_pct": pct(t["a"] == t["b"]), "rice_merged_pct": pct(merged(t["a"]) == merged(t["b"])),
+            "rice_vs_non_rice_pct": pct(rice(t["a"]) == rice(t["b"])),
+            "disagree": {f"{x} -> {y}": int(n) for (x, y), n in t[t["a"] != t["b"]].value_counts().head(10).items()}}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["pick", "render", "score"])
+    p.add_argument("step", choices=["pick", "render", "score", "compare"])
+    p.add_argument("--a", default="verdicts", help="compare: the first verdict folder")
+    p.add_argument("--b", default="verdicts_sonnet", help="compare: the second verdict folder")
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--n", type=int, default=40)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--parts", type=int, default=0, help="render: processes drawing in parallel (0 = from the CPUs)")
     a = p.parse_args(argv)
+    if a.step == "compare":
+        print(json.dumps(compare_verdicts(a.aoi, a.a, a.b), indent=1, default=str))
+        return 0
     if a.step == "pick":
         print(pick(a.aoi, a.n, a.seed).to_string(index=False))
     elif a.step == "render":

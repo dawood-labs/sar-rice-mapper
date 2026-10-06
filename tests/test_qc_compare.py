@@ -112,3 +112,18 @@ def test_latest_clear_date_is_the_newest_date_marked_clear(tmp_path):
 
 def test_three_way_too_young_rule_thresholds_are_in_order():
     assert 0 < q.REMOVE_BELOW < q.CUT_FROM < 1 and q.MIN_CUT_PIXELS >= 1
+
+
+def test_compare_verdicts_counts_exact_merged_and_rice(tmp_path, monkeypatch):
+    import json as js
+
+    from sar_pipeline.analysis import field_review as fr
+
+    monkeypatch.setattr(fr, "review_dir", lambda a, fresh=None: tmp_path)
+    for f, (x, y) in {"f1": ("young rice", "rice standing transplanted"), "f2": ("tree/orchard", "tree/orchard"),
+                      "f3": ("flooded / bare", "young rice")}.items():
+        for d, c in (("verdicts", x), ("verdicts_sonnet", y)):
+            (tmp_path / d).mkdir(exist_ok=True)
+            (tmp_path / d / f"{f}.json").write_text(js.dumps({"field_id": f, "class": c}))
+    r = fr.compare_verdicts(1)
+    assert r["fields"] == 3 and r["exact_pct"] == 33.3 and r["rice_merged_pct"] == 66.7 and r["rice_vs_non_rice_pct"] == 66.7
