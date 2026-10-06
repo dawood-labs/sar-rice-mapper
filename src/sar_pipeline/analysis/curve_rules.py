@@ -907,6 +907,20 @@ def own_range_features(aoi: int, pixels, series_root: str | None = None,
         lv_ = d["lswi"].reshape(len(dt), -1)[:, px].astype("float32")
         lw = _last_k(np.where(ok, lv_, np.nan), 1)[-1]
         out["last_view_water"] = ((last2[-1] < 0) | (lw > last2[-1])).astype(float)
+        # days from the newest clear view that SHOWED water (NDVI below 0, or LSWI above NDVI) to the series' last date:
+        # the age of the crop counted from water that was seen, not from the sowing estimate. Why (manager via user,
+        # 6 Oct, aoi19 QC): fields still flooded on 13 Sep got a sowing-based age of 69-90 days; the client gets only
+        # rice older than about 40 days, so the age must start at the last seen water
+        wet_view = ok & ((nv < 0) | (lv_ > nv))
+        iwet = len(dt) - 1 - np.argmax(wet_view[::-1], axis=0)
+        out["days_since_water_view"] = np.where(wet_view.any(axis=0), tdays[-1] - tdays[iwet], np.nan).astype(float)
+        # the same for OPEN water only (NDVI below 0: what looks flooded in a 5-3-2 view); LSWI above NDVI also fires on
+        # a young canopy standing in water (aoi19 QC: 93 kept fields, NDVI 0.49 on 13 Sep, radar near its top)
+        open_view = ok & (nv < 0)
+        iopen = len(dt) - 1 - np.argmax(open_view[::-1], axis=0)
+        out["days_since_open_water_view"] = np.where(open_view.any(axis=0), tdays[-1] - tdays[iopen],
+                                                     np.nan).astype(float)
+        out["last_view_open_water"] = (last2[-1] < 0).astype(float)
         # share of the dry-season clear views that show water (permanent water / ponds; see POND_IF_DRY_WATER)
         dry_ = ((dt >= pd.Timestamp(DRY_SEASON_FROM)) & (dt < pd.Timestamp(DRY_UNTIL)))[:, None]
         ok_dry = d["ok"].reshape(len(dt), -1)[:, px].astype(bool) & dry_
