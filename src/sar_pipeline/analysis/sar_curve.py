@@ -142,6 +142,23 @@ def _read(loc: dict, track: str, window: int, drop_bad: bool, win=None, fast: bo
     return pd.DatetimeIndex(pd.to_datetime(dates)), out
 
 
+#: Whole-AOI tracks already read in this process, ``{(run, track, window, drop_bad): (dates, {pol: cube})}``: filled by
+#: :func:`cache_tracks`. Why (5 Oct, profile of the field-review sheets): every sheet read the radar again, 65 % of the
+#: time (55 of 85 s for four fields); with the AOI read once, :func:`read_track_pixels` slices it.
+TRACK_CACHE: dict = {}
+
+
+def cache_tracks(loc: dict, window: int = 5, drop_bad: bool = True) -> list:
+    """Reads every configured track of ``loc`` once into :data:`TRACK_CACHE`; returns ``[(dates, cubes), ...]``."""
+    out = []
+    for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
+        key = (str(loc["run"]), track, window, drop_bad)
+        if key not in TRACK_CACHE:
+            TRACK_CACHE[key] = _read(loc, track, window, drop_bad)
+        out.append(TRACK_CACHE[key])
+    return out
+
+
 def read_track_pixels(loc: dict, track: str, pids, width: int, height: int, window: int = 5, drop_bad: bool = True):
     """Like :func:`read_track`, but only for the pixels ``pids`` (flat ids on the AOI grid): ``(dates, {pol: (dates,
     len(pids))})``. Only the box around them, plus half a smoothing window on every side, is read and smoothed, so the
@@ -150,6 +167,10 @@ def read_track_pixels(loc: dict, track: str, pids, width: int, height: int, wind
     from rasterio.windows import Window
 
     pids = np.asarray(pids, dtype=int)
+    hit = TRACK_CACHE.get((str(loc["run"]), track, window, drop_bad))
+    if hit is not None:                                 # the AOI is already in memory: slice it (same values)
+        dates, cubes = hit
+        return dates, {p: v.reshape(len(dates), -1)[:, pids] for p, v in cubes.items()}
     r, c = np.divmod(pids, int(width))
     m = window // 2
     r0, r1 = max(int(r.min()) - m, 0), min(int(r.max()) + m + 1, int(height))

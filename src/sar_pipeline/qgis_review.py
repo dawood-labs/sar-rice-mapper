@@ -409,7 +409,14 @@ def field_by_id(field_id: str):
 
     aoi_id = int(field_id.split("_")[0][3:])
     path = Path(SRC) / "fields" / f"aoi{aoi_id}_fields_monsoon2026.gpkg"
-    f = gpd.read_file(path, where=f"field_id = '{field_id}'")
+    if field_id.split("_", 1)[1].startswith("p"):
+        # a field of the delivered (locked) field layer, id aoi<N>_p<polygon> (analysis.rice_map_delivery)
+        path = Path(FRESH) / "locked" / f"aoi{aoi_id}" / f"aoi{aoi_id}_rel_fields_sliver015.gpkg"
+        f = gpd.read_file(path, where=f"polygon_id = '{field_id.split('_', 1)[1]}'")
+        if not f.empty:
+            f = f.assign(field_id=field_id)
+    else:
+        f = gpd.read_file(path, where=f"field_id = '{field_id}'")
     if f.empty:
         raise ValueError(f"{field_id} not found in {path}")
     f = f.to_crs("EPSG:32646")

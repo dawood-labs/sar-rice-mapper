@@ -243,7 +243,7 @@ def test_try_rules_runs_each_finished_aois_rule_set_in_its_own_folder(tmp_path, 
     (tmp_path / "fresh" / "aoi5").mkdir(parents=True)
     (tmp_path / "fresh" / "aoi5" / "aoi5_step1_cover.tif").write_bytes(b"x")
     monkeypatch.setattr(cr, "_run", fake_run)
-    t = cr.try_rules(5, series_root="s", fresh=str(tmp_path / "fresh"), out=str(tmp_path / "out"))
+    t = cr.try_rules(5, series_root="s", fresh=str(tmp_path / "fresh"), out=str(tmp_path / "out"), jobs=1)
     assert seen == [("rules_aoi160", 0.2, False), ("rules_aoi28", 0.05, False), ("rules_aoi72", 0.05, True)]
     assert list(t.columns) == ["class", "name", "aoi160 rules", "aoi28 rules", "aoi72 rules"]
     assert cr.AGE_LOW_SHARE == 0.2 and (tmp_path / "out" / "aoi5_rule_trials.csv").exists()
@@ -460,7 +460,7 @@ def test_lone_low_newest_view_is_not_a_harvest_only_when_switched_on(monkeypatch
     monkeypatch.setattr(cr, "LONE_LOW_VIEW_DAYS", 5)
     assert cr.classify_relative(f).tolist() == ["rice standing direct seeded", "rice harvested", "rice harvested"]
     assert cr.AOI_OVERRIDES[33]["LONE_LOW_VIEW_DAYS"] == 5 and all(
-        "LONE_LOW_VIEW_DAYS" not in cr.AOI_OVERRIDES.get(a, {}) for a in cr.LOCKED_AOIS)
+        "LONE_LOW_VIEW_DAYS" not in cr.AOI_OVERRIDES.get(a, {}) for a in (72, 116, 39, 118))   # AOIs locked before these switches
 
 
 def test_fast_green_up_is_rice_when_other_vegetation_by_speed_is_off(monkeypatch):
@@ -475,7 +475,7 @@ def test_fast_green_up_is_rice_when_other_vegetation_by_speed_is_off(monkeypatch
     monkeypatch.setattr(cr, "FAST_RISE_OTHER_VEG", False)
     assert cr.classify_relative(f).tolist() == ["rice standing direct seeded"]
     assert cr.AOI_OVERRIDES[33]["FAST_RISE_OTHER_VEG"] is False and all(
-        "FAST_RISE_OTHER_VEG" not in cr.AOI_OVERRIDES.get(a, {}) for a in cr.LOCKED_AOIS)
+        "FAST_RISE_OTHER_VEG" not in cr.AOI_OVERRIDES.get(a, {}) for a in (72, 116, 39, 118))   # AOIs locked before these switches
 
 
 def test_fast_green_up_held_at_its_top_is_grown_when_other_vegetation_by_speed_is_off(monkeypatch):
@@ -519,3 +519,57 @@ def test_aoi118_rules_drop_radar_sowing_and_vv_jump_alone():
     assert {k: v for k, v in r.items() if k not in ("SOWING_FROM_RADAR", "VV_JUMP")} == \
         {k: v for k, v in cr.AOI_OVERRIDES[116].items() if k not in ("SOWING_FROM_RADAR", "VV_JUMP")}
     assert 118 in cr.LOCKED_AOIS
+
+
+def test_never_emptied_without_water_is_other_vegetation_only_when_switched_on(monkeypatch):
+    # aoi83 pixel 69008 (user 5 Oct: other vegetation): NDVI low 0.23 / peak 0.56, VH bright all season, no water
+    f = pd.DataFrame([dict(radar_rise_days=30, vh_pos_end=1.03, vh_slope_end=0.77, vh_step_end=-0.03,
+                           vh_rise_recent=1.41, vv_pos_end=0.34, vv_step_end=0.49, vv_rise_recent=0.33,
+                           water_depth=-2.1, ndvi_low_peak=0.42, ndvi_low_day=20581, ndvi_left=1.0, view_gap_days=10,
+                           ndvi_left_prev=0.75, last_view_water=0, dry_water_share=0, ndvi_slope_end=0.25,
+                           ndvi_rise_seen=128, ndvi_rise_days=30, days_since_peak=20, days_at_top=120,
+                           days_off_top=0, crop_age=150, water_spell=0)])
+    with cr.rules_for(118):
+        assert cr.classify_relative(f).tolist() == ["rice standing direct seeded"]
+    with cr.rules_for(83):
+        assert cr.classify_relative(f).tolist() == ["other vegetation"]
+        assert cr.classify_relative(f.assign(water_spell=1.0)).tolist() != ["other vegetation"]
+
+
+def test_aoi83_rules_are_the_aoi118_set_plus_three_switches():
+    r = dict(cr.AOI_OVERRIDES[83])
+    assert (r.pop("LONG_WATER_DAYS"), r.pop("NEVER_EMPTY_OTHER_VEG"), r.pop("TREE_LOW_BEFORE")) == (30, 0.35, "2026-07-01")
+    for k in ("LONG_WATER_LEVEL", "LONG_WATER_WET_VIEW", "LONG_WATER_GREEN_LEAD", "ANY_WATER_TRANSPLANTED"):
+        r.pop(k)
+    assert r == cr.AOI_OVERRIDES[118]
+    assert all(k not in cr.AOI_OVERRIDES.get(a, {}) for a in (72, 116, 39, 118)
+               for k in ("LONG_WATER_DAYS", "NEVER_EMPTY_OTHER_VEG"))
+    assert "first_green" in __import__("inspect").getsource(cr.own_range_features)
+
+
+def test_never_emptied_by_the_fitted_curve_is_other_vegetation_despite_one_dark_view():
+    # aoi83 pixel 67677 (user 5 Oct): one 0.16 view on 8 May (clear-view low/peak 0.29), fitted low/peak 0.8,
+    # an August radar "water spell" under the canopy but never below the dry level
+    f = pd.DataFrame([dict(radar_rise_days=30, vh_pos_end=1.01, vh_slope_end=0.51, vh_step_end=0.08,
+                           vh_rise_recent=1.07, vv_pos_end=0.56, vv_step_end=0.23, vv_rise_recent=0.64,
+                           water_depth=-1.48, ndvi_low_peak=0.29, fit_low_peak=0.8, ndvi_low_day=20581, ndvi_left=1.0,
+                           view_gap_days=10, ndvi_left_prev=0.72, last_view_water=0, dry_water_share=0,
+                           ndvi_slope_end=0.28, ndvi_rise_seen=20, ndvi_rise_days=15, days_since_peak=20,
+                           days_at_top=20, days_off_top=0, crop_age=45, water_spell=1, views_in_water=1,
+                           water_views_in_water=0)])
+    with cr.rules_for(118):
+        assert cr.classify_relative(f).tolist() == ["young rice"]
+    with cr.rules_for(83):
+        assert cr.classify_relative(f).tolist() == ["other vegetation"]
+        assert cr.classify_relative(f.assign(water_depth=2.0)).tolist() != ["other vegetation"]
+
+
+def test_long_flood_switches_only_on_the_field_reviewed_aois():
+    for a in (83, 117, 155):
+        r = cr.AOI_OVERRIDES[a]
+        assert (r["LONG_WATER_LEVEL"], r["LONG_WATER_WET_VIEW"], r["LONG_WATER_GREEN_LEAD"]) == (0.4, True, 0)
+    for a in (160, 28, 72, 116, 39, 118):                 # locked before the long-flood switches
+        assert not {"LONG_WATER_LEVEL", "LONG_WATER_WET_VIEW", "LONG_WATER_LAST"} & set(cr.AOI_OVERRIDES.get(a, {}))
+    assert cr.AOI_OVERRIDES[160] == {"ANY_WATER_TRANSPLANTED": True} and cr.AOI_OVERRIDES[28]["ANY_WATER_TRANSPLANTED"]
+    assert not any(cr.AOI_OVERRIDES[a].get("ANY_WATER_TRANSPLANTED") for a in (20, 33, 72, 116, 39, 118))
+    assert cr.LONG_WATER_LEVEL is None and cr.LONG_WATER_WET_VIEW is False and cr.LONG_WATER_LAST is False
