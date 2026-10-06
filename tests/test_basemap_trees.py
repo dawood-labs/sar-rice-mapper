@@ -52,3 +52,13 @@ def test_straighten_turns_pixel_steps_into_straight_edges():
     steps = shapely.union_all([b(i, 0, i + 1, 20 + (i % 2)) for i in range(30)])   # a 1 m saw-tooth top edge
     s = bt.straighten(steps)
     assert len(s.exterior.coords) < 12 and abs(s.area - steps.area) < 0.05 * steps.area
+
+
+def test_open_shape_drops_fingers_and_keeps_the_field():
+    import shapely
+    from shapely.geometry import box as b
+    field = shapely.union_all([b(0, 0, 40, 40), b(40, 18, 60, 20)])      # a 2 m wide, 20 m long finger
+    o = bt.open_shape(field)
+    assert o.bounds == (0, 0, 40, 40) and abs(o.area - 1600) < 1
+    rice, other = bt.field_pieces(b(0, 0, 40, 40), shapely.union_all([b(0, 0, 25, 40), b(25, 10, 40, 11)]))
+    assert rice.bounds[2] == 25 and abs(other.area - 15 * 40) < 50     # the 1 m hook went to the other piece

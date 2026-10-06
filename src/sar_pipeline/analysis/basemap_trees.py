@@ -305,6 +305,11 @@ def sweep(aoi: int, qc, ps=(0.5, 0.7, 0.85), min_m2s=(50.0, 100.0, 200.0)) -> pd
 #: line runs in straight segments instead of 1 m pixel steps. The field's own outline is not touched.
 STRAIGHT_SMOOTH_M = 2.0
 STRAIGHT_TOLERANCE_M = 2.5
+#: Field-like pieces (user, 7 Oct 2026: "field boundary ek field ki tarah dikhni chahiye"): after a cut, both the rice
+#: piece and the tree / roof piece lose every finger, hook or spike narrower than 2 x FINGER_M (an opening by FINGER_M,
+#: mitred corners); the tree piece is what the cleaned rice piece leaves of the field. Untouched fields keep their
+#: delineated outline.
+FINGER_M = 2.0
 
 
 def straighten(g, smooth_m: float = STRAIGHT_SMOOTH_M, tol_m: float = STRAIGHT_TOLERANCE_M):
@@ -315,6 +320,26 @@ def straighten(g, smooth_m: float = STRAIGHT_SMOOTH_M, tol_m: float = STRAIGHT_T
     s = s.buffer(-smooth_m / 2, join_style="mitre").buffer(smooth_m / 2, join_style="mitre")  # open the spurs
     s = s.simplify(tol_m, preserve_topology=True).buffer(0)
     return s if not s.is_empty else g
+
+
+def open_shape(g, r: float = FINGER_M):
+    """``g`` without parts narrower than ``2 r`` (fingers, hooks, spikes), corners kept (mitre); pieces below
+    :data:`SLIVER_M2` dropped."""
+    import shapely
+
+    if g.is_empty:
+        return g
+    o = shapely.make_valid(g.buffer(-r, join_style="mitre").buffer(r, join_style="mitre").intersection(g))
+    parts = [p for p in getattr(o, "geoms", [o]) if p.geom_type == "Polygon" and p.area >= SLIVER_M2]
+    return shapely.union_all(parts) if parts else shapely.geometry.Polygon()
+
+
+def field_pieces(field, rice, r: float = FINGER_M):
+    """(rice, non-rice) of a cut field, both field-like: the rice piece opened, the rest of the field as the non-rice
+    piece, opened too (what the openings drop is a strip narrower than ``2 r`` between the two, left as a gap)."""
+    rice_c = open_shape(rice, r)
+    other = open_shape(field.difference(rice_c), r) if not rice_c.is_empty else open_shape(field, r)
+    return rice_c, other
 
 
 def _sliver(g, min_m2: float = SLIVER_M2, width_m: float = SLIVER_WIDTH_M) -> bool:
@@ -396,6 +421,9 @@ def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, ed
             continue
         trees = straighten(shapely.union_all(cut)).intersection(r.geometry)
         rest, trees = merge_slivers(r.geometry.difference(trees), trees)
+        rest, trees = field_pieces(r.geometry, rest)
+        if rest.is_empty:                             # nothing field-like left of the rice: the whole field goes
+            trees = r.geometry
         if trees.is_empty:
             rows.append(r._asdict())
             stats.append({"field_id": r.field_id, "cut_m2": 0.0})
