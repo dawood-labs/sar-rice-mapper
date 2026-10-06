@@ -46,8 +46,9 @@ STATE = Path("processed/_batch/s2_2026/aoi_batch")
 SEASON_END = "2026-10-05"
 S2_NEW = ("2026-10-01", "2026-10-02")
 SERIES_VARIANT = "hyb40m1late_20261001"
-#: Rule sets compared on every new AOI: every AOI with its own reviewed set, plus the defaults (160).
-CANDIDATE_SETS = (160, 28, 20, 33, 72, 116, 39, 118, 83, 13, 125)
+#: Rule sets compared on every new AOI: every AOI with its own reviewed set, the defaults (160), the junior's aoi63 set
+#: and the junior's universal new-AOI switches (``curve_rules.NAMED_SETS``; user, 6 Oct).
+CANDIDATE_SETS = (160, 28, 20, 33, 72, 116, 39, 118, 83, 13, 125, 63, "universal")
 #: Switches tried on top of the best set (each alone).
 CANDIDATE_SWITCHES = {
     "any_water_transplanted": {"ANY_WATER_TRANSPLANTED": True},
@@ -55,6 +56,7 @@ CANDIDATE_SWITCHES = {
     "long_flood": {"LONG_WATER_DAYS": 30, "LONG_WATER_LEVEL": 0.4, "LONG_WATER_WET_VIEW": True,
                    "LONG_WATER_GREEN_LEAD": 0},
     "sowing_from_radar": {"SOWING_FROM_RADAR": True},
+    "universal": None,                     # the junior's universal switches on top of the best set (filled below)
 }
 #: Field sample: 5 % of the AOI's fields, at least 200, at most 400 (user, 5 Oct).
 SAMPLE_SHARE, SAMPLE_MIN, SAMPLE_MAX = 0.05, 200, 400
@@ -62,6 +64,12 @@ SAMPLE_SHARE, SAMPLE_MIN, SAMPLE_MAX = 0.05, 200, 400
 #: than 200 candidates (aoi66: 5, aoi67: 23) and their rule set was chosen on far too few verdicts.
 SAMPLE_MIN_ACRES = 0.1
 CHOSEN = Path(__file__).with_name("aoi_rules_chosen.json")
+
+
+def _fill_universal() -> None:
+    from . import curve_rules as cr
+
+    CANDIDATE_SWITCHES["universal"] = dict(cr.NEW_AOI_SWITCHES)
 PY = [sys.executable, "-W", "ignore", "-m"]
 
 
@@ -362,8 +370,10 @@ def choose(aoi: int) -> dict:
     from . import field_review as fr
     from . import rule_records as rr
 
+    _fill_universal()
     co = (lambda x: "rice" if str(x).startswith("rice standing") or x == "young rice" else x)
-    sets = {f"aoi{s}": dict(cr.REVIEWED_SETS.get(s, {})) for s in CANDIDATE_SETS}
+    sets = {(s if isinstance(s, str) else f"aoi{s}"): dict(cr.NAMED_SETS[s] if isinstance(s, str)
+                                                          else cr.REVIEWED_SETS.get(s, {})) for s in CANDIDATE_SETS}
     o, r = fr.try_variants(aoi, {}, sets=sets)
     merged = {c: round(100 * float((o[c].map(co) == o["truth"].map(co)).mean()), 1) for c in sets}
     best = max(sets, key=lambda c: (r[c], merged[c]))
