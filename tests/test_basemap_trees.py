@@ -27,3 +27,13 @@ def test_only_tree_blobs_on_the_edge_are_cut_off_a_rice_field():
     assert len(cut) == 1 and abs(cut.area.iloc[0] - 225) < 30            # the corner crown only
     assert out.loc[out["field_id"] == "f", "major_class"].iloc[0] == "rice"
     assert abs(out.area.sum() - 10000) < 1                               # nothing lost, nothing doubled
+
+
+def test_slivers_left_by_a_cut_join_the_other_side():
+    from shapely.geometry import box as b
+    rice = b(0, 0, 100, 3)                         # a 3 m strip of rice left along a crown: a sliver
+    tree = b(0, 3, 100, 60)
+    r, t = bt.merge_slivers(rice, tree)
+    assert r.is_empty and abs(t.area - 6000) < 1
+    r, t = bt.merge_slivers(b(0, 0, 100, 50), b(0, 50, 4, 54))      # a 16 m2 tree crumb on a rice edge
+    assert t.is_empty and abs(r.area - 5016) < 1

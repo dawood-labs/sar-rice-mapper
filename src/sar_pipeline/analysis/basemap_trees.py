@@ -32,6 +32,11 @@ import pandas as pd
 BASEMAP = str(Path(__file__).resolve().parents[3].parent / "data" / "basemap")
 #: Smallest tree blob that is cut (m2): about half a Sentinel-2 pixel; smaller crowns stay.
 MIN_TREE_M2 = 50.0
+#: No slivers (user, 6 Oct, aoi19 trial): a piece left by a cut that is smaller than SLIVER_M2 or narrower than
+#: SLIVER_WIDTH_M (it vanishes when shrunk by half that width) joins the other piece of the same field it shares the
+#: most outline with (a rice remnant inside a crown becomes tree; a tree crumb on a rice edge becomes rice).
+SLIVER_M2 = 150.0
+SLIVER_WIDTH_M = 5.0
 #: A blob "touches the edge" when it comes within this many metres of the polygon outline.
 EDGE_M = 2.0
 #: Probability above which a pixel is tree.
@@ -243,6 +248,44 @@ def sweep(aoi: int, qc, ps=(0.5, 0.7, 0.85), min_m2s=(50.0, 100.0, 200.0)) -> pd
     return pd.DataFrame(rows)
 
 
+def _sliver(g, min_m2: float = SLIVER_M2, width_m: float = SLIVER_WIDTH_M) -> bool:
+    return g.area < min_m2 or g.buffer(-width_m / 2).is_empty
+
+
+def merge_slivers(rice, tree, min_m2: float = SLIVER_M2, width_m: float = SLIVER_WIDTH_M):
+    """(rice, tree) of one field with every sliver piece moved to the other side, repeated until none is left; the
+    smallest pieces go first. A piece that touches nothing of the other side stays where it is unless it is the only
+    one left (then the whole field takes the other class)."""
+    import shapely
+
+    def parts(g):
+        return [p for p in getattr(g, "geoms", [g]) if not p.is_empty and p.geom_type == "Polygon"]
+
+    side = {"rice": parts(rice), "tree": parts(tree)}
+    for _ in range(50):
+        small = sorted(((p.area, k, i) for k in side for i, p in enumerate(side[k]) if _sliver(p, min_m2, width_m)))
+        moved = False
+        for _, k, i in small:
+            other = "tree" if k == "rice" else "rice"
+            p = side[k][i]
+            if not side[other]:
+                continue
+            touch = [j for j, q in enumerate(side[other]) if p.buffer(0.5).intersects(q)]
+            if not touch:
+                continue
+            j = max(touch, key=lambda j: p.buffer(0.5).intersection(side[other][j]).area)
+            side[other][j] = shapely.union_all([side[other][j], p]).buffer(0)
+            side[k].pop(i)
+            moved = True
+            break                                     # indices changed: start again from the smallest
+        if not moved:
+            break
+    if not side["rice"] or all(_sliver(p, min_m2, width_m) for p in side["rice"]):
+        side["tree"], side["rice"] = side["tree"] + side["rice"], []     # nothing worth a rice field is left
+    to = lambda ps: shapely.union_all(ps).buffer(0) if ps else shapely.geometry.Polygon()
+    return to(side["rice"]), to(side["tree"])
+
+
 def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, edge_m: float = EDGE_M):
     """Rice polygons with the tree blobs that touch their edge cut off. Returns (layer, per-field table). A cut piece
     becomes ``tree/orchard`` (non-rice) with the id ``<field_id>_t``; blobs inside the field that do not reach the edge,
@@ -278,8 +321,13 @@ def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, ed
             stats.append({"field_id": r.field_id, "cut_m2": 0.0})
             continue
         trees = shapely.union_all(cut).simplify(0.7).buffer(0).intersection(r.geometry)   # smooth the pixel steps
-        rest = r.geometry.difference(trees)
-        rows.append({**r._asdict(), "geometry": rest})
+        rest, trees = merge_slivers(r.geometry.difference(trees), trees)
+        if trees.is_empty:
+            rows.append(r._asdict())
+            stats.append({"field_id": r.field_id, "cut_m2": 0.0})
+            continue
+        if not rest.is_empty:
+            rows.append({**r._asdict(), "geometry": rest})
         rows.append({**r._asdict(), "field_id": f"{r.field_id}_t", "major_class": "non-rice", "sub_class": "tree/orchard",
                      "geometry": trees})
         stats.append({"field_id": r.field_id, "cut_m2": float(trees.area)})
@@ -290,6 +338,53 @@ def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, ed
     out["field_id"] = [f if j == 0 else f"{f}_{j + 1}" for f, j in zip(out["field_id"], k)]
     out["acres"] = (out.area / ACRE_M2).round(3)
     return out, pd.DataFrame(stats)
+
+
+def absorb_layer_slivers(layer, min_m2: float = SLIVER_M2, width_m: float = SLIVER_WIDTH_M, touch_m: float = 0.5):
+    """The whole field layer without slivers (user, 6 Oct: "koi slivers nahi hone chahiye kisi bhi qism ke"): every
+    polygon below ``min_m2`` or narrower than ``width_m`` joins the neighbour (within ``touch_m``) it shares the most
+    outline with and takes that neighbour's id and class; smallest first, repeated. A sliver with no neighbour is
+    dropped. Returns (layer, report)."""
+    import shapely
+    from shapely.strtree import STRtree
+
+    g = layer.reset_index(drop=True).copy()
+    geoms = list(g.geometry)
+    alive = [True] * len(geoms)
+    absorbed = dropped = 0
+    dropped_m2 = 0.0
+    while True:
+        tree = STRtree(geoms)
+        cand = sorted((geoms[i].area, i) for i in range(len(geoms)) if alive[i] and _sliver(geoms[i], min_m2, width_m))
+        if not cand:
+            break
+        changed = False
+        for _, i in cand:
+            if not alive[i]:
+                continue
+            gi = geoms[i].buffer(touch_m)
+            nb = [j for j in tree.query(gi, predicate="intersects") if j != i and alive[j]]
+            if not nb:
+                alive[i] = False
+                dropped += 1
+                dropped_m2 += geoms[i].area
+                changed = True
+                continue
+            j = max(nb, key=lambda j: gi.intersection(geoms[j]).area)
+            geoms[j] = shapely.union_all([geoms[j], geoms[i].buffer(touch_m).intersection(gi.union(geoms[j]))]).buffer(0)
+            alive[i] = False
+            absorbed += 1
+            changed = True
+        if not changed:
+            break
+    g["geometry"] = geoms
+    g = g[alive].reset_index(drop=True)
+    g = g.explode(index_parts=False).reset_index(drop=True)
+    k = g.groupby("field_id").cumcount()
+    g["field_id"] = [f if j == 0 else f"{f}_{j + 1}" for f, j in zip(g["field_id"], k)]
+    g["acres"] = (g.area / ACRE_M2).round(3)
+    return g, {"slivers_absorbed": absorbed, "slivers_dropped": dropped, "dropped_m2": round(dropped_m2, 1),
+               "slivers_left": int(sum(_sliver(x, min_m2, width_m) for x in g.geometry))}
 
 
 def score_against_qc(aoi: int, qc, layer) -> dict:
@@ -340,6 +435,8 @@ def main(argv=None) -> int:
         return 0
     tree, transform, crs, _ = tree_mask(a.aoi, qc, p_min=a.p_min)
     layer, stats = cut_edge_trees(q.delivered_fields(a.aoi).to_crs(crs), tree, transform, min_tree_m2=a.min_m2)
+    layer, rep = absorb_layer_slivers(layer)
+    print(rep)
     out = Path(q.OUT) / f"aoi{a.aoi}" / f"aoi{a.aoi}_fields_edge_trees_cut.gpkg"
     out.parent.mkdir(parents=True, exist_ok=True)
     layer.to_file(out, driver="GPKG")
