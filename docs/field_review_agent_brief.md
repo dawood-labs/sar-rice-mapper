@@ -10,6 +10,8 @@ Module: `sar_pipeline.analysis.field_review` (pick, render, score).
 Use only the three sheet files of each field: `<id>_curve.png`, `<id>_chips.png`, `<id>.txt`. Never open
 `fields.csv`, `user_checks.csv`, `score.csv`, other verdicts, class rasters, field layers, locked outputs, rule trials or
 label files. Do not run analysis code. Open all three files for every field, small ones included.
+Never list, glob or print the `verdicts/` folder (it holds the other reviewers' verdicts); to check your own work, read
+back only the files you wrote, by their names.
 
 ## What the sheets show
 

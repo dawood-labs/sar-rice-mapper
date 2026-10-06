@@ -215,12 +215,15 @@ def step_upload(aoi: int, key: str | None = None, workers: int = 16, **kw) -> di
     man = json.loads((d / "MANIFEST.json").read_text())
     bucket, base = _bucket(aoi, key)
     dest = f"{base}/{DELIVERY}/aoi{aoi}"
-    have = {b.name: b.size for b in bucket.list_blobs(prefix=dest + "/")}
+    have = {b.name: (b.size, b.md5_hash) for b in bucket.list_blobs(prefix=dest + "/")}
     local = [p for p in sorted(d.iterdir()) if p.is_file() and p.name != "status.json" and not p.name.endswith(".tmp")]
 
     def up(p):
         name = f"{dest}/{p.name}"
-        if have.get(name) == p.stat().st_size:
+        # same content = same md5 (6 Oct: a rebuilt raster often keeps its size, so a size check skipped new maps)
+        import base64
+
+        if have.get(name, (None, None))[1] == base64.b64encode(hashlib.md5(p.read_bytes()).digest()).decode():
             return 0
         bucket.blob(name).upload_from_filename(str(p), timeout=600)
         return 1

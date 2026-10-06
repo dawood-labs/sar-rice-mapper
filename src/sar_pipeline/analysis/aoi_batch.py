@@ -58,6 +58,9 @@ CANDIDATE_SWITCHES = {
 }
 #: Field sample: 5 % of the AOI's fields, at least 200, at most 400 (user, 5 Oct).
 SAMPLE_SHARE, SAMPLE_MIN, SAMPLE_MAX = 0.05, 200, 400
+#: Fields of at least this size can be sampled (4 pixels). Why (6 Oct): with 0.5 ac, 49 AOIs of small fields had fewer
+#: than 200 candidates (aoi66: 5, aoi67: 23) and their rule set was chosen on far too few verdicts.
+SAMPLE_MIN_ACRES = 0.1
 CHOSEN = Path(__file__).with_name("aoi_rules_chosen.json")
 PY = [sys.executable, "-W", "ignore", "-m"]
 
@@ -318,14 +321,19 @@ def _prepare_one(aoi: int, logs: str) -> str:
             shutil.copy2(src / n, Path(FRESH) / f"aoi{aoi}" / n)
         _mark(aoi, "trials", {"sets": list(CANDIDATE_SETS)})
     if not _done(aoi, "sheets"):
-        fc = fr.field_classes(aoi)
+        fc = fr.field_classes(aoi, min_acres=SAMPLE_MIN_ACRES)
         n = int(min(SAMPLE_MAX, max(SAMPLE_MIN, round(SAMPLE_SHARE * len(fc)))))
-        fields = fr.pick(aoi, n=n)
+        prev = fr.review_dir(aoi) / "fields.csv"
+        have = len(pd.read_csv(prev)) if prev.exists() else 0      # an earlier, smaller sample is kept and topped up
+        if n > have:
+            fr.pick(aoi, n=n - have, min_acres=SAMPLE_MIN_ACRES)
         _sh(PY + ["sar_pipeline.analysis.field_review", "render", "--aoi", str(aoi)], logs / f"aoi{aoi}_render.log")
-        ids = fields["field_id"].tolist()
+        vd = fr.review_dir(aoi) / "verdicts"
+        all_ids = pd.read_csv(prev)["field_id"].tolist()
+        ids = [i for i in all_ids if not (vd / f"{i}.json").exists()]   # only fields still without a verdict
         (fr.review_dir(aoi) / "groups.txt").write_text("\n".join(" ".join(ids[i:i + 20])
                                                                   for i in range(0, len(ids), 20)) + "\n")
-        _mark(aoi, "sheets", {"fields": len(ids), "groups": (len(ids) + 19) // 20})
+        _mark(aoi, "sheets", {"fields": len(all_ids), "groups": (len(ids) + 19) // 20})
     return f"aoi{aoi}: prepared"
 
 
@@ -390,9 +398,11 @@ def finish(aoi: int) -> dict:
     from . import rule_records as rr
 
     lk = Path(FRESH) / "locked" / f"aoi{aoi}"
+    # an earlier round's lock (present before this runner rebuilt the map) is kept as aoi<N>_v1; a lock this runner
+    # started (map already rebuilt here, e.g. a run killed half-way through locking) is simply replaced
     if lk.exists() and not _done(aoi, "finish"):
         old = lk.with_name(f"aoi{aoi}_v1")
-        if not old.exists():
+        if not _done(aoi, "map") and (lk / "MANIFEST.json").exists() and not old.exists():
             shutil.copytree(lk, old)
         shutil.rmtree(lk)
     if not _done(aoi, "map"):
@@ -408,9 +418,93 @@ def finish(aoi: int) -> dict:
     return st["upload"]["result"]
 
 
+def target_sample(aoi: int) -> int:
+    from . import field_review as fr
+
+    fc = fr.field_classes(aoi, min_acres=SAMPLE_MIN_ACRES)
+    return int(min(len(fc), SAMPLE_MAX, max(SAMPLE_MIN, round(SAMPLE_SHARE * len(fc)))))
+
+
+def resample(order) -> list[int]:
+    """AOIs whose sample is below the target (``SAMPLE_MIN_ACRES`` rule) get their sheets step reopened (topped up, not
+    redrawn) and, if already chosen / finished, those steps too; a lock made from the too-small sample is removed (it
+    was never accepted). Returns the AOIs reopened."""
+    import shutil
+
+    from . import field_review as fr
+
+    out = []
+    for a in order:
+        st = status(a)
+        if not st.get("sheets", {}).get("done"):
+            continue
+        prev = fr.review_dir(a) / "fields.csv"
+        have = len(pd.read_csv(prev)) if prev.exists() else 0
+        want = target_sample(a)
+        if have >= want:
+            continue
+        finished_here = bool(st.get("finish", {}).get("done"))
+        for k in ("sheets", "choose", "map", "finish"):
+            st.pop(k, None)
+        _status_path(a).write_text(json.dumps(st, indent=1, default=str))
+        lk = Path(FRESH) / "locked" / f"aoi{a}"
+        # only a lock THIS runner made (the AOI was finished here) is removed; an earlier round's lock is never touched
+        # (finish keeps it as locked/aoi<N>_v1 before replacing it)
+        if finished_here and lk.exists():
+            shutil.rmtree(lk)
+        out.append(a)
+        print(f"aoi{a}: sample {have} < {want}: reopened", flush=True)
+    return out
+
+
+def _choose_finish(aoi: int) -> dict:
+    if not _done(aoi, "choose"):
+        choose(aoi)
+    return finish(aoi)
+
+
+def autofinish(order, poll: float = 60.0, jobs: int = 3, sleep=None) -> None:
+    """Watches the AOIs whose sheets are out: when every sampled field has a reviewer verdict, the AOI's rule set is
+    chosen and the AOI finished (map, lock, delivery, upload) in a process pool. Prints ``DELIVERED aoi<N> <gcs>``."""
+    import time as _time
+    from concurrent.futures import ProcessPoolExecutor
+
+    from . import field_review as fr
+
+    sleep = sleep or _time.sleep
+    say = (lambda m: print(f"{pd.Timestamp.now():%H:%M:%S} {m}", flush=True))
+    pool = ProcessPoolExecutor(jobs, mp_context=mp.get_context("spawn"))
+    running = {}
+    while True:
+        for a in order:
+            if a in running or _done(a, "finish") or not _done(a, "sheets"):
+                continue
+            want = int(status(a)["sheets"]["result"]["fields"])
+            if want < target_sample(a):                   # a sample below the target is never used (6 Oct)
+                continue
+            have = len(list((fr.review_dir(a) / "verdicts").glob("*.json"))) if (fr.review_dir(a) / "verdicts").exists() \
+                else 0
+            if want and have >= want:
+                running[a] = pool.submit(_choose_finish, a)
+                say(f"aoi{a}: {have} verdicts in, choosing and finishing")
+        for a, f in list(running.items()):
+            if f.done():
+                del running[a]
+                try:
+                    say(f"DELIVERED aoi{a} {f.result().get('gcs')}  rule: {status(a).get('choose', {}).get('result', {}).get('from')}"
+                        f" ({status(a).get('choose', {}).get('result', {}).get('right_pct')} % of fields)")
+                except Exception as e:
+                    say(f"aoi{a}: choose / finish FAILED: {type(e).__name__}: {e}")
+        if all(_done(a, "finish") for a in order) and not running:
+            break
+        sleep(poll)
+    pool.shutdown()
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["order", "imagery", "flow", "prepare", "choose", "finish", "status"])
+    p.add_argument("step", choices=["order", "imagery", "flow", "autofinish", "resample", "prepare", "choose", "finish",
+                                    "status"])
     p.add_argument("--aois", type=int, nargs="*", default=[])
     p.add_argument("--start", type=int, nargs="*", default=[])
     p.add_argument("--logs", default="logs/aoi_batch")
@@ -426,6 +520,12 @@ def main(argv=None) -> int:
     elif a.step == "flow":
         order = a.aois or [x for x in neighbour_order(a.start or [72]) if x not in set(a.skip)]
         flow(order, logs, window=a.window, prep_jobs=a.jobs)
+    elif a.step == "resample":
+        order = a.aois or [x for x in neighbour_order(a.start or [72]) if x not in set(a.skip)]
+        print(resample(order))
+    elif a.step == "autofinish":
+        order = a.aois or [x for x in neighbour_order(a.start or [72]) if x not in set(a.skip)]
+        autofinish(order, jobs=a.jobs or 3)
     elif a.step == "prepare":
         prepare(a.aois, logs, a.jobs)
     elif a.step == "choose":

@@ -32,3 +32,23 @@ def test_flow_with_nothing_to_do_returns_at_once(tmp_path, monkeypatch):
         b._mark(a, "imagery", {"run": "r"})
         b._mark(a, "sheets", {"fields": 0})
     b.flow([1, 2], tmp_path / "logs", sleep=lambda s: (_ for _ in ()).throw(AssertionError("must not wait")))
+
+
+def test_resample_never_removes_an_earlier_rounds_lock(tmp_path, monkeypatch):
+    import pandas as pd
+    from sar_pipeline.analysis import field_review as fr
+    monkeypatch.setattr(b, "STATE", tmp_path / "state")
+    monkeypatch.setattr(b, "FRESH", str(tmp_path / "fresh"))
+    monkeypatch.setattr(fr, "review_dir", lambda a, fresh=None: tmp_path / f"r{a}")
+    monkeypatch.setattr(b, "target_sample", lambda a: 200)
+    for a, finished in ((1, True), (2, False)):
+        (tmp_path / f"r{a}").mkdir()
+        pd.DataFrame({"field_id": ["x"] * 5}).to_csv(tmp_path / f"r{a}" / "fields.csv", index=False)
+        b._mark(a, "sheets", {"fields": 5})
+        if finished:
+            b._mark(a, "finish", {})
+        (tmp_path / "fresh" / "locked" / f"aoi{a}").mkdir(parents=True)
+    assert b.resample([1, 2]) == [1, 2]
+    assert not (tmp_path / "fresh" / "locked" / "aoi1").exists()       # made by this runner: removed
+    assert (tmp_path / "fresh" / "locked" / "aoi2").exists()           # an earlier round's lock: kept
+    assert not b._done(1, "sheets") and not b._done(2, "sheets")

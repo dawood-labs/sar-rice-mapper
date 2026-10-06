@@ -97,11 +97,11 @@ def field_classes(aoi: int, fresh: str = FRESH, min_acres: float = 0.5) -> pd.Da
     return out
 
 
-def pick(aoi: int, n: int = 40, seed: int = 0, fresh: str = FRESH) -> pd.DataFrame:
+def pick(aoi: int, n: int = 40, seed: int = 0, fresh: str = FRESH, min_acres: float = 0.5) -> pd.DataFrame:
     """The sample (a further call adds a new round of fields not picked before): half among fields where the rule sets
     disagree (largest disagreement first, then random), half spread
     over the AOI map's classes (at least two per class present). Written to ``fields.csv``."""
-    fc = field_classes(aoi, fresh)
+    fc = field_classes(aoi, fresh, min_acres=min_acres)
     d = review_dir(aoi, fresh)
     before = pd.read_csv(d / "fields.csv") if (d / "fields.csv").exists() else None
     if before is not None:                          # a further round: never the same field twice, appended

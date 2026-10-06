@@ -41,6 +41,11 @@ def record(aoi: int, event: str, what: str, reason: str = "", scores: pd.DataFra
            when: str | None = None, root: Path = ROOT) -> Path:
     """Appends one dated entry (``event``: e.g. "rule sets compared", "chosen", "changed", "locked", "delivered") and
     rewrites the file's header with the AOI's switches as they are now."""
+    # the repo is public: a storage path names the bucket and the project, so it is never written here
+    import re
+
+    what = re.sub(r"gs://\S+?/([^/\s]+/aoi\d+/?)", r"<bucket>/\1", what)
+    reason = re.sub(r"gs://\S+?/([^/\s]+/aoi\d+/?)", r"<bucket>/\1", reason)
     p = path(aoi, root)
     p.parent.mkdir(parents=True, exist_ok=True)
     body = p.read_text().split("## History", 1)[1] if p.exists() and "## History" in p.read_text() else "\n"
