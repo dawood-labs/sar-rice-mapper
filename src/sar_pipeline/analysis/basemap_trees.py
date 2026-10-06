@@ -340,6 +340,25 @@ def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, ed
     return out, pd.DataFrame(stats)
 
 
+#: Spikes / tails (user, 6 Oct, QGIS: zero-width lines sticking out of a cut polygon): an opening by this many metres
+#: (mitred corners, so field corners stay sharp) removes them.
+DESPIKE_M = 0.25
+
+
+def despike(g, d: float = DESPIKE_M):
+    """``g`` without zero-width tails and needles; corners keep their shape (mitre joins). Falls back to ``g`` when the
+    opening would lose more than 1 % of the area (a polygon that is itself very thin)."""
+    import shapely
+
+    polys = lambda x: shapely.union_all([p for p in getattr(x, "geoms", [x]) if p.geom_type in ("Polygon", "MultiPolygon")])
+    gv = polys(shapely.make_valid(g))                   # an invalid input (self-touching tail) made valid first
+    o = g.buffer(-d, join_style="mitre").buffer(d, join_style="mitre")
+    o = shapely.make_valid(o.intersection(gv))
+    o = shapely.union_all([p for p in getattr(o, "geoms", [o]) if p.geom_type == "Polygon" and p.area > 1.0]) \
+        if not o.is_empty else o
+    return o if (not o.is_empty and o.area >= 0.99 * gv.area) else gv
+
+
 def absorb_layer_slivers(layer, min_m2: float = SLIVER_M2, width_m: float = SLIVER_WIDTH_M, touch_m: float = 0.5):
     """The whole field layer without slivers (user, 6 Oct: "koi slivers nahi hone chahiye kisi bhi qism ke"): every
     polygon below ``min_m2`` or narrower than ``width_m`` joins the neighbour (within ``touch_m``) it shares the most
@@ -349,6 +368,8 @@ def absorb_layer_slivers(layer, min_m2: float = SLIVER_M2, width_m: float = SLIV
     from shapely.strtree import STRtree
 
     g = layer.reset_index(drop=True).copy()
+    g["geometry"] = [despike(x) for x in g.geometry]          # tails off first; pieces it frees are slivers below
+    g = g.explode(index_parts=False).reset_index(drop=True)
     geoms = list(g.geometry)
     alive = [True] * len(geoms)
     absorbed = dropped = 0
@@ -377,7 +398,9 @@ def absorb_layer_slivers(layer, min_m2: float = SLIVER_M2, width_m: float = SLIV
             changed = True
         if not changed:
             break
-    g["geometry"] = geoms
+    # a join can leave a new tail: despike once more, but only where the polygon stays one piece (no new slivers)
+    one = lambda x, d: d if d.geom_type == "Polygon" else x
+    g["geometry"] = [one(x, despike(x)) for x in geoms]
     g = g[alive].reset_index(drop=True)
     g = g.explode(index_parts=False).reset_index(drop=True)
     k = g.groupby("field_id").cumcount()

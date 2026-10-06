@@ -37,3 +37,10 @@ def test_slivers_left_by_a_cut_join_the_other_side():
     assert r.is_empty and abs(t.area - 6000) < 1
     r, t = bt.merge_slivers(b(0, 0, 100, 50), b(0, 50, 4, 54))      # a 16 m2 tree crumb on a rice edge
     assert t.is_empty and abs(r.area - 5016) < 1
+
+
+def test_despike_removes_a_tail_and_keeps_the_corners():
+    from shapely.geometry import Polygon
+    tail = Polygon([(0, 0), (40, 0), (40, 40), (20, 40), (20, 70), (20, 40), (0, 40)])   # a zero-width line on top
+    d = bt.despike(tail)
+    assert d.bounds == (0, 0, 40, 40) and abs(d.area - 1600) < 1
