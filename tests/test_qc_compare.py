@@ -108,3 +108,7 @@ def test_latest_clear_date_is_the_newest_date_marked_clear(tmp_path):
     pd.DataFrame({"date": ["2026-09-03", "2026-09-13", "2026-09-18"], "clear_share": [0.0, 0.99, 0.2],
                   "delivered": [False, True, False]}).to_csv(d / "aoi5_s2_dates.csv", index=False)
     assert q.latest_clear_date(5, root=str(tmp_path)) == "2026-09-13"
+
+
+def test_three_way_too_young_rule_thresholds_are_in_order():
+    assert 0 < q.REMOVE_BELOW < q.CUT_FROM < 1 and q.MIN_CUT_PIXELS >= 1

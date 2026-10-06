@@ -35,10 +35,10 @@ OUT = "processed/_batch/s2_2026/qc"
 S2_DIR = "data/s2_dates_masks"
 
 
-def delivered_fields(aoi: int, root: str = DELIVERY):
+def delivered_fields(aoi: int, root: str = DELIVERY, name: str | None = None):
     import geopandas as gpd
 
-    return gpd.read_file(Path(root) / f"aoi{aoi}" / f"aoi{aoi}_fields.gpkg")
+    return gpd.read_file(Path(root) / f"aoi{aoi}" / (name or f"aoi{aoi}_fields.gpkg"))
 
 
 def diff(original, qc, min_change_acres: float = 0.01) -> pd.DataFrame:
@@ -103,12 +103,13 @@ def s2_bands(aoi: int, date: str, pids, s2_dir: str = S2_DIR) -> pd.DataFrame:
     return t.add_prefix("s2_")
 
 
-def rice_field_features(aoi: int, s2_date: str | None = None, root: str = DELIVERY) -> pd.DataFrame:
+def rice_field_features(aoi: int, s2_date: str | None = None, root: str = DELIVERY,
+                        name: str | None = None) -> pd.DataFrame:
     """Per delivered RICE field: the median of every rule feature and of one S2 date's bands over its pixels. The
     features are computed with the AOI's own rule set."""
     from . import curve_rules as cr
 
-    o = delivered_fields(aoi, root)
+    o = delivered_fields(aoi, root, name)
     rice = o[o["major_class"] == "rice"].reset_index(drop=True)
     px = _field_pixels(aoi, rice, root)
     with cr.rules_for(aoi):
@@ -144,7 +145,8 @@ def latest_clear_date(aoi: int, root: str = DELIVERY) -> str:
 
 
 def too_young_fields(aoi: int, days: int | None = TOO_YOUNG_DAYS, root: str = DELIVERY,
-                     radar_max: float | None = None, max_dry_share: float | None = None) -> pd.DataFrame:
+                     radar_max: float | None = None, max_dry_share: float | None = None,
+                     name: str | None = None) -> pd.DataFrame:
     """Per delivered rice field: ``too_young`` when most of its pixels show OPEN water (NDVI below 0) on their newest
     clear view, or showed it within ``days`` of the series end. The same rule as ``curve_rules.TOO_YOUNG_OPEN_WATER_DAYS``,
     judged per field (median of its pixels), as the reviewer judged it. Why (user, 6 Oct 2026): fields flooded in
@@ -157,7 +159,7 @@ def too_young_fields(aoi: int, days: int | None = TOO_YOUNG_DAYS, root: str = DE
     ``days=None``): the field goes only when fewer than this share of its clear pixels are NOT water on that date
     (user, 6 Oct: a field with even some dry / green pixels stays; 0.10 = at least 90 % of it under open water)."""
     date = latest_clear_date(aoi, root)
-    t = rice_field_features(aoi, date, root)
+    t = rice_field_features(aoi, date, root, name)
     if days is None and max_dry_share is not None:
         young = (1 - t["s2_water_share"]) < max_dry_share
     elif days is None:
@@ -493,11 +495,89 @@ def check_layer(gdf, touch_m: float = 0.01) -> dict:
             "overlapping_pairs": overlap, "touching_pairs": len(pairs)}
 
 
+#: Three-way too-young rule on the newest clear S2 date (user, 6 Oct 2026, aoi19 / aoi39): a rice field with fewer than
+#: REMOVE_BELOW of its clear pixels NOT open water is too young as a whole; with at least CUT_FROM not water, its water
+#: part is cut off as too young and the rest stays rice; in between it stays as it is. Water pieces smaller than
+#: MIN_CUT_PIXELS (10 m pixels) are not cut, so a few wet pixels do not punch holes into a field.
+REMOVE_BELOW = 0.05
+CUT_FROM = 0.25
+MIN_CUT_PIXELS = 3
+
+
+def cut_too_young(aoi: int, remove_below: float = REMOVE_BELOW, cut_from: float = CUT_FROM,
+                  min_cut_pixels: int = MIN_CUT_PIXELS, root: str = DELIVERY, name: str | None = None):
+    """The delivered field layer with the three-way rule applied (see :data:`REMOVE_BELOW`). Returns (layer, per-field
+    table). Too-young parts become ``major_class`` non-rice, ``sub_class`` "too young (not delivered)"; a cut field's
+    water part gets the id ``<field_id>_w``. Water = NDWI above 0 on a clear pixel (``clear`` >= 60) of the date."""
+    import geopandas as gpd
+    import rasterio
+    import shapely
+    from rasterio import features
+    from shapely.geometry import shape
+
+    from ..optical_export import band_index
+
+    date = latest_clear_date(aoi, root)
+    o = delivered_fields(aoi, root, name).reset_index(drop=True)
+    with rasterio.open(Path(root) / f"aoi{aoi}" / f"aoi{aoi}_class_raw.tif") as ds:
+        grid, transform = ds.shape, ds.transform
+    path = next(Path(S2_DIR, f"aoi{aoi}").glob(f"aoi{aoi}_*_S2_{date}.tif"))
+    with rasterio.open(path) as ds:
+        g3, b8, clear = (ds.read(band_index(ds, b)).astype("float32") for b in ("B3", "B8", "clear"))
+    ok = clear >= 60
+    water = ok & ((g3 - b8) / (g3 + b8) > 0)
+    lab = features.rasterize(((g, i + 1) for i, g in enumerate(o.geometry)), out_shape=grid, transform=transform,
+                             fill=0, dtype="int32")
+    n_ok = np.bincount(lab[ok], minlength=len(o) + 1)[1:]
+    n_wet = np.bincount(lab[water], minlength=len(o) + 1)[1:]
+    dry = np.where(n_ok > 0, 1 - n_wet / np.maximum(n_ok, 1), np.nan)
+    rice = (o["major_class"] == "rice").to_numpy()
+    action = np.where(~rice | np.isnan(dry), "kept", np.where(dry < remove_below, "too young",
+                      np.where((dry >= cut_from) & (n_wet >= min_cut_pixels), "cut", "kept")))
+    rows = []
+    for i, r in o.iterrows():
+        if action[i] == "too young":
+            rows.append({**r.to_dict(), "major_class": "non-rice", "sub_class": TOO_YOUNG_SUB})
+            continue
+        if action[i] != "cut":
+            rows.append(r.to_dict())
+            continue
+        mask = (lab == i + 1) & water
+        wet = [shape(geom) for geom, v in features.shapes(mask.astype("uint8"), mask=mask, transform=transform) if v]
+        wet = [w for w in wet if w.area >= min_cut_pixels * 100.0]
+        wet = shapely.union_all(wet).intersection(r.geometry) if wet else None
+        if wet is None or wet.is_empty:
+            action[i] = "kept"
+            rows.append(r.to_dict())
+            continue
+        rest = r.geometry.difference(wet)
+        rows.append({**r.to_dict(), "geometry": rest})
+        rows.append({**r.to_dict(), "field_id": f"{r.field_id}_w", "major_class": "non-rice", "sub_class": TOO_YOUNG_SUB,
+                     "geometry": wet})
+    out = gpd.GeoDataFrame(rows, geometry="geometry", crs=o.crs).explode(index_parts=False).reset_index(drop=True)
+    out = out[out.area >= CRUMB_M2].reset_index(drop=True)          # every piece its own polygon, no crumbs
+    k = out.groupby("field_id").cumcount()
+    out["field_id"] = [f if j == 0 else f"{f}_{j + 1}" for f, j in zip(out["field_id"], k)]
+    out["acres"] = (out.area / ACRE_M2).round(3)
+    t = pd.DataFrame({"field_id": o["field_id"], "major_class": o["major_class"], "sub_class": o["sub_class"],
+                      "acres": o["acres"], "clear_pixels": n_ok,
+                      "water_pixels": n_wet, "dry_share": dry, "action": action})
+    t.attrs["s2_date"] = date
+    return out, t
+
+
+TOO_YOUNG_SUB = "too young (not delivered)"
+
+
+def o_ac(t) -> float:
+    return float(t.loc[t["major_class"] == "rice", "acres"].sum())
+
+
 def main(argv=None) -> int:
     import geopandas as gpd
 
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["diff", "pattern", "trial", "choose", "without", "clean", "too-young"])
+    p.add_argument("step", choices=["diff", "pattern", "trial", "choose", "without", "clean", "too-young", "cut-too-young"])
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--qc", help="the QC'd field file (GeoPackage with the delivered field_id); not for too-young")
     p.add_argument("--s2-date", help="pattern: one clear Sentinel-2 date, YYYY-MM-DD")
@@ -512,6 +592,21 @@ def main(argv=None) -> int:
     qc = gpd.read_file(a.qc) if a.qc else None
     out = Path(OUT) / f"aoi{a.aoi}"
     out.mkdir(parents=True, exist_ok=True)
+    if a.step == "cut-too-young":
+        lay, t = cut_too_young(a.aoi)
+        gp = out / f"aoi{a.aoi}_fields_too_young_cut.gpkg"
+        lay.to_file(gp, driver="GPKG")
+        from . import rice_map_delivery as rd
+        rd.fields_qml(gp)
+        t.to_csv(out / f"aoi{a.aoi}_too_young_cut_fields.csv", index=False)
+        r = t[t["action"] != "kept"]
+        print(f"newest clear S2 date: {t.attrs['s2_date']}")
+        print(t[t["major_class"] == "rice"].groupby("action")["acres"].agg(["count", "sum"]).round(1).to_string())
+        yac = lay.loc[lay["sub_class"] == TOO_YOUNG_SUB, "acres"].sum()
+        print(f"rice before {o_ac(t):.1f} ac -> after {lay.loc[lay['major_class'] == 'rice', 'acres'].sum():.1f} ac; "
+              f"too young {yac:.1f} ac")
+        print(f"layer: {gp.resolve()}")
+        return 0
     if a.step == "too-young":
         kept, t = remove_too_young(a.aoi, None if a.clear_date_only else a.days, radar_max=a.radar_max,
                                    max_dry_share=a.max_dry_share)
