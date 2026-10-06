@@ -501,10 +501,28 @@ def autofinish(order, poll: float = 60.0, jobs: int = 3, sleep=None) -> None:
     pool.shutdown()
 
 
+def pending_review(order) -> pd.DataFrame:
+    """AOIs whose sheets are out but whose sampled fields do not all have a verdict yet, with the groups.txt lines that
+    still hold fields without one. Why (6 Oct): READY notices can be missed (a watcher expired); this lists the work
+    from the files themselves."""
+    from . import field_review as fr
+
+    rows = []
+    for a in order:
+        if not _done(a, "sheets") or _done(a, "finish"):
+            continue
+        d = fr.review_dir(a)
+        lines = [l.split() for l in (d / "groups.txt").read_text().splitlines() if l.strip()]
+        todo = [i + 1 for i, ids in enumerate(lines) if any(not (d / "verdicts" / f"{x}.json").exists() for x in ids)]
+        if todo:
+            rows.append({"aoi": a, "lines": todo})
+    return pd.DataFrame(rows, columns=["aoi", "lines"])
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["order", "imagery", "flow", "autofinish", "resample", "prepare", "choose", "finish",
-                                    "status"])
+    p.add_argument("step", choices=["order", "imagery", "flow", "autofinish", "resample", "pending", "prepare", "choose",
+                                    "finish", "status"])
     p.add_argument("--aois", type=int, nargs="*", default=[])
     p.add_argument("--start", type=int, nargs="*", default=[])
     p.add_argument("--logs", default="logs/aoi_batch")
@@ -520,6 +538,9 @@ def main(argv=None) -> int:
     elif a.step == "flow":
         order = a.aois or [x for x in neighbour_order(a.start or [72]) if x not in set(a.skip)]
         flow(order, logs, window=a.window, prep_jobs=a.jobs)
+    elif a.step == "pending":
+        order = a.aois or [x for x in neighbour_order(a.start or [72]) if x not in set(a.skip)]
+        print(pending_review(order).to_json(orient="records"))
     elif a.step == "resample":
         order = a.aois or [x for x in neighbour_order(a.start or [72]) if x not in set(a.skip)]
         print(resample(order))

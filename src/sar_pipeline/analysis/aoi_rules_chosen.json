@@ -24,6 +24,31 @@
    "YOUNG_WHILE_RADAR_LOW": true
   }
  },
+ "106": {
+  "at": "2026-10-06 06:37:31",
+  "fields": 200,
+  "from": "aoi39+any_water_transplanted",
+  "merged_pct": 84.0,
+  "right_pct": 70.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "ANY_WATER_TRANSPLANTED": true,
+   "GROWN_NOT_IF_WATER_VIEW": true,
+   "HARVEST_NOT_IF_RADAR_RISING": true,
+   "POND_IF_DRY_WATER": true,
+   "RADAR_DECIDES_WITHOUT_OPTICAL": true,
+   "SECOND_CROP_BY_RADAR": true,
+   "SIEVE_ACRES": 0.15,
+   "WATER_BOTTOM": 0.3,
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_SPELL_MIN_PASSES": 1,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_MIN_RISE_DAYS": 40,
+   "YOUNG_NEEDS_WATER": true,
+   "YOUNG_RADAR_LOW_NEEDS_RISE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
  "108": {
   "at": "2026-10-06 05:53:20",
   "fields": 200,
@@ -74,6 +99,49 @@
    "YOUNG_WHILE_RADAR_LOW": true
   }
  },
+ "116": {
+  "at": "2026-10-06 06:21:59",
+  "fields": 318,
+  "from": "aoi160+long_flood",
+  "merged_pct": 72.0,
+  "right_pct": 59.4,
+  "rules": {
+   "ANY_WATER_TRANSPLANTED": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "SIEVE_ACRES": 0.15
+  }
+ },
+ "119": {
+  "at": "2026-10-06 06:32:07",
+  "fields": 400,
+  "from": "aoi39+long_flood",
+  "merged_pct": 42.8,
+  "right_pct": 41.2,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "GROWN_NOT_IF_WATER_VIEW": true,
+   "HARVEST_NOT_IF_RADAR_RISING": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "POND_IF_DRY_WATER": true,
+   "RADAR_DECIDES_WITHOUT_OPTICAL": true,
+   "SECOND_CROP_BY_RADAR": true,
+   "SIEVE_ACRES": 0.15,
+   "WATER_BOTTOM": 0.3,
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_SPELL_MIN_PASSES": 1,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_MIN_RISE_DAYS": 40,
+   "YOUNG_NEEDS_WATER": true,
+   "YOUNG_RADAR_LOW_NEEDS_RISE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
  "122": {
   "at": "2026-10-06 05:51:42",
   "fields": 200,
@@ -83,6 +151,113 @@
   "rules": {
    "ANY_WATER_TRANSPLANTED": true,
    "SIEVE_ACRES": 0.15
+  }
+ },
+ "123": {
+  "at": "2026-10-06 06:20:06",
+  "fields": 237,
+  "from": "aoi83+sowing_from_radar",
+  "merged_pct": 59.9,
+  "right_pct": 57.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "NEVER_EMPTY_OTHER_VEG": 0.35,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
+   "TREE_LOW_BEFORE": "2026-07-01",
+   "TREE_NEEDS_NO_WATER": true,
+   "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "126": {
+  "at": "2026-10-06 06:42:06",
+  "fields": 221,
+  "from": "aoi39+long_flood",
+  "merged_pct": 74.7,
+  "right_pct": 49.8,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "GROWN_NOT_IF_WATER_VIEW": true,
+   "HARVEST_NOT_IF_RADAR_RISING": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "POND_IF_DRY_WATER": true,
+   "RADAR_DECIDES_WITHOUT_OPTICAL": true,
+   "SECOND_CROP_BY_RADAR": true,
+   "SIEVE_ACRES": 0.15,
+   "WATER_BOTTOM": 0.3,
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_SPELL_MIN_PASSES": 1,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_MIN_RISE_DAYS": 40,
+   "YOUNG_NEEDS_WATER": true,
+   "YOUNG_RADAR_LOW_NEEDS_RISE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "130": {
+  "at": "2026-10-06 06:43:24",
+  "fields": 200,
+  "from": "aoi39+any_water_transplanted",
+  "merged_pct": 90.5,
+  "right_pct": 81.5,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "ANY_WATER_TRANSPLANTED": true,
+   "GROWN_NOT_IF_WATER_VIEW": true,
+   "HARVEST_NOT_IF_RADAR_RISING": true,
+   "POND_IF_DRY_WATER": true,
+   "RADAR_DECIDES_WITHOUT_OPTICAL": true,
+   "SECOND_CROP_BY_RADAR": true,
+   "SIEVE_ACRES": 0.15,
+   "WATER_BOTTOM": 0.3,
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_SPELL_MIN_PASSES": 1,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_MIN_RISE_DAYS": 40,
+   "YOUNG_NEEDS_WATER": true,
+   "YOUNG_RADAR_LOW_NEEDS_RISE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "147": {
+  "at": "2026-10-06 06:41:35",
+  "fields": 200,
+  "from": "aoi118+any_water_transplanted",
+  "merged_pct": 56.0,
+  "right_pct": 47.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": false,
+   "TREE_NEEDS_NO_WATER": true,
+   "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
   }
  },
  "149": {
@@ -112,6 +287,85 @@
    "WATER_SPELL_DAYS": 30,
    "YOUNG_AFTER_LAST_WATER": true,
    "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "151": {
+  "at": "2026-10-06 06:26:04",
+  "fields": 200,
+  "from": "aoi125+long_flood",
+  "merged_pct": 73.0,
+  "right_pct": 67.5,
+  "rules": {
+   "ANY_WATER_TRANSPLANTED": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "SIEVE_ACRES": 0.15,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "152": {
+  "at": "2026-10-06 06:32:57",
+  "fields": 200,
+  "from": "aoi125+long_flood",
+  "merged_pct": 66.0,
+  "right_pct": 62.5,
+  "rules": {
+   "ANY_WATER_TRANSPLANTED": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "SIEVE_ACRES": 0.15,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "153": {
+  "at": "2026-10-06 06:30:24",
+  "fields": 200,
+  "from": "aoi13",
+  "merged_pct": 86.5,
+  "right_pct": 76.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
+   "TREE_NEEDS_NO_WATER": true,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "154": {
+  "at": "2026-10-06 06:27:03",
+  "fields": 200,
+  "from": "aoi39",
+  "merged_pct": 91.5,
+  "right_pct": 83.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "GROWN_NOT_IF_WATER_VIEW": true,
+   "HARVEST_NOT_IF_RADAR_RISING": true,
+   "POND_IF_DRY_WATER": true,
+   "RADAR_DECIDES_WITHOUT_OPTICAL": true,
+   "SECOND_CROP_BY_RADAR": true,
+   "SIEVE_ACRES": 0.15,
+   "WATER_BOTTOM": 0.3,
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_SPELL_MIN_PASSES": 1,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_MIN_RISE_DAYS": 40,
+   "YOUNG_NEEDS_WATER": true,
+   "YOUNG_RADAR_LOW_NEEDS_RISE": true,
    "YOUNG_WHILE_RADAR_LOW": true
   }
  },
@@ -163,6 +417,40 @@
    "YOUNG_WHILE_RADAR_LOW": true
   }
  },
+ "2": {
+  "at": "2026-10-06 06:18:21",
+  "fields": 200,
+  "from": "aoi160",
+  "merged_pct": 62.0,
+  "right_pct": 57.0,
+  "rules": {
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15
+  }
+ },
+ "24": {
+  "at": "2026-10-06 06:21:55",
+  "fields": 181,
+  "from": "aoi118+sowing_from_radar",
+  "merged_pct": 94.5,
+  "right_pct": 94.5,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
+   "TREE_NEEDS_NO_WATER": true,
+   "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
  "25": {
   "at": "2026-10-06 06:07:33",
   "fields": 200,
@@ -185,6 +473,70 @@
    "YOUNG_MIN_RISE_DAYS": 40,
    "YOUNG_NEEDS_WATER": true,
    "YOUNG_RADAR_LOW_NEEDS_RISE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "26": {
+  "at": "2026-10-06 06:30:18",
+  "fields": 27,
+  "from": "aoi160",
+  "merged_pct": 92.6,
+  "right_pct": 92.6,
+  "rules": {
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15
+  }
+ },
+ "27": {
+  "at": "2026-10-06 06:22:27",
+  "fields": 200,
+  "from": "aoi13",
+  "merged_pct": 98.0,
+  "right_pct": 95.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
+   "TREE_NEEDS_NO_WATER": true,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "37": {
+  "at": "2026-10-06 06:20:07",
+  "fields": 200,
+  "from": "aoi83+sowing_from_radar",
+  "merged_pct": 55.5,
+  "right_pct": 53.5,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "NEVER_EMPTY_OTHER_VEG": 0.35,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
+   "TREE_LOW_BEFORE": "2026-07-01",
+   "TREE_NEEDS_NO_WATER": true,
+   "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
    "YOUNG_WHILE_RADAR_LOW": true
   }
  },
@@ -211,26 +563,63 @@
    "YOUNG_WHILE_RADAR_LOW": true
   }
  },
+ "40": {
+  "at": "2026-10-06 06:25:25",
+  "fields": 200,
+  "from": "aoi28",
+  "merged_pct": 88.0,
+  "right_pct": 61.5,
+  "rules": {
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15,
+   "YOUNG_NEEDS_AGE": true
+  }
+ },
+ "56": {
+  "at": "2026-10-06 06:28:42",
+  "fields": 200,
+  "from": "aoi118+sowing_from_radar",
+  "merged_pct": 70.5,
+  "right_pct": 62.5,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
+   "TREE_NEEDS_NO_WATER": true,
+   "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
  "64": {
-  "at": "2026-10-06 05:41:36",
-  "fields": 21,
-  "from": "aoi20",
-  "merged_pct": 42.9,
-  "right_pct": 42.9,
+  "at": "2026-10-06 06:19:28",
+  "fields": 82,
+  "from": "aoi20+sowing_from_radar",
+  "merged_pct": 42.7,
+  "right_pct": 36.6,
   "rules": {
    "AGE_FROM_LOW_VIEW": true,
    "AGE_LOW_SHARE": 0.05,
    "LAST_CROP_ONLY": true,
    "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
    "YOUNG_NEEDS_AGE": true
   }
  },
  "65": {
-  "at": "2026-10-06 05:41:32",
-  "fields": 12,
+  "at": "2026-10-06 06:21:28",
+  "fields": 61,
   "from": "aoi83",
-  "merged_pct": 50.0,
-  "right_pct": 41.7,
+  "merged_pct": 50.8,
+  "right_pct": 36.1,
   "rules": {
    "AGE_FROM_WATER": true,
    "AGE_LOW_SHARE": 0.05,
@@ -368,6 +757,29 @@
    "YOUNG_WHILE_RADAR_LOW": true
   }
  },
+ "73": {
+  "at": "2026-10-06 06:30:46",
+  "fields": 200,
+  "from": "aoi118+sowing_from_radar",
+  "merged_pct": 61.0,
+  "right_pct": 48.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
+   "TREE_NEEDS_NO_WATER": true,
+   "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
  "74": {
   "at": "2026-10-06 05:42:07",
   "fields": 200,
@@ -414,6 +826,17 @@
    "YOUNG_NEEDS_WATER": true,
    "YOUNG_RADAR_LOW_NEEDS_RISE": true,
    "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "76": {
+  "at": "2026-10-06 06:25:11",
+  "fields": 200,
+  "from": "aoi160",
+  "merged_pct": 76.0,
+  "right_pct": 74.5,
+  "rules": {
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15
   }
  },
  "77": {
@@ -535,6 +958,55 @@
    "YOUNG_MIN_RISE_DAYS": 40,
    "YOUNG_NEEDS_WATER": true,
    "YOUNG_RADAR_LOW_NEEDS_RISE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "82": {
+  "at": "2026-10-06 06:21:54",
+  "fields": 200,
+  "from": "aoi72+any_water_transplanted",
+  "merged_pct": 70.5,
+  "right_pct": 66.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15,
+   "WATER_BOTTOM": 0.3,
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "95": {
+  "at": "2026-10-06 06:34:19",
+  "fields": 200,
+  "from": "aoi83+sowing_from_radar",
+  "merged_pct": 72.0,
+  "right_pct": 65.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "NEVER_EMPTY_OTHER_VEG": 0.35,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
+   "TREE_LOW_BEFORE": "2026-07-01",
+   "TREE_NEEDS_NO_WATER": true,
+   "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
    "YOUNG_WHILE_RADAR_LOW": true
   }
  }

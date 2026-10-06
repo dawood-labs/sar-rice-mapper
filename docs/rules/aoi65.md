@@ -30,6 +30,8 @@ Written by `sar_pipeline.analysis.rule_records`; the switches are in `curve_rule
 
 
 
+
+
 ### 2026-10-06 05:41:00 - rule set chosen
 
 `aoi83` (switches below)
@@ -55,5 +57,33 @@ Why: best of 15 sets / switches on 12 fields judged by reviewers
 | aoi20 | 0.0 | 33.3 |
 
 ### 2026-10-06 05:41:00 - locked and delivered
+
+<bucket>/rice_map_2026-10-05/aoi65/ (16 S2 dates >= 80 % clear)
+
+### 2026-10-06 06:21:00 - rule set chosen
+
+`aoi83` (switches below)
+
+Why: best of 15 sets / switches on 61 fields judged by reviewers
+
+| rule set | fields right % | standing/young merged % |
+|---|---|---|
+| aoi83+young_while_radar_low | 36.1 | 50.8 |
+| aoi83+long_flood | 36.1 | 50.8 |
+| aoi83+sowing_from_radar | 36.1 | 50.8 |
+| aoi83+any_water_transplanted | 36.1 | 50.8 |
+| aoi83 | 36.1 | 50.8 |
+| aoi28 | 34.4 | 49.2 |
+| aoi160 | 34.4 | 49.2 |
+| aoi125 | 34.4 | 49.2 |
+| aoi13 | 34.4 | 49.2 |
+| aoi20 | 32.8 | 45.9 |
+| aoi72 | 32.8 | 47.5 |
+| aoi116 | 32.8 | 47.5 |
+| aoi118 | 32.8 | 47.5 |
+| aoi39 | 21.3 | 49.2 |
+| aoi33 | 21.3 | 37.7 |
+
+### 2026-10-06 06:21:00 - locked and delivered
 
 <bucket>/rice_map_2026-10-05/aoi65/ (16 S2 dates >= 80 % clear)
