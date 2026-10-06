@@ -200,3 +200,67 @@ def test_new_passes_are_appended_and_old_rows_never_change(tmp_path, monkeypatch
     assert list(new["date"].unique()) == ["2026-09-25"] and not new["bad"].any()
     assert len(allr) == 4 and not allr[allr["date"] == "2026-09-13"]["bad"].any()   # old verdict kept
     assert (tmp_path / "bad_passes_all_prev.csv").exists()
+
+
+def test_two_aois_adding_passes_at_once_both_keep_their_rows(tmp_path, monkeypatch):
+    """6 Oct: the batch prepares three AOIs at once; two writers reading the same old list lost one AOI's rows."""
+    import threading
+    import time
+
+    from sar_pipeline.analysis import final_audit as fa
+
+    pd.DataFrame([dict(aoi="aoi1", track="T1", pol="VV", date="2026-09-13", stable_pixels=500, stable_jump_db=0.2,
+                       bad=False, reason="")]).to_csv(tmp_path / "bad_passes_all.csv", index=False)
+    real_screen = fa.screen_passes
+
+    def slow_screen(t):                          # widen the read-to-write gap, as a busy pod does
+        time.sleep(0.3)
+        return real_screen(t)
+
+    monkeypatch.setattr(fa, "screen_passes", slow_screen)
+    monkeypatch.setattr(fa, "bad_passes", lambda a, run_id=None: pd.DataFrame(
+        [dict(aoi=f"aoi{a}", track="T1", pol="VV", date="2026-10-04", stable_pixels=500, stable_jump_db=0.1,
+              bad=False)]))
+    th = [threading.Thread(target=fa.add_new_passes, args=([a], "v003"), kwargs={"audit_dir": tmp_path})
+          for a in (5, 6)]
+    [t.start() for t in th]
+    [t.join() for t in th]
+    allr = pd.read_csv(tmp_path / "bad_passes_all.csv")
+    assert set(allr["aoi"]) == {"aoi1", "aoi5", "aoi6"}
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_an_aoi_with_no_passes_adds_nothing(tmp_path, monkeypatch):
+    from sar_pipeline.analysis import final_audit as fa
+
+    pd.DataFrame([dict(aoi="aoi1", track="T1", pol="VV", date="2026-09-13", stable_pixels=500, stable_jump_db=0.2,
+                       bad=False, reason="")]).to_csv(tmp_path / "bad_passes_all.csv", index=False)
+    monkeypatch.setattr(fa, "bad_passes", lambda a, run_id=None: pd.DataFrame(
+        columns=["aoi", "track", "pol", "date", "stable_pixels", "stable_jump_db", "bad"]))
+    assert fa.add_new_passes([5], "v003", audit_dir=tmp_path).empty
+    assert len(pd.read_csv(tmp_path / "bad_passes_all.csv")) == 1
+
+
+def test_a_cache_built_with_no_drops_is_found_only_where_the_track_has_artefacts(tmp_path, monkeypatch):
+    import numpy as np
+    import rasterio
+
+    from sar_pipeline.analysis import final_audit as fa
+    from sar_pipeline.analysis import sar_curve as sc
+
+    stack = tmp_path / "run" / "stack" / "track_T1"
+    stack.mkdir(parents=True)
+    for pol in sc.POLS:                          # a 2-pass stack; GDAL reads the GeoTIFF whatever the extension
+        with rasterio.open(stack / f"stack_{pol}.vrt", "w", driver="GTiff", width=2, height=2, count=2,
+                           dtype="float32") as ds:
+            ds.write(np.zeros((2, 2, 2), "float32"))
+            ds.descriptions = ("x_20260611", "x_20260623")
+    (stack / "cache").mkdir()
+    loc = {"aoi": "aoi9", "run": str(tmp_path / "run"), "cfg": {"s1": {"tracks": [{"track_id": "T1"}]}}}
+    monkeypatch.setattr(fa.pr, "locate", lambda a, pid, season_key=None: loc)
+    monkeypatch.setitem(sc._BAD_CACHE, "table", pd.DataFrame(
+        [dict(aoi="aoi9", track="T1", pol="VH", date="2026-06-11", bad=True)]))
+    for pol in sc.POLS:                          # both pols cached as if the list had read empty
+        np.save(sc._cache_file(stack, pol, 5, True, []), np.zeros(1))
+    r = fa.caches_without_drops([9])
+    assert list(r["pol"]) == ["VH"]              # VV has nothing to drop, so its empty-list cache is harmless

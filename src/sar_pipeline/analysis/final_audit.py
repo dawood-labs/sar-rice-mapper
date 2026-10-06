@@ -18,6 +18,10 @@ AOIs:
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -121,13 +125,17 @@ def main(argv=None) -> int:
     import argparse
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.analysis.final_audit")
-    p.add_argument("step", choices=["acquisition", "bad-passes", "screen", "missed-rice", "new-passes"])
+    p.add_argument("step", choices=["acquisition", "bad-passes", "screen", "missed-rice", "new-passes", "check-caches"])
     p.add_argument("--ids", nargs="*", type=int, default=[])
     p.add_argument("--run", help="new-passes: the newer radar run whose new passes are judged and appended")
     args = p.parse_args(argv)
     if args.step == "new-passes":
         t = add_new_passes(args.ids, args.run)
         print(t.to_string(index=False) if len(t) else "no new passes")
+        return 0
+    if args.step == "check-caches":
+        t = caches_without_drops(args.ids)
+        print(t.to_string(index=False) if len(t) else f"{len(args.ids)} AOIs: no radar cache was built without the artefact drops")
         return 0
     if args.step == "screen":
         t = screen_all()
@@ -243,6 +251,30 @@ def screen_passes(table: pd.DataFrame, limit: float = BAD_PASS_DB, one_pol_db: f
     return t
 
 
+
+@contextlib.contextmanager
+def _table_lock(out: Path):
+    """One writer at a time for the artefact list. Why (6 Oct): the batch prepares three AOIs at once, and two
+    ``add_new_passes`` reading the same old list and writing it back lost the rows of one of them."""
+    with open(out.with_suffix(".lock"), "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _write_table(t: pd.DataFrame, out: Path) -> None:
+    """Keep the old list as ``*_prev.csv`` and swap the new one in whole. Why (6 Oct): moving the old file away and then
+    writing the new one left a moment with no file or a half-written file, and a reader at that moment crashed
+    (EmptyDataError) or, worse, went on without dropping the artefact passes."""
+    if out.exists():
+        shutil.copy2(out, out.with_name(out.stem + "_prev.csv"))
+    tmp = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+    t.to_csv(tmp, index=False)
+    os.replace(tmp, out)
+
+
 def screen_all(audit_dir=f"{SRC}/report/final_audit", out_name: str = "bad_passes_all.csv") -> pd.DataFrame:
     """Concatenate every ``aoi<N>_bad_passes.csv``, screen, write ``bad_passes_all.csv`` (the file
     ``sar_curve.read_track`` reads); the previous table is kept as ``bad_passes_all_prev.csv``."""
@@ -250,9 +282,8 @@ def screen_all(audit_dir=f"{SRC}/report/final_audit", out_name: str = "bad_passe
     parts = [pd.read_csv(p) for p in sorted(audit.glob("aoi*_bad_passes.csv")) if p.stat().st_size > 1]
     t = screen_passes(pd.concat(parts, ignore_index=True))
     out = audit / out_name
-    if out.exists():
-        out.replace(audit / out_name.replace(".csv", "_prev.csv"))
-    t.to_csv(out, index=False)
+    with _table_lock(out):
+        _write_table(t, out)
     return t
 
 
@@ -268,21 +299,53 @@ def add_new_passes(aoi_ids, run_id: str, audit_dir=f"{SRC}/report/final_audit",
     rows; the previous list is kept as ``<out_name>_prev``."""
     audit = Path(audit_dir)
     out = audit / out_name
-    old = pd.read_csv(out)
-    old_keys = set(zip(old["aoi"], old["track"], old["pol"], pd.to_datetime(old["date"]).dt.strftime("%Y-%m-%d")))
-    parts = []
+    judged = []                                   # the slow part (reading the stacks) runs outside the lock
     for a in aoi_ids:
         t = bad_passes(int(a), run_id=run_id)
         t["date"] = pd.to_datetime(t["date"]).dt.strftime("%Y-%m-%d")
-        keep = [(r.aoi, r.track, r.pol, r.date) not in old_keys for r in t.itertuples()]
-        parts.append(t[keep])
-    new = pd.concat(parts, ignore_index=True)
-    if new.empty:
-        return new
-    new = screen_passes(new)
-    out.replace(audit / out_name.replace(".csv", "_prev.csv"))
-    pd.concat([old, new[old.columns]], ignore_index=True).to_csv(out, index=False)
+        judged.append(t)
+    with _table_lock(out):                        # read, add and write back as one step
+        old = pd.read_csv(out)
+        old_keys = set(zip(old["aoi"], old["track"], old["pol"], pd.to_datetime(old["date"]).dt.strftime("%Y-%m-%d")))
+        new = pd.concat([t.loc[np.array([(r.aoi, r.track, r.pol, r.date) not in old_keys for r in t.itertuples()], bool)]
+                         for t in judged],
+                        ignore_index=True)
+        if new.empty:
+            return new
+        new = screen_passes(new)
+        _write_table(pd.concat([old, new[old.columns]], ignore_index=True), out)
     return new
+
+
+def caches_without_drops(aoi_ids, window: int = 5, season_key: str = "monsoon2026") -> pd.DataFrame:
+    """Radar caches that were built while the artefact list read as EMPTY, for tracks that do have artefact passes.
+
+    Why (6 Oct): until the list was written in one swap, a process reading it mid-write saw no file or an empty file and
+    went on WITHOUT dropping the artefact passes (the warning is silenced by ``-W ignore`` in the batch). The cache file
+    name holds the list of dropped passes (``sar_curve._cache_file``), so a cache named for "none dropped" on a track
+    that has artefact passes shows that such a process ran on this AOI. Rows: aoi, track, pol, cache file, its time."""
+    import rasterio
+
+    from . import sar_curve as sc
+
+    rows = []
+    for a in aoi_ids:
+        loc = pr.locate(int(a), 0, season_key=season_key)
+        for track in [t["track_id"] for t in loc["cfg"]["s1"]["tracks"]]:
+            stack = Path(loc["run"]) / "stack" / f"track_{track}"
+            for pol in sc.POLS:
+                vrt = stack / f"stack_{pol}.vrt"
+                if not vrt.exists():
+                    continue
+                with rasterio.open(vrt) as ds:
+                    dates = [pd.Timestamp(d.rsplit("_", 1)[1]).date() for d in ds.descriptions]
+                if not sc.bad_pass_indices(loc, track, pol, dates):
+                    continue                      # nothing to drop on this track: an empty read changed nothing
+                f = sc._cache_file(stack, pol, window, True, [])
+                if f.exists():
+                    rows.append({"aoi": int(a), "track": track, "pol": pol, "cache": str(f),
+                                 "written": pd.Timestamp(f.stat().st_mtime, unit="s").floor("s")})
+    return pd.DataFrame(rows, columns=["aoi", "track", "pol", "cache", "written"])
 
 
 def stable_pixels(aoi_id: int, min_px: int = 20) -> np.ndarray:

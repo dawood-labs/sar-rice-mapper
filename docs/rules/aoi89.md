@@ -10,6 +10,7 @@ Written by `sar_pipeline.analysis.rule_records`; the switches are in `curve_rule
 ## History
 
 
+
 ### 2026-10-06 07:16:00 - rule set chosen
 
 `aoi160` (switches below)
@@ -33,3 +34,7 @@ Why: best of 15 sets / switches on 200 fields judged by reviewers
 | aoi20 | 34.0 | 48.5 |
 | aoi83 | 33.0 | 40.5 |
 | aoi33 | 22.5 | 40.5 |
+
+### 2026-10-06 07:17:00 - locked and delivered
+
+<bucket>/rice_map_2026-10-05/aoi89/ (28 S2 dates >= 80 % clear)

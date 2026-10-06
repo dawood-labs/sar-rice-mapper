@@ -99,6 +99,19 @@
    "YOUNG_WHILE_RADAR_LOW": true
   }
  },
+ "113": {
+  "at": "2026-10-06 07:21:08",
+  "fields": 200,
+  "from": "aoi28",
+  "merged_pct": 54.0,
+  "right_pct": 44.0,
+  "rules": {
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15,
+   "YOUNG_NEEDS_AGE": true
+  }
+ },
  "116": {
   "at": "2026-10-06 06:21:59",
   "fields": 318,
@@ -285,6 +298,36 @@
    "LONG_WATER_LEVEL": 0.4,
    "LONG_WATER_WET_VIEW": true,
    "SIEVE_ACRES": 0.15,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "146": {
+  "at": "2026-10-06 07:22:32",
+  "fields": 200,
+  "from": "aoi83",
+  "merged_pct": 31.5,
+  "right_pct": 30.5,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "NEVER_EMPTY_OTHER_VEG": 0.35,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": false,
+   "TREE_LOW_BEFORE": "2026-07-01",
+   "TREE_NEEDS_NO_WATER": true,
+   "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
    "YOUNG_WHILE_RADAR_LOW": true
   }
  },
@@ -702,6 +745,29 @@
    "SOWING_FROM_RADAR": true,
    "TREE_NEEDS_NO_WATER": true,
    "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
+  }
+ },
+ "58": {
+  "at": "2026-10-06 07:17:52",
+  "fields": 200,
+  "from": "aoi13",
+  "merged_pct": 89.5,
+  "right_pct": 69.0,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": true,
+   "TREE_NEEDS_NO_WATER": true,
    "WATER_BOTTOM": 0.3,
    "WATER_END_TRACKS": "earliest_unless_wet_view",
    "WATER_FALL_LOOKBACK_DAYS": 45,
@@ -1264,6 +1330,36 @@
   "rules": {
    "ANY_WATER_TRANSPLANTED": true,
    "SIEVE_ACRES": 0.15
+  }
+ },
+ "94": {
+  "at": "2026-10-06 07:24:31",
+  "fields": 200,
+  "from": "aoi83",
+  "merged_pct": 71.5,
+  "right_pct": 50.5,
+  "rules": {
+   "AGE_FROM_WATER": true,
+   "AGE_LOW_SHARE": 0.05,
+   "ANY_WATER_TRANSPLANTED": true,
+   "LONG_WATER_DAYS": 30,
+   "LONG_WATER_GREEN_LEAD": 0,
+   "LONG_WATER_LEVEL": 0.4,
+   "LONG_WATER_WET_VIEW": true,
+   "NEVER_EMPTY_OTHER_VEG": 0.35,
+   "SIEVE_ACRES": 0.15,
+   "SOWING_FROM_RADAR": false,
+   "TREE_LOW_BEFORE": "2026-07-01",
+   "TREE_NEEDS_NO_WATER": true,
+   "VV_JUMP": Infinity,
+   "WATER_BOTTOM": 0.3,
+   "WATER_END_TRACKS": "earliest_unless_wet_view",
+   "WATER_FALL_LOOKBACK_DAYS": 45,
+   "WATER_FALL_POLS": "VV",
+   "WATER_SPELL_DAYS": 30,
+   "YOUNG_AFTER_LAST_WATER": true,
+   "YOUNG_NEEDS_AGE": true,
+   "YOUNG_WHILE_RADAR_LOW": true
   }
  },
  "95": {
