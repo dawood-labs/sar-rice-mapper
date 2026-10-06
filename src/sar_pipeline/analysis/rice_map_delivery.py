@@ -28,6 +28,7 @@ from __future__ import annotations
 import multiprocessing as mp
 
 import argparse
+import base64
 import hashlib
 import json
 import shutil
@@ -210,6 +211,11 @@ def step_too_young(aoi: int, max_dry_share: float = TOO_YOUNG_MAX_DRY_SHARE, dry
 
     d = out_dir(aoi, **kw)
     gp, new = d / f"aoi{aoi}_fields.gpkg", d / f"aoi{aoi}_fields_too_young.gpkg"
+    js = d / f"aoi{aoi}_too_young.json"
+    if not dry_run and new.exists() and js.exists():
+        # written already: keep the very same bytes (a GeoPackage rewritten gets a new md5, and the copy in the bucket
+        # must stay what was uploaded)
+        return {k: v for k, v in json.loads(js.read_text()).items() if k not in ("rule", "file", "sha256")}
     t = qcm.too_young_fields(aoi, days=None, root=str(d.parent), max_dry_share=max_dry_share, name=gp.name)
     young = t[t["too_young"]]
     res = {"s2_date": t.attrs["s2_date"], "max_dry_share": max_dry_share, "rice_fields": int(len(t)),
@@ -334,6 +340,54 @@ def run_one(aoi: int, fresh: str = FRESH, key: str | None = None, redo=()) -> di
     return st
 
 
+def remote_files(aoi: int, key: str | None = None) -> dict:
+    """{file name: md5} of the AOI's delivery folder in the bucket (top level only); read only. Used to prove that an
+    upload left the delivered files as they were."""
+    bucket, base = _bucket(aoi, key)
+    dest = f"{base}/{DELIVERY}/aoi{aoi}/"
+    return {b.name[len(dest):]: b.md5_hash for b in bucket.list_blobs(prefix=dest) if "/" not in b.name[len(dest):]}
+
+
+def too_young_apply(aoi: int, key: str | None = None) -> dict:
+    """For an AOI that is delivered already: writes the too-young files (:func:`step_too_young`) and uploads ONLY them
+    (``aoi<N>_fields_too_young.gpkg`` / ``.qml`` and ``aoi<N>_too_young.json``). Refuses to replace a file of the same
+    name in the bucket, and checks afterwards that every file that was there before still has its md5 (user, 7 Oct
+    2026: a new file, the old one never overwritten)."""
+    d = out_dir(aoi)
+    res = step_too_young(aoi)
+    names = [f"aoi{aoi}_fields_too_young.gpkg", f"aoi{aoi}_fields_too_young.qml", f"aoi{aoi}_too_young.json"]
+    bucket, base = _bucket(aoi, key)
+    dest = f"{base}/{DELIVERY}/aoi{aoi}"
+    before = remote_files(aoi, key)
+    local = {n: base64.b64encode(hashlib.md5((d / n).read_bytes()).digest()).decode() for n in names}
+    clash = [n for n in names if n in before and before[n] != local[n]]
+    if clash:                                     # a different file of that name is there: never replace it
+        raise RuntimeError(f"aoi{aoi}: a different file is already in the bucket, not replaced: {clash}")
+    for n in names:
+        if n not in before:                       # the same file there already: nothing to do
+            bucket.blob(f"{dest}/{n}").upload_from_filename(str(d / n), timeout=600)
+    after = remote_files(aoi, key)
+    changed = [n for n, m in before.items() if after.get(n) != m]
+    if changed:
+        raise RuntimeError(f"aoi{aoi}: files changed in the bucket: {changed}")
+    bad = [n for n in names if after.get(n) != local[n]]
+    if bad:
+        raise RuntimeError(f"aoi{aoi}: upload md5 mismatch: {bad}")
+    st = load_status(aoi)
+    st["too_young"] = {"done": True, "result": res, "at": str(pd.Timestamp.now().floor("s"))}
+    st["too_young_upload"] = {"done": True, "result": {"uploaded": names, "old_files_unchanged": len(before)},
+                              "at": str(pd.Timestamp.now().floor("s"))}
+    _save_status(aoi, st)
+    return {"aoi": aoi, **res, "uploaded": len(names), "old_files_checked": len(before)}
+
+
+def _apply_one(aoi: int) -> dict:
+    try:
+        return too_young_apply(aoi)
+    except Exception as e:                            # one AOI's failure must not stop the others
+        return {"aoi": aoi, "error": f"{type(e).__name__}: {e}"}
+
+
 def _dry_one(aoi: int) -> dict:
     try:
         return {"aoi": aoi, **step_too_young(aoi, dry_run=True)}
@@ -343,13 +397,27 @@ def _dry_one(aoi: int) -> dict:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["run", "status", "too-young-dry-run"])
+    p.add_argument("step", choices=["run", "status", "too-young-dry-run", "too-young-apply", "remote"])
     p.add_argument("--aois", type=int, nargs="*", default=[], help="default: every AOI with a delivery folder")
     p.add_argument("--jobs", type=int, default=0, help="AOIs at once (0 = from the CPUs and RAM)")
     p.add_argument("--key", default=None)
     p.add_argument("--redo", nargs="*", default=[], choices=list(STEPS), help="run these steps again")
     a = p.parse_args(argv)
     a.aois = a.aois or sorted(int(x.name[3:]) for x in Path(OUT_ROOT, DELIVERY).glob("aoi*") if (x / "MANIFEST.json").exists())
+    if a.step == "too-young-apply":
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(a.jobs or 6) as ex:
+            t = pd.DataFrame(list(ex.map(_apply_one, a.aois)))
+        out = Path(OUT_ROOT) / DELIVERY / "too_young_applied.csv"
+        t.to_csv(out, index=False)
+        print(t.drop(columns=["by_class"], errors="ignore").to_string(index=False))
+        print(f"-> {out}")
+        return 0
+    if a.step == "remote":
+        for aoi in a.aois:
+            print(json.dumps({"aoi": aoi, "files": remote_files(aoi, a.key)}))
+        return 0
     if a.step == "too-young-dry-run":
         from concurrent.futures import ProcessPoolExecutor
 

@@ -45,13 +45,15 @@ def test_step_writes_a_new_file_and_never_touches_the_delivered_one(tmp_path, mo
     _fake(monkeypatch, calls)
     before, man_before = (d / "aoi9991_fields.gpkg").read_bytes(), (d / "MANIFEST.json").read_bytes()
     rd.step_too_young(9991, root=str(tmp_path))
-    rd.step_too_young(9991, root=str(tmp_path))                 # running again gives the same file
+    first = (d / "aoi9991_fields_too_young.gpkg").read_bytes()
+    rd.step_too_young(9991, root=str(tmp_path))                 # running again keeps the same bytes
+    assert (d / "aoi9991_fields_too_young.gpkg").read_bytes() == first
     assert (d / "aoi9991_fields.gpkg").read_bytes() == before     # delivered layer unchanged (user, 7 Oct)
     assert (d / "MANIFEST.json").read_bytes() == man_before
     f = gpd.read_file(d / "aoi9991_fields_too_young.gpkg").set_index("field_id")
     assert f.loc["a", "major_class"] == "non-rice" and f.loc["a", "sub_class"] == rd.TOO_YOUNG_CLASS
     assert f.loc["b", "major_class"] == "rice" and len(f) == 3
-    assert calls == ["aoi9991_fields.gpkg", "aoi9991_fields.gpkg"]
+    assert calls == ["aoi9991_fields.gpkg"]                          # the second run keeps the written file
     j = json.loads((d / "aoi9991_too_young.json").read_text())
     assert j["too_young_fields"] == 1 and j["file"] == "aoi9991_fields_too_young.gpkg"
 
