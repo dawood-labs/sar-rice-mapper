@@ -497,16 +497,51 @@ def merge_sets(src: str = SRC, old_folder: str = "../data/aoi/dedup") -> tuple[P
     return old_out, new_out
 
 
+def nearest_loss(src: str = SRC) -> pd.DataFrame:
+    """For each blind-reviewed AOI: fields right (vs the reviewers) with the rule set it chose, and with the rule set
+    of its nearest first-set AOI, which is what it would have got without a review.
+
+    Why (user, 7 Oct 2026): the far AOIs take a rule set without a review of their own; this measures what that costs
+    where both answers are known. Writes ``<src>/nearest_loss.csv``."""
+    import json
+
+    from . import aoi_batch as ab
+    from . import field_review as fr
+
+    chosen = json.loads(ab.CHOSEN.read_text())
+    near = pd.read_csv(Path(src) / "nearest_rules.csv").set_index("aoi")
+    rows = []
+    for a in REVIEW:
+        if str(a) not in chosen:
+            continue
+        n = int(near.at[a, "nearest"])
+        own = {k: v for k, v in chosen[str(a)]["rules"].items() if k != "SIEVE_ACRES"}
+        nb = {k: v for k, v in chosen[str(n)]["rules"].items() if k != "SIEVE_ACRES"}
+        _, r = fr.try_variants(a, {}, sets={"own": own, "nearest": nb})
+        rows.append({"aoi": delivery_name(a), "fields": chosen[str(a)]["fields"], "own_rule": chosen[str(a)]["from"],
+                     "own_right_pct": r["own"], "nearest_aoi": f"aoi{n}", "km": near.at[a, "km"],
+                     "nearest_rule": near.at[a, "rule"], "nearest_right_pct": r["nearest"],
+                     "loss_pts": round(r["own"] - r["nearest"], 1)})
+    t = pd.DataFrame(rows)
+    t.to_csv(Path(src) / "nearest_loss.csv", index=False)
+    return t
+
+
 def all_ids(src: str = SRC) -> list[int]:
     return [int(a) for a in pd.read_csv(Path(src) / "aoi_index.csv")["aoi"]]
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["build", "finish-loop", "s2-export", "merge-sets"])
+    p.add_argument("step", choices=["build", "finish-loop", "s2-export", "merge-sets", "nearest-loss"])
     a = p.parse_args(argv)
     if a.step == "s2-export":
         s2_export(all_ids())
+        return 0
+    if a.step == "nearest-loss":
+        t = nearest_loss()
+        print(t.to_string(index=False))
+        print(f"mean loss {t['loss_pts'].mean():.1f} points of fields right")
         return 0
     if a.step == "merge-sets":
         for f in merge_sets():
