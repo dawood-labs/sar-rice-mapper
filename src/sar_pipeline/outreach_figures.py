@@ -513,6 +513,157 @@ def patterns_flow(out: str | None = None):
     return fig
 
 
+# ---------------------------------------------------------------------------- the 132-area delivery milestone
+# Why (7 Oct 2026): every area delivered is a milestone the user shares; these two figures are built from the
+# delivery's own summary files, so every number on them is the delivered number. Nothing that can locate a place.
+import glob  # noqa: E402
+import json  # noqa: E402
+
+DELIVERY = "processed/_batch/s2_2026/rice_map_2026-10-05"
+CHOSEN = "src/sar_pipeline/analysis/aoi_rules_chosen.json"
+REVIEW = "processed/_batch/s2_2026/rice_fresh"
+OUT = "processed/outreach"
+
+#: The delivery-milestone figures (7 Oct 2026) use the dataviz default palette, kept apart from the older figures' constants.
+D_SURFACE, D_INK, D_INK2, D_GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
+D_BLUE, D_ORANGE, D_GREEN = "#2a78d6", "#eb6834", "#1baf7a"
+
+
+def _candidate_sets() -> int:
+    from .analysis import aoi_batch as ab
+
+    return len(ab.CANDIDATE_SETS)
+
+
+def delivery_numbers(delivery: str = DELIVERY, chosen: str = CHOSEN, review: str = REVIEW) -> dict:
+    """The headline numbers of the delivery, read from its own summary files."""
+    ty = [json.loads(Path(p).read_text()) for p in glob.glob(f"{delivery}/aoi*/aoi*_too_young.json")]
+    tc = [json.loads(Path(p).read_text()) for p in glob.glob(f"{delivery}/aoi*/aoi*_trees_cut.json")]
+    agree = [v["right_pct"] for v in json.loads(Path(chosen).read_text()).values()]
+    return {"areas": len(glob.glob(f"{delivery}/aoi*/MANIFEST.json")),
+            "rice_fields": sum(j["rice_fields"] for j in tc),
+            "rice_acres_start": sum(j["rice_acres"] for j in ty),
+            "too_young_acres": sum(j["too_young_acres"] for j in ty),
+            "too_young_fields": sum(j["too_young_fields"] for j in ty),
+            "rice_acres_before_trees": sum(j["rice_acres_before"] for j in tc),
+            "rice_acres_final": sum(j["rice_acres_after"] for j in tc),
+            "fields_trimmed": sum(j["fields_cut"] for j in tc),
+            "slivers_removed": sum(j["slivers_dropped"] for j in tc),
+            "reviewed_fields": len(glob.glob(f"{review}/aoi*/field_review/verdicts/*.json")),
+            "candidate_sets": _candidate_sets(),
+            "agreement_pct": agree}
+
+
+def _d_style(ax):
+    ax.set_facecolor(D_SURFACE)
+    for s in ("top", "right", "left"):
+        ax.spines[s].set_visible(False)
+    ax.spines["bottom"].set_color(D_GRID)
+    ax.tick_params(colors=D_INK2, labelsize=12, length=0)
+    ax.grid(axis="y", color=D_GRID, lw=1)
+    ax.set_axisbelow(True)
+
+
+def delivery_results_figure(n: dict, path) -> Path:
+    """Image 1: four headline tiles, the acres from first map to delivered map, and the spread of how well the chosen
+    rule agreed with the blind review per area."""
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(16, 12), dpi=100, facecolor=D_SURFACE)
+    fig.text(0.05, 0.955, "Rice maps for 132 areas, field by field", fontsize=30, weight="bold", color=D_INK)
+    fig.text(0.05, 0.92, "Radar + optical satellite series, AI-delineated field boundaries, blind-reviewed sample fields",
+             fontsize=15, color=D_INK2)
+    tiles = [(f"{n['areas']}", "areas delivered"),
+             (f"{n['rice_fields'] / 1000:.0f}k", "rice fields labelled"),
+             (f"{n['rice_acres_final']:,.0f}", "acres of rice delivered"),
+             (f"{n['reviewed_fields'] / 1000:.1f}k", "sample fields blind-reviewed")]
+    for i, (big, small) in enumerate(tiles):
+        x = 0.05 + i * 0.235
+        fig.patches.append(plt.Rectangle((x, 0.73), 0.215, 0.15, transform=fig.transFigure, facecolor="white",
+                                         edgecolor=D_GRID, lw=1.2))
+        fig.text(x + 0.015, 0.80, big, fontsize=34, weight="bold", color=D_INK)
+        fig.text(x + 0.015, 0.755, small, fontsize=13, color=D_INK2)
+
+    ax1 = fig.add_axes([0.07, 0.10, 0.40, 0.52])
+    _d_style(ax1)
+    start, ty, mid, fin = (n["rice_acres_start"], n["too_young_acres"], n["rice_acres_before_trees"],
+                           n["rice_acres_final"])
+    steps = [("First map", start, 0, D_BLUE), ("Too young\nremoved", ty, mid, D_ORANGE),
+             ("Edge trees and\nroofs cut", mid - fin, fin, D_ORANGE), ("Delivered", fin, 0, D_GREEN)]
+    for i, (lab, h, base, c) in enumerate(steps):
+        ax1.bar(i, h, bottom=base, color=c, width=0.62, edgecolor=D_SURFACE, lw=2)
+        txt = f"{h:,.0f} ac" if i in (0, 3) else f"-{h:,.0f} ac"
+        ax1.text(i, base + h + 600, txt, ha="center", fontsize=13, color=D_INK, weight="bold")
+    ax1.set_xticks(range(4), [s[0] for s in steps], fontsize=12, color=D_INK2)
+    ax1.set_ylim(60000, start * 1.04)
+    ax1.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v / 1000:.0f}k"))
+    ax1.set_title("Rice acres, first map to delivery (axis starts at 60k)", loc="left", fontsize=15, color=D_INK, pad=14)
+
+    ax2 = fig.add_axes([0.57, 0.10, 0.38, 0.52])
+    _d_style(ax2)
+    a = np.asarray(n["agreement_pct"])
+    bins = np.arange(20, 101, 10)
+    cnt, _ = np.histogram(a, bins)
+    cols = [D_ORANGE if b < 50 else D_BLUE for b in bins[:-1]]
+    ax2.bar(bins[:-1] + 5, cnt, width=8.6, color=cols, edgecolor=D_SURFACE, lw=2)
+    for x, c in zip(bins[:-1] + 5, cnt):
+        if c:
+            ax2.text(x, c + 0.6, str(c), ha="center", fontsize=12, color=D_INK)
+    ax2.set_xticks(bins, [f"{b}%" for b in bins], fontsize=11)
+    ax2.set_ylim(0, cnt.max() * 1.45)                 # room above the bars for the two notes
+    ax2.set_title("Areas by agreement of the chosen rule with the blind review", loc="left", fontsize=15, color=D_INK,
+                  pad=14)
+    low = int((a < 50).sum())
+    ax2.text(0.98, 0.95, f"{low} areas below 50 %: flagged for a closer look", transform=ax2.transAxes, fontsize=12,
+             ha="right",
+             color=D_ORANGE, weight="bold")
+    ax2.text(0.98, 0.89, f"median {np.median(a):.0f} % (seven-class match, the strictest test)", ha="right",
+             transform=ax2.transAxes, fontsize=12, color=D_INK2)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, facecolor=D_SURFACE)
+    plt.close(fig)
+    return path
+
+
+def delivery_method_figure(n: dict, path) -> Path:
+    """Image 2: the method as a flow of numbered steps with their real facts."""
+    import matplotlib
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(16, 9), dpi=100, facecolor=D_SURFACE)
+    fig.text(0.04, 0.92, "From satellite series to clean field polygons", fontsize=28, weight="bold", color=D_INK)
+    steps = [("1  Inputs", ["Radar every 6-12 days", "Optical where clear", "AI field boundaries", "0.3 m basemap"]),
+             ("2  Rules per pixel", ["Water, growth, harvest", "Own-range signals", "No fixed dB cut-offs", f"{n.get('candidate_sets', 13)} candidate rule sets"]),
+             ("3  Blind review", [f"{n['reviewed_fields']:,} sample fields", "Curves + clear views", "No map shown", "Best rule set per area"]),
+             ("4  Field labels", [f"{n['rice_fields']:,} rice fields", "Majority per field", "Rice vs trees as one", "Small patches sieved"]),
+             ("5  Clean-up", [f"{n['too_young_fields']} too-young fields out", f"{n['fields_trimmed']:,} edge trims", "Straight cuts", f"{n['slivers_removed']:,} slivers removed"])]
+    w = 0.172
+    for i, (head, facts) in enumerate(steps):
+        x = 0.04 + i * (w + 0.018)
+        fig.patches.append(plt.Rectangle((x, 0.30), w, 0.52, transform=fig.transFigure, facecolor="white",
+                                         edgecolor=D_GRID, lw=1.2))
+        fig.patches.append(plt.Rectangle((x, 0.76), w, 0.06, transform=fig.transFigure, facecolor=D_BLUE, lw=0))
+        fig.text(x + 0.01, 0.778, head, fontsize=15, weight="bold", color="white")
+        for k, f in enumerate(facts):
+            fig.text(x + 0.012, 0.69 - k * 0.09, f, fontsize=13, color=D_INK)
+        if i < len(steps) - 1:
+            fig.text(x + w + 0.002, 0.55, "›", fontsize=26, color=D_INK2)
+    fig.patches.append(plt.Rectangle((0.04, 0.08), 0.92, 0.15, transform=fig.transFigure, facecolor="white",
+                                     edgecolor=D_GRID, lw=1.2))
+    fig.text(0.055, 0.185, "How it is checked", fontsize=15, weight="bold", color=D_GREEN)
+    fig.text(0.055, 0.135, "Every rule set scored on blind-reviewed fields  ·  tree cuts tested on a hand QC with half "
+             "the area held out", fontsize=12.5, color=D_INK2)
+    fig.text(0.055, 0.10, "No slivers or tails in the cleaned layers  ·  delivered files never overwritten, new "
+             "files added beside them", fontsize=12.5, color=D_INK2)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, facecolor=D_SURFACE)
+    plt.close(fig)
+    return path
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -521,7 +672,8 @@ def main(argv=None) -> int:
     matplotlib.use("Agg")
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.outreach_figures", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("figure", choices=["radar-story", "clouds", "infographic", "pipeline", "patterns", "patterns-flow"])
+    p.add_argument("figure", choices=["radar-story", "clouds", "infographic", "pipeline", "patterns", "patterns-flow",
+                                      "delivery-132"])
     p.add_argument("--clusters", default="processed/_batch/s2_2026/rice_fresh/plot_clusters",
                    help="patterns: the plot_clusters output folder")
     p.add_argument("--dates-csv", default="processed/_batch/s2_2026/report/mask_share_year/dates.csv",
@@ -530,8 +682,16 @@ def main(argv=None) -> int:
     p.add_argument("--phases", nargs="*", default=[], metavar="START,END,LABEL",
                    help="radar-story: shaded phases, e.g. 2026-04-01,2026-06-10,'Dry-season crop'")
     p.add_argument("--track", type=int, default=0)
-    p.add_argument("--out", required=True)
+    p.add_argument("--out", help="the image (for delivery-132: a folder for its two images)")
     args = p.parse_args(argv)
+    if args.figure == "delivery-132":
+        n = delivery_numbers()
+        d = Path(args.out or OUT)
+        print(delivery_results_figure(n, d / "delivery_132_results.png"))
+        print(delivery_method_figure(n, d / "delivery_132_method.png"))
+        return 0
+    if args.out is None:
+        p.error("--out is required")
     if args.figure == "patterns-flow":
         patterns_flow(args.out)
     elif args.figure == "patterns":

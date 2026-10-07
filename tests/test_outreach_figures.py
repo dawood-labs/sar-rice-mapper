@@ -82,3 +82,22 @@ def test_pattern_medians(tmp_path):
     pd.DataFrame({"group": [1, 1, 2]}).to_csv(tmp_path / "g.csv", index=False)
     m = of.pattern_medians(str(tmp_path / "c.parquet"), str(tmp_path / "g.csv"), (1, 2))
     assert np.allclose(m[1].values, [0.2, 0.3]) and np.allclose(m[2].values, [0.5, 0.6])
+
+
+def test_delivery_figures_render_from_summary_files(tmp_path):
+    import json
+
+    from sar_pipeline import outreach_figures as of
+
+    d = tmp_path / "delivery" / "aoi5"
+    d.mkdir(parents=True)
+    (d / "MANIFEST.json").write_text("{}")
+    (d / "aoi5_too_young.json").write_text(json.dumps({"rice_acres": 100.0, "too_young_acres": 2.0, "too_young_fields": 3}))
+    (d / "aoi5_trees_cut.json").write_text(json.dumps({"rice_fields": 40, "rice_acres_before": 98.0, "rice_acres_after": 95.0,
+                                                      "fields_cut": 4, "slivers_dropped": 2}))
+    chosen = tmp_path / "chosen.json"
+    chosen.write_text(json.dumps({"5": {"right_pct": 61.0}}))
+    n = of.delivery_numbers(str(tmp_path / "delivery"), str(chosen), str(tmp_path / "review"))
+    assert n["areas"] == 1 and n["rice_acres_final"] == 95.0 and n["too_young_fields"] == 3
+    assert of.delivery_results_figure(n, tmp_path / "r.png").stat().st_size > 10_000
+    assert of.delivery_method_figure(n, tmp_path / "m.png").stat().st_size > 10_000
