@@ -81,3 +81,28 @@ def test_second_set_aois_get_their_client_names_in_the_bucket():
     assert rd.bucket_name(1133) == "b2_aoi133"
     assert rd.bucket_name(1133, "aoi1133_fields_trees_cut.gpkg") == "b2_aoi133_fields_trees_cut.gpkg"
     assert rd.bucket_name(1133, "MANIFEST.json") == "MANIFEST.json"
+
+
+def test_client_file_renames_a_second_set_aoi_inside_its_files(tmp_path):
+    """b2 delivery copies carry the client's name inside; the first set's files are uploaded as they are."""
+    import json
+
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from sar_pipeline.analysis import rice_map_delivery as rd
+
+    g = tmp_path / "aoi1135_fields.gpkg"
+    gpd.GeoDataFrame({"field_id": ["aoi1135_p000000", "aoi11350_x"]}, geometry=[box(0, 0, 1, 1)] * 2,
+                     crs=32646).to_file(g, driver="GPKG")
+    j = tmp_path / "aoi1135_too_young.json"
+    j.write_text(json.dumps({"aoi": 1135, "file": "aoi1135_fields.gpkg", "sha256": "old"}))
+    cg = rd.client_file(1135, g)
+    assert cg.name == "b2_aoi135_fields.gpkg"
+    assert gpd.read_file(cg)["field_id"].tolist() == ["b2_aoi135_p000000", "aoi11350_x"]
+    cj = json.loads(rd.client_file(1135, j).read_text())
+    assert cj["aoi"] == "b2_aoi135" and cj["file"] == "b2_aoi135_fields.gpkg" and cj["sha256"] == rd._sha(cg)
+    first = tmp_path / "aoi19_fields.gpkg"
+    assert rd.client_file(19, first) == first
+    m = cg.stat().st_mtime_ns
+    assert rd.client_file(1135, g).stat().st_mtime_ns == m          # unchanged source: copy kept, md5 stable

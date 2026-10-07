@@ -269,6 +269,62 @@ def bucket_name(aoi: int, name: str | None = None) -> str:
     return d + name[len(f"aoi{aoi}"):] if name.startswith(f"aoi{aoi}_") or name.startswith(f"aoi{aoi}.") else name
 
 
+CLIENT_DIR = "client"      # inside an AOI's delivery folder: the renamed copies a second-set AOI is uploaded from
+
+
+def client_file(aoi: int, p: Path) -> Path:
+    """The file as the client receives it. For the first set that is ``p`` itself. For the second set it is a copy in
+    ``<folder>/client/`` named ``b2_aoi<N>...`` whose content names the AOI the same way: ``field_id`` and every other
+    text value ``aoi<1000+N>...`` in a GeoPackage, and every ``aoi<1000+N>`` in a json, csv or qml file (the MANIFEST's
+    ``aoi`` becomes ``b2_aoi<N>``; a ``sha256`` next to a ``file`` is recomputed for the renamed copy). Rasters are
+    copied as they are.
+
+    Why (user, 7 Oct 2026): the client sees ``b2_aoi135`` in the bucket, so ``aoi1135`` inside the files was confusing.
+    Local files keep the internal name, which the pipeline's own tools parse. A copy is rebuilt only when its source is
+    newer (text files are always rewritten, with the same bytes when nothing changed), so an unchanged file keeps its
+    md5 and is not uploaded again."""
+    import re
+
+    from .aoi_batch2 import delivery_name, is_batch2
+
+    if not is_batch2(aoi):
+        return p
+    out = p.parent / CLIENT_DIR / bucket_name(aoi, p.name)
+    text_file = p.suffix in (".json", ".csv", ".qml", ".txt")    # cheap, and a json holds another copy's sha256
+    if not text_file and out.exists() and out.stat().st_mtime >= p.stat().st_mtime:
+        return out
+    out.parent.mkdir(exist_ok=True)
+    pat, new = re.compile(rf"aoi{aoi}(?!\d)"), delivery_name(aoi)
+    import uuid
+
+    tmp = out.with_name(f".{uuid.uuid4().hex}_{out.name}")   # unique: two threads or processes may build one copy
+    if p.suffix == ".gpkg":
+        import geopandas as gpd
+
+        f = gpd.read_file(p)
+        for c in f.columns:
+            if c != "geometry" and (f[c].dtype == object or pd.api.types.is_string_dtype(f[c])):
+                f[c] = f[c].map(lambda v: pat.sub(new, v) if isinstance(v, str) else v)
+        tmp.unlink(missing_ok=True)
+        f.to_file(tmp, driver="GPKG", layer=out.stem)
+    elif text_file:
+        text = pat.sub(new, p.read_text())
+        if p.suffix == ".json":
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                if obj.get("aoi") == aoi:
+                    obj["aoi"] = new
+                if "file" in obj and "sha256" in obj:
+                    local_name = obj["file"].replace(new, f"aoi{aoi}", 1)
+                    obj["sha256"] = _sha(client_file(aoi, p.parent / local_name))
+            text = json.dumps(obj, indent=1, default=str)
+        tmp.write_text(text)
+    else:
+        shutil.copy2(p, tmp)
+    tmp.replace(out)
+    return out
+
+
 def _bucket(aoi: int, key: str | None):
     import yaml
 
@@ -294,6 +350,7 @@ def step_upload(aoi: int, key: str | None = None, workers: int = 16, **kw) -> di
 
     def up(p):
         name = f"{dest}/{bucket_name(aoi, p.name)}"
+        p = client_file(aoi, p)
         # same content = same md5 (6 Oct: a rebuilt raster often keeps its size, so a size check skipped new maps)
         import base64
 
@@ -393,14 +450,15 @@ def _upload_new_only(aoi: int, names: list[str], key: str | None = None) -> dict
     bucket, base = _bucket(aoi, key)
     dest = f"{base}/{DELIVERY}/{bucket_name(aoi)}"
     before = remote_files(aoi, key)
-    local = {n: base64.b64encode(hashlib.md5((d / n).read_bytes()).digest()).decode() for n in names}
+    src = {n: client_file(aoi, d / n) for n in names}
+    local = {n: base64.b64encode(hashlib.md5(src[n].read_bytes()).digest()).decode() for n in names}
     bn = {n: bucket_name(aoi, n) for n in names}
     clash = [n for n in names if bn[n] in before and before[bn[n]] != local[n]]
     if clash:
         raise RuntimeError(f"aoi{aoi}: a different file is already in the bucket, not replaced: {clash}")
     for n in names:
         if bn[n] not in before:
-            bucket.blob(f"{dest}/{bn[n]}").upload_from_filename(str(d / n), timeout=600)
+            bucket.blob(f"{dest}/{bn[n]}").upload_from_filename(str(src[n]), timeout=600)
     after = remote_files(aoi, key)
     changed = [n for n, m in before.items() if after.get(n) != m]
     if changed:
@@ -463,7 +521,8 @@ def _dry_one(aoi: int) -> dict:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["run", "status", "too-young-dry-run", "too-young-apply", "trees-cut-apply", "remote"])
+    p.add_argument("step", choices=["run", "status", "too-young-dry-run", "too-young-apply", "trees-cut-apply", "remote",
+                                      "client-names"])
     p.add_argument("--aois", type=int, nargs="*", default=[], help="default: every AOI with a delivery folder")
     p.add_argument("--jobs", type=int, default=0, help="AOIs at once (0 = from the CPUs and RAM)")
     p.add_argument("--key", default=None)
@@ -495,6 +554,14 @@ def main(argv=None) -> int:
         out = Path(OUT_ROOT) / DELIVERY / "trees_cut_applied.csv"
         pd.DataFrame(rows).to_csv(out, index=False)
         print(f"-> {out}")
+        return 0
+    if a.step == "client-names":
+        # second-set AOIs uploaded before client_file existed carry aoi<1000+N> inside their files; the upload
+        # replaces exactly those files with the renamed copies (user, 7 Oct 2026)
+        from .aoi_batch2 import is_batch2
+
+        for aoi in [x for x in a.aois if is_batch2(x) and load_status(x).get("upload", {}).get("done")]:
+            print(json.dumps({"aoi": aoi, **step_upload(aoi, a.key)}), flush=True)
         return 0
     if a.step == "remote":
         for aoi in a.aois:

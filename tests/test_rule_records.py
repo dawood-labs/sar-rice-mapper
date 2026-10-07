@@ -16,3 +16,11 @@ def test_record_never_writes_a_storage_path(tmp_path):
     rr.record(5, "delivered", "gs://some-bucket/some-project/rice_map_x/aoi5/ (3 dates)", when="t", root=tmp_path)
     t = (tmp_path / "aoi5.md").read_text()
     assert "gs://" not in t and "some-bucket" not in t and "rice_map_x/aoi5/" in t
+
+
+def test_scrub_hides_the_bucket_for_both_aoi_sets():
+    from sar_pipeline.analysis.rule_records import scrub
+
+    for folder in ("aoi19", "b2_aoi133"):
+        t = scrub(f"gs://some-bucket/Project_X/rice_map_2026-10-05/{folder}/ (14 S2 dates)")
+        assert t == f"<bucket>/rice_map_2026-10-05/{folder}/ (14 S2 dates)"

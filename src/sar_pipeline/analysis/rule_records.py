@@ -37,15 +37,30 @@ def _switches(aoi: int) -> str:
     return "\n".join(f"- `{k}` = `{v}`" for k, v in sorted(rules.items()))
 
 
+def scrub(text: str) -> str:
+    """The repo is public: a storage path names the bucket and the project, so only ``<bucket>/<folder>/<aoi>`` is
+    written (``aoi<N>`` of the first set, ``b2_aoi<N>`` of the second)."""
+    import re
+
+    return re.sub(r"gs://\S+?/([^/\s]+/(?:b2_)?aoi\d+/?)", r"<bucket>/\1", text)
+
+
+def scrub_all(root: Path = ROOT) -> list[Path]:
+    """Applies :func:`scrub` to every record already written; returns the files it changed."""
+    changed = []
+    for p in sorted(Path(root).glob("aoi*.md")):
+        t = p.read_text()
+        if scrub(t) != t:
+            p.write_text(scrub(t))
+            changed.append(p)
+    return changed
+
+
 def record(aoi: int, event: str, what: str, reason: str = "", scores: pd.DataFrame | None = None,
            when: str | None = None, root: Path = ROOT) -> Path:
     """Appends one dated entry (``event``: e.g. "rule sets compared", "chosen", "changed", "locked", "delivered") and
     rewrites the file's header with the AOI's switches as they are now."""
-    # the repo is public: a storage path names the bucket and the project, so it is never written here
-    import re
-
-    what = re.sub(r"gs://\S+?/([^/\s]+/aoi\d+/?)", r"<bucket>/\1", what)
-    reason = re.sub(r"gs://\S+?/([^/\s]+/aoi\d+/?)", r"<bucket>/\1", reason)
+    what, reason = scrub(what), scrub(reason)
     p = path(aoi, root)
     p.parent.mkdir(parents=True, exist_ok=True)
     body = p.read_text().split("## History", 1)[1] if p.exists() and "## History" in p.read_text() else "\n"
