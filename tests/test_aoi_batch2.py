@@ -18,3 +18,11 @@ def test_s2_export_starts_no_later_than_the_dry_season_the_rules_read():
     from sar_pipeline.analysis import curve_rules as cr
 
     assert b2.S2_START <= cr.DRY_SEASON_FROM and b2.S2_END > "2026-10-01"
+
+
+def test_every_skipped_aoi_has_a_reason():
+    """The merged file explains every dropped AOI, so no skip is silent."""
+    from sar_pipeline.analysis import aoi_batch2 as b2
+
+    assert set(b2.SKIP_REASONS) == set(b2.SKIP)
+    assert all(r for r in b2.SKIP_REASONS.values())

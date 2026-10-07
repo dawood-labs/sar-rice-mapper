@@ -22,6 +22,7 @@ reads), ``<SRC>/delineation_merged.gpkg`` (all fields with ``source_aoi``, as ``
 Run::
 
     python -m sar_pipeline.analysis.aoi_batch2 build
+    python -m sar_pipeline.analysis.aoi_batch2 merge-sets   # one GeoPackage per AOI set, for QGIS
     python -m sar_pipeline.prep batch-configs --template config/aoi19_monsoon2026.yaml \\
         --split-dir ../data/aoi_batch2_2026-09-29/split --season-key monsoon2026 --start 2026-03-15 --end 2026-10-05
 """
@@ -355,16 +356,72 @@ def s2_export(aois, logs: Path = Path("logs/batch2"), chunk: int = S2_CHUNK, que
             say(f"aoi{a}: S2 still incomplete after two rounds; see {logs / 's2_full_export.log'}")
 
 
+#: Why each skipped AOI is not mapped, written into the merged file so anyone opening it in QGIS sees the reason.
+SKIP_REASONS = {
+    165: "duplicate: same polygon as AOI 164",
+    169: "duplicate: same polygon as AOI 168",
+    185: "duplicate: same polygon as AOI 184",
+    220: "empty: no polygon area (and no delineation)",
+    222: "empty: polygon is only about 1.5 m2, not a real AOI",
+}
+
+
+def _multi(frame):
+    """Polygons as MultiPolygons, so one GeoPackage layer can hold both kinds."""
+    from shapely.geometry import MultiPolygon, Polygon
+
+    frame["geometry"] = [MultiPolygon([g]) if isinstance(g, Polygon) else g for g in frame.geometry]
+    return frame
+
+
+def merge_sets(src: str = SRC, old_folder: str = "../data/aoi/dedup") -> tuple[Path, Path]:
+    """Write each AOI set as one GeoPackage, for a quick look in QGIS (user, 7 Oct 2026).
+
+    Why: both sets arrive as one file per AOI, which is hard to view or check together.
+
+    * ``<old_folder>/../first_set_132_merged.gpkg``: the 132 unique first-set AOIs, all client attributes kept.
+    * ``<src>/aois_new_106_merged.gpkg``: all 106 new AOIs, none left out, with the client attributes plus
+      ``aoi_name`` (``b2_aoi<N>``), ``status`` (``mapped`` / ``dropped``), ``reason`` (why dropped, from
+      :data:`SKIP_REASONS`), ``acres`` (whole polygon) and ``acres_cut_as_delivered`` (the part inside a first-set
+      AOI, delivered already and cut out; from ``aoi_index.csv``).
+    """
+    import geopandas as gpd
+
+    old = [gpd.read_file(p).to_crs(4326) for p in sorted(glob.glob(f"{old_folder}/*/*.gpkg"))]
+    old = _multi(gpd.GeoDataFrame(pd.concat(old, ignore_index=True), crs=4326))
+    old["acres"] = (old.to_crs(METRIC).area / ACRE_M2).round(2)
+    old_out = Path(old_folder).parent / "first_set_132_merged.gpkg"
+    old.to_file(old_out, driver="GPKG")
+
+    cut = pd.read_csv(Path(src) / "aoi_index.csv").set_index("number")["acres_cut_as_delivered"]
+    frames = []
+    for p in sorted(glob.glob(f"{src}/aoi/*/A*_*.gpkg")):
+        n = _number(p)
+        g = gpd.read_file(p)
+        g = g.set_crs(4326) if g.crs is None else g.to_crs(4326)
+        frames.append(g.assign(number=n, aoi_name=f"b2_aoi{n}", status="dropped" if n in SKIP else "mapped",
+                               reason=SKIP_REASONS.get(n, ""), acres_cut_as_delivered=float(cut.get(n, 0.0))))
+    new = _multi(gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=4326))
+    new["acres"] = (new.to_crs(METRIC).area / ACRE_M2).round(2)
+    new_out = Path(src) / "aois_new_106_merged.gpkg"
+    new.to_file(new_out, driver="GPKG")
+    return old_out, new_out
+
+
 def all_ids(src: str = SRC) -> list[int]:
     return [int(a) for a in pd.read_csv(Path(src) / "aoi_index.csv")["aoi"]]
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["build", "finish-loop", "s2-export"])
+    p.add_argument("step", choices=["build", "finish-loop", "s2-export", "merge-sets"])
     a = p.parse_args(argv)
     if a.step == "s2-export":
         s2_export(all_ids())
+        return 0
+    if a.step == "merge-sets":
+        for f in merge_sets():
+            print(f"written {f}")
         return 0
     if a.step == "finish-loop":
         finish_loop(all_ids())
