@@ -287,9 +287,11 @@ def finish_loop(aois, poll: float = 60.0, jobs: int = 3) -> None:
         time.sleep(poll)
 
 
-#: The full Sentinel-2 per-date export the first set has (its local mirror starts in September 2025), so the second
-#: set's 5-day series covers the same span (7 Oct 2026). End exclusive: the last date is 1 Oct 2026.
-S2_START, S2_END = "2025-09-01", "2026-10-02"
+#: The Sentinel-2 per-date export of the second set: from the start of the dry season the rules read
+#: (``curve_rules.DRY_SEASON_FROM``, 1 March 2026; the user asked for April, March is the rules' own floor) to 1 Oct 2026
+#: (end exclusive). The 5-day series calendar still starts in September 2025; its windows before March stay empty and
+#: no rule reads them.
+S2_START, S2_END = "2026-03-01", "2026-10-02"
 S2_CHUNK = 15          # AOIs per export round (about 150 dates each)
 S2_QUEUE_MAX = 500     # the next round waits until fewer Earth Engine tasks than this are queued or running
 

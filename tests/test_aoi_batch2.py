@@ -12,3 +12,9 @@ def test_reviewed_aois_choose_their_own_rules():
 
 def test_skipped_aois_are_duplicates_or_empty():
     assert set(b2.SKIP) == {165, 169, 185, 220, 222}
+
+
+def test_s2_export_starts_no_later_than_the_dry_season_the_rules_read():
+    from sar_pipeline.analysis import curve_rules as cr
+
+    assert b2.S2_START <= cr.DRY_SEASON_FROM and b2.S2_END > "2026-10-01"
