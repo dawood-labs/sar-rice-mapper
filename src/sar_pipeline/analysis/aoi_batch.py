@@ -283,8 +283,11 @@ def flow(order, logs: Path, window: int = 30, prep_jobs: int = 0, poll: float = 
             if f.done():
                 del preps[a]
                 try:
-                    f.result()
-                    say(f"READY aoi{a}: sheets done, groups in {Path(FRESH) / f'aoi{a}' / 'field_review' / 'groups.txt'}")
+                    msg = f.result()
+                    if isinstance(msg, str) and "neighbour" in msg:
+                        say(f"INPUTS {msg}")
+                    else:
+                        say(f"READY aoi{a}: sheets done, groups in {Path(FRESH) / f'aoi{a}' / 'field_review' / 'groups.txt'}")
                 except Exception as e:
                     say(f"aoi{a}: prepare FAILED: {type(e).__name__}: {e}")
         if queue or inflight or downloads or preps:
@@ -318,6 +321,9 @@ def _prepare_one(aoi: int, logs: str) -> str:
                      ["sar_pipeline.analysis.sowing_fresh", "--aoi", str(aoi), "--series-root", sr]):
             _sh(PY + args, logs / f"aoi{aoi}_steps.log")
         _mark(aoi, "inputs", {"run": run, "series": sr})
+    from . import aoi_batch2 as b2
+    if b2.is_batch2(aoi) and aoi not in b2.REVIEW:    # rule set from a neighbour, no review (aoi_batch2.finish_loop)
+        return f"aoi{aoi}: inputs done; rule set by neighbour"
     if not _done(aoi, "trials"):
         t = cr.try_rules(aoi, sources=CANDIDATE_SETS)
         t.to_csv(logs / f"aoi{aoi}_trials.csv", index=False)

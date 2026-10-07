@@ -56,6 +56,10 @@ def load_fields(aoi_id: int, path=DELINEATION, refined_dir=REFINED):
     r = refined_path(aoi_id, refined_dir) if refined_dir else None
     if r is not None and r.exists():
         return pyogrio.read_dataframe(r)
+    if aoi_id >= 1000 and path == DELINEATION:        # the second AOI set has its own merged file (aoi_batch2)
+        from .aoi_batch2 import SRC
+
+        path = f"{SRC}/delineation_merged.gpkg"
     return pyogrio.read_dataframe(path, where=f"source_aoi LIKE '%\\_{aoi_id:03d}\\_delineation'")
 
 

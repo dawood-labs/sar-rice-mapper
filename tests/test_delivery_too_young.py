@@ -74,3 +74,10 @@ def test_a_failing_trees_cut_is_recorded_and_does_not_stop_the_delivery(tmp_path
     monkeypatch.setattr(bt, "cut_aoi", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("credentials expired")))
     r = rd.step_trees_cut(9991, root=str(tmp_path))
     assert "credentials expired" in r["error"] and not (d / "aoi9991_fields_trees_cut.gpkg").exists()
+
+
+def test_second_set_aois_get_their_client_names_in_the_bucket():
+    assert rd.bucket_name(19) == "aoi19" and rd.bucket_name(19, "aoi19_fields.gpkg") == "aoi19_fields.gpkg"
+    assert rd.bucket_name(1133) == "b2_aoi133"
+    assert rd.bucket_name(1133, "aoi1133_fields_trees_cut.gpkg") == "b2_aoi133_fields_trees_cut.gpkg"
+    assert rd.bucket_name(1133, "MANIFEST.json") == "MANIFEST.json"

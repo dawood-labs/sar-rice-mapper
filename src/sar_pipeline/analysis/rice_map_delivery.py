@@ -258,6 +258,17 @@ def _record_too_young(aoi: int, res: dict) -> None:
     p.write_text(text)
 
 
+def bucket_name(aoi: int, name: str | None = None) -> str:
+    """The AOI's folder in the bucket, or one file's name there: the second AOI set is delivered as ``b2_aoi<N>``
+    (user, 7 Oct 2026), while every local folder and file keeps the internal ``aoi<1000+N>`` name."""
+    from .aoi_batch2 import delivery_name
+
+    d = delivery_name(aoi)
+    if name is None:
+        return d
+    return d + name[len(f"aoi{aoi}"):] if name.startswith(f"aoi{aoi}_") or name.startswith(f"aoi{aoi}.") else name
+
+
 def _bucket(aoi: int, key: str | None):
     import yaml
 
@@ -277,12 +288,12 @@ def step_upload(aoi: int, key: str | None = None, workers: int = 16, **kw) -> di
     d = out_dir(aoi, **kw)
     man = json.loads((d / "MANIFEST.json").read_text())
     bucket, base = _bucket(aoi, key)
-    dest = f"{base}/{DELIVERY}/aoi{aoi}"
+    dest = f"{base}/{DELIVERY}/{bucket_name(aoi)}"
     have = {b.name: (b.size, b.md5_hash) for b in bucket.list_blobs(prefix=dest + "/")}
     local = [p for p in sorted(d.iterdir()) if p.is_file() and p.name != "status.json" and not p.name.endswith(".tmp")]
 
     def up(p):
-        name = f"{dest}/{p.name}"
+        name = f"{dest}/{bucket_name(aoi, p.name)}"
         # same content = same md5 (6 Oct: a rebuilt raster often keeps its size, so a size check skipped new maps)
         import base64
 
@@ -292,7 +303,7 @@ def step_upload(aoi: int, key: str | None = None, workers: int = 16, **kw) -> di
         return 1
 
     def cp(n):
-        name = f"{dest}/s2/{n}"
+        name = f"{dest}/s2/{bucket_name(aoi, n)}"
         if name in have:
             return 0
         src = bucket.blob(f"{base}/s2_dates_masks/aoi{aoi}/{n}")
@@ -304,7 +315,7 @@ def step_upload(aoi: int, key: str | None = None, workers: int = 16, **kw) -> di
         n_cp = sum(ex.map(cp, man["s2_dates"]))
     # S2 copies no longer in the manifest (the clear-share rule changed, user 5 Oct: 50 -> 80 %) are removed, only
     # inside this delivery's own s2/ folder
-    keep = {f"{dest}/s2/{n}" for n in man["s2_dates"]}
+    keep = {f"{dest}/s2/{bucket_name(aoi, n)}" for n in man["s2_dates"]}
     stale = [b for b in have if b.startswith(f"{dest}/s2/") and b not in keep]
     for b in stale:
         bucket.blob(b).delete()
@@ -350,7 +361,7 @@ def remote_files(aoi: int, key: str | None = None) -> dict:
     """{file name: md5} of the AOI's delivery folder in the bucket (top level only); read only. Used to prove that an
     upload left the delivered files as they were."""
     bucket, base = _bucket(aoi, key)
-    dest = f"{base}/{DELIVERY}/aoi{aoi}/"
+    dest = f"{base}/{DELIVERY}/{bucket_name(aoi)}/"
     return {b.name[len(dest):]: b.md5_hash for b in bucket.list_blobs(prefix=dest) if "/" not in b.name[len(dest):]}
 
 
@@ -380,20 +391,21 @@ def _upload_new_only(aoi: int, names: list[str], key: str | None = None) -> dict
     identical one, and checks afterwards that every file that was in the bucket before still has its md5."""
     d = out_dir(aoi)
     bucket, base = _bucket(aoi, key)
-    dest = f"{base}/{DELIVERY}/aoi{aoi}"
+    dest = f"{base}/{DELIVERY}/{bucket_name(aoi)}"
     before = remote_files(aoi, key)
     local = {n: base64.b64encode(hashlib.md5((d / n).read_bytes()).digest()).decode() for n in names}
-    clash = [n for n in names if n in before and before[n] != local[n]]
+    bn = {n: bucket_name(aoi, n) for n in names}
+    clash = [n for n in names if bn[n] in before and before[bn[n]] != local[n]]
     if clash:
         raise RuntimeError(f"aoi{aoi}: a different file is already in the bucket, not replaced: {clash}")
     for n in names:
-        if n not in before:
-            bucket.blob(f"{dest}/{n}").upload_from_filename(str(d / n), timeout=600)
+        if bn[n] not in before:
+            bucket.blob(f"{dest}/{bn[n]}").upload_from_filename(str(d / n), timeout=600)
     after = remote_files(aoi, key)
     changed = [n for n, m in before.items() if after.get(n) != m]
     if changed:
         raise RuntimeError(f"aoi{aoi}: files changed in the bucket: {changed}")
-    bad = [n for n in names if after.get(n) != local[n]]
+    bad = [n for n in names if after.get(bn[n]) != local[n]]
     if bad:
         raise RuntimeError(f"aoi{aoi}: upload md5 mismatch: {bad}")
     return {"uploaded": names, "old_files_unchanged": len(before)}
@@ -425,32 +437,14 @@ def too_young_apply(aoi: int, key: str | None = None) -> dict:
     (``aoi<N>_fields_too_young.gpkg`` / ``.qml`` and ``aoi<N>_too_young.json``). Refuses to replace a file of the same
     name in the bucket, and checks afterwards that every file that was there before still has its md5 (user, 7 Oct
     2026: a new file, the old one never overwritten)."""
-    d = out_dir(aoi)
     res = step_too_young(aoi)
     names = [f"aoi{aoi}_fields_too_young.gpkg", f"aoi{aoi}_fields_too_young.qml", f"aoi{aoi}_too_young.json"]
-    bucket, base = _bucket(aoi, key)
-    dest = f"{base}/{DELIVERY}/aoi{aoi}"
-    before = remote_files(aoi, key)
-    local = {n: base64.b64encode(hashlib.md5((d / n).read_bytes()).digest()).decode() for n in names}
-    clash = [n for n in names if n in before and before[n] != local[n]]
-    if clash:                                     # a different file of that name is there: never replace it
-        raise RuntimeError(f"aoi{aoi}: a different file is already in the bucket, not replaced: {clash}")
-    for n in names:
-        if n not in before:                       # the same file there already: nothing to do
-            bucket.blob(f"{dest}/{n}").upload_from_filename(str(d / n), timeout=600)
-    after = remote_files(aoi, key)
-    changed = [n for n, m in before.items() if after.get(n) != m]
-    if changed:
-        raise RuntimeError(f"aoi{aoi}: files changed in the bucket: {changed}")
-    bad = [n for n in names if after.get(n) != local[n]]
-    if bad:
-        raise RuntimeError(f"aoi{aoi}: upload md5 mismatch: {bad}")
+    up = _upload_new_only(aoi, names, key)
     st = load_status(aoi)
     st["too_young"] = {"done": True, "result": res, "at": str(pd.Timestamp.now().floor("s"))}
-    st["too_young_upload"] = {"done": True, "result": {"uploaded": names, "old_files_unchanged": len(before)},
-                              "at": str(pd.Timestamp.now().floor("s"))}
+    st["too_young_upload"] = {"done": True, "result": up, "at": str(pd.Timestamp.now().floor("s"))}
     _save_status(aoi, st)
-    return {"aoi": aoi, **res, "uploaded": len(names), "old_files_checked": len(before)}
+    return {"aoi": aoi, **res, "uploaded": len(names), "old_files_checked": up["old_files_unchanged"]}
 
 
 def _apply_one(aoi: int) -> dict:
