@@ -391,7 +391,20 @@ def s2_export(aois, logs: Path = Path("logs/batch2"), chunk: int = S2_CHUNK, que
         checked.clear()
         running = set(_open_by_aoi())
         started = [a for a in aois if a in running]
-        todo = [a for a in aois if not s2_ready(a) and a not in running]
+        todo = []
+        for a in aois:                                 # complete already (e.g. before a restart): ready at once
+            if s2_ready(a) or a in running:
+                continue
+            try:
+                complete = s2_missing(a) == 0
+            except Exception:
+                complete = False
+            if complete:
+                s2_marker(a).parent.mkdir(parents=True, exist_ok=True)
+                s2_marker(a).write_text(str(pd.Timestamp.now()))
+                say(f"S2 READY aoi{a}")
+            else:
+                todo.append(a)
         for i in range(0, len(todo), chunk):
             while sum(sweep(started).values()) >= queue_max:
                 time.sleep(poll)
