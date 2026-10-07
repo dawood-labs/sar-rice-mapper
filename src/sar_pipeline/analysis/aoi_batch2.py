@@ -527,16 +527,60 @@ def nearest_loss(src: str = SRC) -> pd.DataFrame:
     return t
 
 
+def weak_list(threshold: float = 50.0, src: str = SRC) -> pd.DataFrame:
+    """Every second-set AOI with the score its rule set earned against reviewers, and the weak ones flagged.
+
+    A reviewed AOI is scored on its own 200 fields; any other AOI has no review of its own, so it carries the score
+    of the AOI whose rule set it took (its nearest first-set AOI, or the nearest reviewed new AOI). An AOI is weak
+    when that score is below ``threshold`` % of fields right, as in the first set's list (user, 7 Oct 2026). A source
+    with hand-set rules has no score (``right_pct`` empty, never flagged). ``rice_acres`` is the rice of the
+    delivered too-young file. Writes ``<delivery>/b2_aois_scores.csv`` and ``b2_weak_aois_below_<N>pct.csv``."""
+    import json
+
+    import geopandas as gpd
+
+    from . import aoi_batch as ab
+    from . import rice_map_delivery as rd
+
+    chosen = json.loads(ab.CHOSEN.read_text())
+    rows = []
+    for a in all_ids(src):
+        s, why = rule_source(a, chosen)
+        sc = chosen.get(str(s), {})
+        f = rd.out_dir(a) / f"aoi{a}_fields_too_young.gpkg"
+        g = gpd.read_file(f) if f.exists() else None
+        rows.append({"aoi": delivery_name(a), "rule": chosen.get(str(a), {}).get("from"),
+                     "scored_on": delivery_name(s) if s is not None else None,
+                     "reviewed_here": a in REVIEW, "right_pct": sc.get("right_pct"),
+                     "merged_pct": sc.get("merged_pct"), "fields_reviewed": sc.get("fields"),
+                     "rice_acres": round(float(g.loc[g["major_class"] == "rice", "acres"].sum()), 1) if g is not None
+                     else None, "why": why})
+    t = pd.DataFrame(rows)
+    t["weak"] = t["right_pct"].notna() & (t["right_pct"] < threshold)
+    out = Path(rd.OUT_ROOT) / rd.DELIVERY
+    t.to_csv(out / "b2_aois_scores.csv", index=False)
+    t[t["weak"]].sort_values("right_pct").to_csv(out / f"b2_weak_aois_below_{int(threshold)}pct.csv", index=False)
+    return t
+
+
 def all_ids(src: str = SRC) -> list[int]:
     return [int(a) for a in pd.read_csv(Path(src) / "aoi_index.csv")["aoi"]]
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["build", "finish-loop", "s2-export", "merge-sets", "nearest-loss"])
+    p.add_argument("step", choices=["build", "finish-loop", "s2-export", "merge-sets", "nearest-loss", "weak-list"])
     a = p.parse_args(argv)
     if a.step == "s2-export":
         s2_export(all_ids())
+        return 0
+    if a.step == "weak-list":
+        t = weak_list()
+        w = t[t["weak"]]
+        print(w.groupby(["scored_on", "right_pct"]).agg(aois=("aoi", "count"), rice_acres=("rice_acres", "sum"))
+              .reset_index().sort_values("right_pct").to_string(index=False))
+        print(f"{len(w)} of {len(t)} AOIs weak (< 50 % of fields right), {w['rice_acres'].sum():,.1f} ac rice; "
+              f"{int(t['right_pct'].isna().sum())} take hand-set rules (no score)")
         return 0
     if a.step == "nearest-loss":
         t = nearest_loss()
