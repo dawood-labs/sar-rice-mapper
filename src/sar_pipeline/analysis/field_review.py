@@ -366,16 +366,47 @@ def compare_verdicts(aoi: int, a: str = "verdicts", b: str = "verdicts_sonnet", 
             "disagree": {f"{x} -> {y}": int(n) for (x, y), n in t[t["a"] != t["b"]].value_counts().head(10).items()}}
 
 
+def delivered_agreement(aoi: int, rules: dict | None = None, fresh: str = FRESH) -> dict:
+    """How the AOI's rule set does on its reviewed fields, two ways: the 7 classes, and only what the client receives
+    (rice = standing direct seeded, standing transplanted or young rice; anything else is not delivered).
+
+    Why (7 Oct 2026): an AOI was called weak when fewer than half its fields had the exact class right, but standing
+    vs young, or tree vs other vegetation, does not change the delivery. Before writing new rules for a weak AOI this
+    shows whether its delivery is actually wrong, and where: rice missed (reviewer rice, map not) or rice added
+    (map rice, reviewer not). ``rules`` defaults to the AOI's own switches."""
+    from . import curve_rules as cr
+
+    rice = {cr.MAP_CLASSES[c][0] for c in (1, 7, 3)}
+    sets = {"rules": dict(rules if rules is not None else cr.AOI_OVERRIDES.get(aoi, {}))}
+    o, r = try_variants(aoi, {}, sets=sets, fresh=fresh)
+    t, m = o["truth"].isin(rice), o["rules"].isin(rice)
+    conf = o[o["truth"] != o["rules"]].groupby(["truth", "rules"]).size().sort_values(ascending=False)
+    return {"aoi": aoi, "fields": int(len(o)), "class_right_pct": float(r["rules"]),
+            "delivered_right_pct": round(100 * float((t == m).mean()), 1),
+            "reviewer_rice": int(t.sum()), "rice_missed": int((t & ~m).sum()), "rice_added": int((~t & m).sum()),
+            "top_mixups": "; ".join(f"{a} -> {b}: {n}" for (a, b), n in conf.head(4).items())}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["pick", "render", "score", "compare"])
+    p.add_argument("step", choices=["pick", "render", "score", "compare", "delivered"])
     p.add_argument("--a", default="verdicts", help="compare: the first verdict folder")
     p.add_argument("--b", default="verdicts_sonnet", help="compare: the second verdict folder")
-    p.add_argument("--aoi", type=int, required=True)
+    p.add_argument("--aoi", type=int, default=None)
+    p.add_argument("--aois", type=int, nargs="*", default=[], help="delivered: AOIs to check")
+    p.add_argument("--out", default=None, help="delivered: CSV to write")
     p.add_argument("--n", type=int, default=40)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--parts", type=int, default=0, help="render: processes drawing in parallel (0 = from the CPUs)")
     a = p.parse_args(argv)
+    if a.step == "delivered":
+        rows = []
+        for x in a.aois or [a.aoi]:
+            rows.append(delivered_agreement(x))
+            print(json.dumps(rows[-1]), flush=True)
+        if a.out:
+            pd.DataFrame(rows).to_csv(a.out, index=False)
+        return 0
     if a.step == "compare":
         print(json.dumps(compare_verdicts(a.aoi, a.a, a.b), indent=1, default=str))
         return 0
@@ -402,3 +433,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
