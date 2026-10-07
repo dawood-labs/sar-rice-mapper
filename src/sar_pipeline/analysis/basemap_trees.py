@@ -105,21 +105,30 @@ def mosaic(aoi: int, root: str = BASEMAP, crs: str = "EPSG:32646", res: float = 
         raise FileNotFoundError(f"no tiles under {d}")
     vrt, out = d / "mosaic.vrt", d / f"aoi{aoi}_basemap_1m_utm.tif"
     env = {"GDAL_NUM_THREADS": "ALL_CPUS"}
-    subprocess.run(["gdalbuildvrt", "-q", "-overwrite", str(vrt), *tiles], check=True, env={**_env(), **env})
-    subprocess.run(["gdalwarp", "-q", "-overwrite", "-t_srs", crs, "-tr", str(res), str(res), "-r", "average", "-multi",
-                    "-wo", "NUM_THREADS=ALL_CPUS", "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES", str(vrt), str(out)],
-                   check=True, env={**_env(), **env})
+    _gdal(["gdalbuildvrt", "-q", "-overwrite", str(vrt), *tiles], {**_env(), **env})
+    _gdal(["gdalwarp", "-q", "-overwrite", "-t_srs", crs, "-tr", str(res), str(res), "-r", "average", "-multi",
+           "-wo", "NUM_THREADS=ALL_CPUS", "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES", str(vrt), str(out)],
+          {**_env(), **env})
     # the same extent at a third of the pixel (3 x 3 sub-pixels per 1 m cell, aligned): the fine texture of a crown
     import rasterio
 
     with rasterio.open(out) as ds:
         b, (h, w) = ds.bounds, ds.shape
     fine = d / f"aoi{aoi}_basemap_fine_utm.tif"
-    subprocess.run(["gdalwarp", "-q", "-overwrite", "-t_srs", crs, "-te", str(b.left), str(b.bottom), str(b.right),
-                    str(b.top), "-ts", str(3 * w), str(3 * h), "-r", "bilinear", "-multi", "-wo", "NUM_THREADS=ALL_CPUS",
-                    "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES", str(vrt), str(fine)], check=True,
-                   env={**_env(), **env})
+    _gdal(["gdalwarp", "-q", "-overwrite", "-t_srs", crs, "-te", str(b.left), str(b.bottom), str(b.right),
+           str(b.top), "-ts", str(3 * w), str(3 * h), "-r", "bilinear", "-multi", "-wo", "NUM_THREADS=ALL_CPUS",
+           "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES", str(vrt), str(fine)], {**_env(), **env})
     return out
+
+
+def _gdal(cmd: list[str], env: dict, tries: int = 2) -> None:
+    """Runs a GDAL command; on failure tries once more and then raises with GDAL's own message. Why (7 Oct 2026): 12 of
+    76 AOIs failed in gdalwarp while 4 AOIs ran at once, and the same command ran fine alone; ``-q`` hid the reason."""
+    for k in range(tries):
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        if r.returncode == 0:
+            return
+    raise RuntimeError(f"{cmd[0]} failed: {(r.stderr or r.stdout).strip()[-600:]}")
 
 
 def _env() -> dict:
@@ -380,6 +389,18 @@ def merge_slivers(rice, tree, min_m2: float = SLIVER_M2, width_m: float = SLIVER
     return to(side["rice"]), to(side["tree"])
 
 
+def _cut_one(field, cut):
+    """(rice, non-rice) of one field from its tree / roof blobs: straight cut, slivers moved, field-like pieces."""
+    import shapely
+
+    trees = straighten(shapely.union_all(cut)).intersection(field)
+    rest, trees = merge_slivers(field.difference(trees), trees)
+    rest, trees = field_pieces(field, rest)
+    if rest.is_empty:                                 # nothing field-like left of the rice: the whole field goes
+        trees = field
+    return rest, trees
+
+
 def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, edge_m: float = EDGE_M,
                    built=None, field_share: float = FIELD_NON_RICE_SHARE):
     """Rice polygons with the tree blobs that touch their edge cut off. Returns (layer, per-field table). A cut piece
@@ -419,11 +440,17 @@ def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, ed
             rows.append(r._asdict())
             stats.append({"field_id": r.field_id, "cut_m2": 0.0})
             continue
-        trees = straighten(shapely.union_all(cut)).intersection(r.geometry)
-        rest, trees = merge_slivers(r.geometry.difference(trees), trees)
-        rest, trees = field_pieces(r.geometry, rest)
-        if rest.is_empty:                             # nothing field-like left of the rice: the whole field goes
-            trees = r.geometry
+        try:
+            rest, trees = _cut_one(r.geometry, cut)
+        except shapely.errors.GEOSException:
+            # coordinates snapped to 1 cm and made valid: removes the near-duplicate vertices behind a TopologyException
+            snap = lambda g: shapely.make_valid(shapely.set_precision(g, 0.01))
+            try:
+                rest, trees = _cut_one(snap(r.geometry), [snap(c) for c in cut])
+            except shapely.errors.GEOSException:
+                rows.append(r._asdict())              # this field is left uncut and counted; the AOI goes on
+                stats.append({"field_id": r.field_id, "cut_m2": 0.0, "geometry_error": True})
+                continue
         if trees.is_empty:
             rows.append(r._asdict())
             stats.append({"field_id": r.field_id, "cut_m2": 0.0})
@@ -440,7 +467,7 @@ def cut_edge_trees(fields, tree, transform, min_tree_m2: float = MIN_TREE_M2, ed
     k = out.groupby("field_id").cumcount()
     out["field_id"] = [f if j == 0 else f"{f}_{j + 1}" for f, j in zip(out["field_id"], k)]
     out["acres"] = (out.area / ACRE_M2).round(3)
-    return out, pd.DataFrame(stats)
+    return out, pd.DataFrame(stats, columns=["field_id", "cut_m2", "geometry_error"])
 
 
 #: Spikes / tails (user, 6 Oct, QGIS: zero-width lines sticking out of a cut polygon): an opening by this many metres
@@ -623,6 +650,7 @@ def cut_aoi(aoi: int, fields_path, out_path, root: str = BASEMAP, keep_tiles: bo
             "tree_acres": round(float(layer.loc[layer["sub_class"] == "tree/orchard"].area.sum()) / ACRE_M2
                                 - float(fields.loc[fields["sub_class"] == "tree/orchard"].area.sum()) / ACRE_M2, 2),
             "slivers_dropped": r1["slivers_dropped"] + r2["slivers_dropped"], "slivers_left": r2["slivers_left"],
+            "fields_left_uncut_geometry_error": int(stats["geometry_error"].fillna(False).astype(bool).sum()),
             "roof_blobs": len(geoms), "model": model_path(root).name, "p_min": P_MIN, "min_cut_m2": CUT_MIN_M2}
 
 

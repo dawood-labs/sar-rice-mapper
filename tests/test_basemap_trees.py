@@ -62,3 +62,11 @@ def test_open_shape_drops_fingers_and_keeps_the_field():
     assert o.bounds == (0, 0, 40, 40) and abs(o.area - 1600) < 1
     rice, other = bt.field_pieces(b(0, 0, 40, 40), shapely.union_all([b(0, 0, 25, 40), b(25, 10, 40, 11)]))
     assert rice.bounds[2] == 25 and abs(other.area - 15 * 40) < 50     # the 1 m hook went to the other piece
+
+
+def test_no_cut_fields_still_give_a_table_with_columns():
+    tr = Affine(1, 0, 0, 0, -1, 100)
+    f = gpd.GeoDataFrame({"field_id": ["x"], "major_class": ["non-rice"], "sub_class": ["tree/orchard"], "acres": [1.0]},
+                         geometry=[box(0, 0, 50, 50)])
+    out, stats = bt.cut_edge_trees(f, np.zeros((100, 100), bool), tr)
+    assert list(stats.columns) == ["field_id", "cut_m2", "geometry_error"] and len(out) == 1
