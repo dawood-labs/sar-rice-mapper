@@ -80,3 +80,17 @@ def test_stage_summary_counts_each_aoi_once_from_its_files(tmp_path, monkeypatch
     s = b.stage_summary([1, 2, 3, 4, 5, 6, 7], first_round=[7]).set_index("stage")["aois"]
     assert s.sum() == 7
     assert [s[b.STAGES[i]] for i in range(7)] == [1, 1, 1, 1, 1, 1, 1]
+
+
+def test_partial_radar_dates_are_accepted_only_above_the_floor(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run = tmp_path / "processed/aoi7/monsoon2026/runs/r1"
+    run.mkdir(parents=True)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/aoi7_monsoon2026.yaml").write_text("# header\nqa: {min_valid_pct: 80, acknowledged_issues: []}\n")
+    row = "| `LOW_VALID:T1:20260331` | no | T1_20260331: valid pixels inside the planned AOI scope VV {v}%, VH {v}% (minimum 80%) |"
+    (run / "decisions_required.md").write_text(row.format(v="76.9"))
+    assert b.acknowledge_partial_dates(7, "r1") == ["LOW_VALID:T1:20260331"]
+    assert "LOW_VALID:T1:20260331" in (tmp_path / "config/aoi7_monsoon2026.yaml").read_text()
+    (run / "decisions_required.md").write_text(row.format(v="31.0"))
+    assert b.acknowledge_partial_dates(7, "r1") == []

@@ -187,10 +187,52 @@ def imagery(aois, logs: Path) -> None:
 
 
 # ---------------------------------------------------------------------------------------------------------- flow
+#: A radar date with fewer valid pixels than the QA minimum (80 %) is accepted as a partial date when at least this
+#: share is valid; the missing pixels stay empty and the rules skip them. Why (7 Oct 2026): some AOIs of the second
+#: set sit on a swath edge (72-77 % valid on 5 dates of one track); the first set never had this. Below it, or for
+#: any other QA issue, the AOI stops for the user.
+PARTIAL_MIN_PCT = 50.0
+
+
+def acknowledge_partial_dates(aoi: int, run: str, min_pct: float = PARTIAL_MIN_PCT) -> list[str]:
+    """Adds the run's LOW_VALID issues with at least ``min_pct`` valid pixels to the config's
+    ``qa.acknowledged_issues``; returns them, or [] when any open issue is of another kind or lower."""
+    import re
+
+    import yaml
+
+    md = Path(f"processed/aoi{aoi}/monsoon2026/runs/{run}/decisions_required.md")
+    if not md.exists():
+        return []
+    rows = re.findall(r"\| `([A-Z_]+:[^`]+)` \| no \| (.+?) \|", md.read_text())
+    ok = []
+    for issue, detail in rows:
+        pct = [float(x) for x in re.findall(r"V[VH] ([0-9.]+)%", detail)]
+        if not issue.startswith("LOW_VALID:") or not pct or min(pct) < min_pct:
+            return []
+        ok.append(issue)
+    path = Path(f"config/aoi{aoi}_monsoon2026.yaml")
+    head = "".join(line + "\n" for line in path.read_text().splitlines() if line.startswith("#"))
+    raw = yaml.safe_load(path.read_text())
+    have = list(raw.setdefault("qa", {}).get("acknowledged_issues") or [])
+    raw["qa"]["acknowledged_issues"] = have + [i for i in ok if i not in have]
+    path.write_text(head + yaml.safe_dump(raw, sort_keys=False, default_flow_style=None))
+    return ok
+
+
 def _download_stack(aoi: int, run: str, logs: Path) -> int:
     cfg = f"config/aoi{aoi}_monsoon2026.yaml"
     _sh(PY + ["sar_pipeline", "--config", cfg, "download", "--run", run, "--yes"], logs / f"aoi{aoi}_download.log")
-    _sh(PY + ["sar_pipeline", "--config", cfg, "stack", "--run", run], logs / f"aoi{aoi}_stack.log")
+    try:
+        _sh(PY + ["sar_pipeline", "--config", cfg, "stack", "--run", run], logs / f"aoi{aoi}_stack.log")
+    except RuntimeError:
+        acked = acknowledge_partial_dates(aoi, run)
+        if not acked:
+            raise
+        from . import rule_records as rr
+        rr.record(aoi, "partial radar dates accepted", f"{len(acked)} dates with {PARTIAL_MIN_PCT:.0f}-80 % valid "
+                                                       f"pixels: {', '.join(acked)}")
+        _sh(PY + ["sar_pipeline", "--config", cfg, "stack", "--run", run], logs / f"aoi{aoi}_stack.log")
     return aoi
 
 
