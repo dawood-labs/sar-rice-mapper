@@ -222,3 +222,42 @@ def compare_area_column(frame: gpd.GeoDataFrame, crs: str | int, column: str = "
         "max_disagreement_pct": round(float(disagreement.max()), 2),
         "mean_disagreement_pct": round(float(disagreement.mean()), 2),
     }
+
+
+def match_by_overlap(source: gpd.GeoDataFrame, target: gpd.GeoDataFrame, crs: str | int,
+                     same_iou: float = 0.99) -> pd.DataFrame:
+    """For every polygon in ``source``, find the ``target`` polygon it overlaps most.
+
+    Why: the byte-level check in :func:`crosscheck` only works when both files were written by the
+    same tool. A client's shapefile and our GeoPackage made from it store the same corners with a
+    different precision, so their bytes never match even when the shapes are identical. Overlap
+    answers the real questions: is this client polygon in our set (``iou >= same_iou``), does it
+    only touch one of ours (``0 < iou``), or is it completely new (``iou == 0``)?
+
+    Returns one row per source polygon: ``source_row``, ``target_row`` (or None), ``iou``,
+    ``shared_acres`` and ``shift_m`` (the largest distance between the two outlines, 0 for the same
+    shape).
+    """
+    a = source.to_crs(crs).reset_index(drop=True)
+    b = target.to_crs(crs).reset_index(drop=True)
+    tree = b.sindex
+    rows = []
+    for i, geom in enumerate(a.geometry):
+        best = (0.0, None, 0.0)
+        for j in tree.query(geom):
+            other = b.geometry.iloc[j]
+            shared = geom.intersection(other).area
+            iou = shared / geom.union(other).area if shared else 0.0
+            if iou > best[0]:
+                best = (iou, int(j), shared)
+        iou, j, shared = best
+        rows.append({
+            "source_row": i,
+            "target_row": j,
+            "iou": round(iou, 4),
+            "shared_acres": round(float(sqm_to_acres(shared)), 2),
+            "shift_m": round(geom.hausdorff_distance(b.geometry.iloc[j]), 2) if j is not None else None,
+        })
+    out = pd.DataFrame(rows)
+    out["same_shape"] = out["iou"] >= same_iou
+    return out

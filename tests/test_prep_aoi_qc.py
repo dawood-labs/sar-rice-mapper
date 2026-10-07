@@ -140,3 +140,21 @@ def test_compare_area_column_identifies_acres_and_hectares():
 
     as_hectares = gpd.GeoDataFrame({"id": [1], "area": [acres / 2.47105]}, geometry=[geom], crs="EPSG:4326")
     assert aoi_qc.compare_area_column(as_hectares, UTM)["likely_unit"] == "hectares"
+
+
+def test_match_by_overlap_same_touching_and_new():
+    """Same shape with a tiny precision change counts as the same; a touch and a far shape do not."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from sar_pipeline.prep.aoi_qc import match_by_overlap
+
+    target = gpd.GeoDataFrame(geometry=[box(0, 0, 1000, 1000)], crs=32647)
+    source = gpd.GeoDataFrame(geometry=[box(0, 0, 1000, 1000.000001),   # same shape
+                                        box(900, 0, 1900, 1000),          # touches 10 %
+                                        box(5000, 5000, 6000, 6000)],     # brand new
+                              crs=32647)
+    out = match_by_overlap(source, target, 32647)
+    assert out["same_shape"].tolist() == [True, False, False]
+    assert out.loc[1, "iou"] > 0 and out.loc[2, "iou"] == 0
+    assert out.loc[2, "target_row"] is None or out["target_row"].isna().iloc[2]

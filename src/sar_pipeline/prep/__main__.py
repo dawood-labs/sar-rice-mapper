@@ -7,6 +7,8 @@ Steps:
                    bounding box, read from Earth Engine metadata only
   batch-configs    one config (and AOI file) per AOI from a template, tracks left empty
   batch-tracks     after each AOI's audit, choose its tracks by rule and write the reasons
+  aoi-overlap      match every polygon of one AOI file to the polygon it overlaps most in another
+                   (client shapefile vs our GeoPackage, or a new AOI set vs the delivered one)
 
 None of these steps creates an Earth Engine task or uploads anything. `aoi-qc` and
 `s1-availability` only read; the two batch steps write config files (gitignored) and, for
@@ -72,7 +74,36 @@ def _parser() -> argparse.ArgumentParser:
     bt.add_argument("--ids", nargs="*", type=int, help="only these AOI ids")
     bt.add_argument("--force", action="store_true",
                     help="also rewrite configs that already have tracks (a hand-edited choice is kept otherwise)")
+    ov = sub.add_parser("aoi-overlap", help="match polygons of one AOI file to another by overlap")
+    ov.add_argument("--source", required=True, help="AOI file to check (any format GDAL reads)")
+    ov.add_argument("--target", required=True, nargs="+",
+                    help="AOI file(s) to match against; several files are read as one set")
+    ov.add_argument("--crs", default="EPSG:32647", help="projected CRS for areas (default: EPSG:32647)")
+    ov.add_argument("--out", default=None, help="optional CSV with one row per source polygon")
     return parser
+
+
+def _run_aoi_overlap(args) -> int:
+    import pandas as pd
+
+    from . import aoi_qc
+
+    source = gpd.read_file(args.source)
+    target = pd.concat([gpd.read_file(p).to_crs(4326).assign(file=Path(p).name) for p in args.target],
+                       ignore_index=True)
+    target = gpd.GeoDataFrame(target, geometry="geometry", crs=4326)
+    table = aoi_qc.match_by_overlap(source, target, args.crs)
+    table["target_file"] = table["target_row"].map(lambda j: None if pd.isna(j) else target["file"].iloc[int(j)])
+    matched = set(table.loc[table["same_shape"], "target_row"].astype(int))
+    print(f"source polygons            : {len(table)}")
+    print(f"same shape in target       : {int(table['same_shape'].sum())}")
+    print(f"only touching a target     : {int(((table['iou'] > 0) & ~table['same_shape']).sum())}")
+    print(f"not in target at all       : {int((table['iou'] == 0).sum())}")
+    print(f"target polygons matched    : {len(matched)} of {len(target)}")
+    if args.out:
+        table.to_csv(args.out, index=False)
+        print(f"table written to {args.out}")
+    return 0
 
 
 def _run_batch_configs(args) -> int:
@@ -264,6 +295,8 @@ def main(argv=None) -> int:
         return _run_batch_configs(args)
     if args.step == "batch-tracks":
         return _run_batch_tracks(args)
+    if args.step == "aoi-overlap":
+        return _run_aoi_overlap(args)
     cfg = config_mod.load_config(args.config)
     if args.step == "aoi-qc":
         return _run_aoi_qc(cfg, args)
