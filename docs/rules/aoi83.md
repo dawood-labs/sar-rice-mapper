@@ -39,3 +39,7 @@ Why: pixels 86401 (flooded 18 May, planted late July: sowing at the end of a lon
 ### 2026-10-05 - locked and delivered
 
 sliver 0.15 field layer; delivery rice_map_2026-10-05 (rice = standing direct seeded + standing transplanted + young; S2 dates >= 80 % clear)
+
+## Too young rice (not delivered)
+
+Manager's rule (6 Oct 2026): only rice older than about 40 days goes to the client; a field still under open water on the newest clear Sentinel-2 date (2026-09-13) is too young. A rice field is relabelled non-rice when fewer than 5 % of its clear pixels are not open water that day. Result: 14 of 1793 rice fields, 4.71 of 939.8 ac (rice standing transplanted 0.22 ac, young rice 4.5 ac).

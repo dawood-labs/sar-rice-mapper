@@ -52,3 +52,7 @@ Why: best of 15 sets / switches on 200 fields judged by reviewers
 ### 2026-10-06 05:50:00 - locked and delivered
 
 <bucket>/rice_map_2026-10-05/aoi75/ (13 S2 dates >= 80 % clear)
+
+## Too young rice (not delivered)
+
+Manager's rule (6 Oct 2026): only rice older than about 40 days goes to the client; a field still under open water on the newest clear Sentinel-2 date (2026-09-13) is too young. A rice field is relabelled non-rice when fewer than 5 % of its clear pixels are not open water that day. Result: 1 of 451 rice fields, 0.17 of 257.7 ac (young rice 0.17 ac).
