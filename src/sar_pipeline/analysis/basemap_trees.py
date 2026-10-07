@@ -104,7 +104,9 @@ def mosaic(aoi: int, root: str = BASEMAP, crs: str = "EPSG:32646", res: float = 
     if not tiles:
         raise FileNotFoundError(f"no tiles under {d}")
     vrt, out = d / "mosaic.vrt", d / f"aoi{aoi}_basemap_1m_utm.tif"
-    env = {"GDAL_NUM_THREADS": "ALL_CPUS"}
+    # tile DECODING on one thread: the LZW tiles of some AOIs fail to decode with GDAL_NUM_THREADS=ALL_CPUS ("LZWDecode:
+    # Strip 0 not terminated with EOI code", 7 Oct 2026, 12 AOIs); the warp itself still uses every core (-wo NUM_THREADS)
+    env = {"GDAL_NUM_THREADS": "1"}
     _gdal(["gdalbuildvrt", "-q", "-overwrite", str(vrt), *tiles], {**_env(), **env})
     _gdal(["gdalwarp", "-q", "-overwrite", "-t_srs", crs, "-tr", str(res), str(res), "-r", "average", "-multi",
            "-wo", "NUM_THREADS=ALL_CPUS", "-co", "COMPRESS=DEFLATE", "-co", "TILED=YES", str(vrt), str(out)],
@@ -483,7 +485,13 @@ def despike(g, d: float = DESPIKE_M):
     polys = lambda x: shapely.union_all([p for p in getattr(x, "geoms", [x]) if p.geom_type in ("Polygon", "MultiPolygon")])
     gv = polys(shapely.make_valid(g))                   # an invalid input (self-touching tail) made valid first
     o = g.buffer(-d, join_style="mitre").buffer(d, join_style="mitre")
-    o = shapely.make_valid(o.intersection(gv))
+    try:
+        o = shapely.make_valid(o.intersection(gv))
+    except shapely.errors.GEOSException:          # near-duplicate vertices (aoi74, 90, 113, 139, 148): snap to 1 mm
+        try:
+            o = shapely.make_valid(shapely.intersection(o, gv, grid_size=0.001))
+        except shapely.errors.GEOSException:
+            return gv                             # left as it is rather than stopping the AOI
     o = shapely.union_all([p for p in getattr(o, "geoms", [o]) if p.geom_type == "Polygon" and p.area > 1.0]) \
         if not o.is_empty else o
     return o if (not o.is_empty and gv.area - o.area <= max(0.01 * gv.area, 5.0)) else gv
