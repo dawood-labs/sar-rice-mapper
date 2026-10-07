@@ -82,6 +82,38 @@ def status(aoi: int) -> dict:
     return json.loads(p.read_text()) if p.exists() else {}
 
 
+def set_chosen(aoi: int, entry: dict) -> None:
+    """Writes one AOI's entry into :data:`CHOSEN` under a file lock, swapping the whole file in at once.
+
+    Why (7 Oct 2026): three workers choosing rule sets at once each read the file, added their AOI and wrote it back,
+    and 9 of the second set's entries were lost (the AOIs were delivered with the right rules, which their status
+    files keep; :func:`restore_chosen` puts them back)."""
+    import fcntl
+
+    with open(CHOSEN.with_suffix(".lock"), "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            chosen = json.loads(CHOSEN.read_text()) if CHOSEN.exists() else {}
+            chosen[str(aoi)] = entry
+            tmp = CHOSEN.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(chosen, indent=1, sort_keys=True, default=str))
+            tmp.replace(CHOSEN)
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def restore_chosen(aois) -> list[int]:
+    """Puts back into :data:`CHOSEN` every AOI whose status says a rule set was chosen but whose entry is missing."""
+    chosen = json.loads(CHOSEN.read_text()) if CHOSEN.exists() else {}
+    back = []
+    for a in aois:
+        r = status(a).get("choose", {})
+        if str(a) not in chosen and r.get("done") and "rules" in r.get("result", {}):
+            set_chosen(a, r["result"])
+            back.append(a)
+    return back
+
+
 def _mark(aoi: int, step: str, result) -> None:
     st = status(aoi)
     st[step] = {"done": True, "result": result, "at": str(pd.Timestamp.now().floor("s"))}
@@ -441,10 +473,9 @@ def choose(aoi: int) -> dict:
     table = pd.DataFrame([{"rule set": c, "fields right %": r[c], "standing/young merged %": merged[c]} for c in sets]
                          + [{"rule set": c, "fields right %": r2[c], "standing/young merged %": m2[c]}
                             for c in m2 if c != best]).sort_values("fields right %", ascending=False)
-    chosen = json.loads(CHOSEN.read_text()) if CHOSEN.exists() else {}
-    chosen[str(aoi)] = {"rules": rules, "from": win, "fields": int(len(o)), "right_pct": float(r2[win]),
-                        "merged_pct": float(m2[win]), "at": str(pd.Timestamp.now().floor("s"))}
-    CHOSEN.write_text(json.dumps(chosen, indent=1, sort_keys=True, default=str))
+    chosen = {str(aoi): {"rules": rules, "from": win, "fields": int(len(o)), "right_pct": float(r2[win]),
+                         "merged_pct": float(m2[win]), "at": str(pd.Timestamp.now().floor("s"))}}
+    set_chosen(aoi, chosen[str(aoi)])
     cr.AOI_OVERRIDES[aoi] = rules
     rr.record(aoi, "rule set chosen", f"`{win}` (switches below)",
               reason=f"best of {len(table)} sets / switches on {len(o)} fields judged by reviewers", scores=table)
@@ -618,7 +649,7 @@ def stage_summary(aois, first_round=()) -> pd.DataFrame:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("step", choices=["order", "imagery", "flow", "autofinish", "resample", "pending", "prepare", "choose",
-                                    "finish", "status"])
+                                    "finish", "status", "restore-chosen"])
     p.add_argument("--aois", type=int, nargs="*", default=[])
     p.add_argument("--start", type=int, nargs="*", default=[])
     p.add_argument("--logs", default="logs/aoi_batch")
@@ -627,6 +658,9 @@ def main(argv=None) -> int:
     p.add_argument("--skip", type=int, nargs="*", default=[], help="flow: AOIs left out (finished earlier)")
     a = p.parse_args(argv)
     logs = Path(a.logs)
+    if a.step == "restore-chosen":
+        print("restored:", restore_chosen(a.aois))
+        return 0
     if a.step == "order":
         print(" ".join(map(str, neighbour_order(a.start or [72]))))
     elif a.step == "imagery":

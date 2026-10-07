@@ -94,3 +94,16 @@ def test_partial_radar_dates_are_accepted_only_above_the_floor(tmp_path, monkeyp
     assert "LOW_VALID:T1:20260331" in (tmp_path / "config/aoi7_monsoon2026.yaml").read_text()
     (run / "decisions_required.md").write_text(row.format(v="31.0"))
     assert b.acknowledge_partial_dates(7, "r1") == []
+
+
+def test_set_chosen_keeps_every_writer(tmp_path, monkeypatch):
+    """Parallel writers each add their AOI; none is lost (7 Oct: 9 entries were)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sar_pipeline.analysis import aoi_batch as ab
+
+    monkeypatch.setattr(ab, "CHOSEN", tmp_path / "chosen.json")
+    with ThreadPoolExecutor(8) as ex:
+        list(ex.map(lambda a: ab.set_chosen(a, {"from": f"x{a}"}), range(40)))
+    import json
+    assert len(json.loads(ab.CHOSEN.read_text())) == 40

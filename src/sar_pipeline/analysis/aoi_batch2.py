@@ -251,7 +251,7 @@ def choose_by_neighbour(aoi: int) -> dict | None:
     chosen[str(aoi)] = {"rules": rules, "from": f"{delivery_name(src)}: {chosen[str(src)]['from']}", "fields": 0,
                         "right_pct": None, "merged_pct": None, "at": str(pd.Timestamp.now().floor("s")),
                         "by": "neighbour (no review)"}
-    ab.CHOSEN.write_text(json.dumps(chosen, indent=1, sort_keys=True, default=str))
+    ab.set_chosen(aoi, chosen[str(aoi)])
     cr.AOI_OVERRIDES[aoi] = {k: v for k, v in rules.items() if k != "SIEVE_ACRES"}
     rr.record(aoi, "rule set by neighbour", f"{why}: {chosen[str(src)]['from']} (not reviewed here; user, 7 Oct 2026)")
     ab._mark(aoi, "choose", chosen[str(aoi)])
