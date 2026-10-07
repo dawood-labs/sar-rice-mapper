@@ -26,3 +26,22 @@ def test_every_skipped_aoi_has_a_reason():
 
     assert set(b2.SKIP_REASONS) == set(b2.SKIP)
     assert all(r for r in b2.SKIP_REASONS.values())
+
+
+def test_review_fields_writes_ids_and_keeps_an_existing_file(tmp_path, monkeypatch):
+    """Field ids follow the delineation rows, and a second call never rewrites them."""
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from sar_pipeline.analysis import aoi_batch2 as b2
+    from sar_pipeline.analysis import field_rice as fr
+
+    frame = gpd.GeoDataFrame({"uid": ["a", "b"], "Confidence": [0.9, 0.8], "area_acres": [1.0, 2.0]},
+                             geometry=[box(0, 0, 10, 10), box(20, 0, 30, 10)], crs=32646)
+    monkeypatch.setattr(fr, "load_fields", lambda aoi: frame)
+    out = b2.review_fields(1166, out_dir=str(tmp_path))
+    got = gpd.read_file(out)
+    assert got["field_id"].tolist() == ["aoi1166_000000", "aoi1166_000001"]
+    assert got["is_field"].all()
+    monkeypatch.setattr(fr, "load_fields", lambda aoi: frame.iloc[::-1])
+    assert gpd.read_file(b2.review_fields(1166, out_dir=str(tmp_path)))["uid"].tolist() == ["a", "b"]

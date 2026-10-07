@@ -371,6 +371,8 @@ def _prepare_one(aoi: int, logs: str) -> str:
         _mark(aoi, "inputs", {"run": run, "series": sr})
     if b2.is_batch2(aoi) and aoi not in b2.REVIEW:    # rule set from a neighbour, no review (aoi_batch2.finish_loop)
         return f"aoi{aoi}: inputs done; rule set by neighbour"
+    if b2.is_batch2(aoi):                              # the review's field file (the first set had one already)
+        b2.review_fields(aoi)
     if not _done(aoi, "trials"):
         t = cr.try_rules(aoi, sources=CANDIDATE_SETS)
         t.to_csv(logs / f"aoi{aoi}_trials.csv", index=False)

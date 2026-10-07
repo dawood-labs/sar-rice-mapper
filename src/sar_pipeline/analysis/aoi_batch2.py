@@ -79,6 +79,27 @@ def new_aois(src: str = SRC):
     return gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=4326)
 
 
+def review_fields(aoi: int, out_dir: str = "processed/_batch/s2_2026/fields") -> Path:
+    """The field file the blind review samples and renders from (``field_review``, ``qgis_review``), for a reviewed
+    AOI of the second set: its own delineation with ``field_id`` = ``aoi<id>_<row>``, ``area_acres`` and ``is_field``.
+
+    Why: the first set had this file from the earlier field-label stage (``field_rice``); the second set never ran
+    that stage, so the review stopped on a missing file (aoi1166, 7 Oct 2026). An existing file is kept, so the ids
+    of fields already judged never change."""
+    from . import field_rice as fr
+
+    out = Path(out_dir) / f"aoi{aoi}_fields_monsoon2026.gpkg"
+    if out.exists():
+        return out
+    f = fr.load_fields(aoi).reset_index(drop=True)
+    f = f[["uid", "Confidence", "area_acres", "geometry"]].assign(
+        field_id=[f"aoi{aoi}_{i:06d}" for i in range(len(f))], is_field=True, aoi=f"aoi{aoi}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    f[["field_id", "uid", "area_acres", "Confidence", "is_field", "aoi", "geometry"]].to_file(
+        out, layer="fields", driver="GPKG")
+    return out
+
+
 def first_set_union(folder: str = "data/aoi"):
     import geopandas as gpd
     import shapely
