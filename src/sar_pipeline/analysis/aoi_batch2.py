@@ -313,12 +313,49 @@ def _ee_open_tasks() -> int:
     return sum(1 for t in ee.data.getTaskList() if t.get("state") in ("READY", "RUNNING"))
 
 
+def _open_by_aoi() -> dict[int, int]:
+    """Open Earth Engine tasks per AOI. A Sentinel-2 task is named ``aoi<id>_<month>_S2_<date>``
+    (``optical_export.export_image``), so the AOI is the part before the first underscore."""
+    import ee
+
+    out: dict[int, int] = {}
+    for t in ee.data.getTaskList():
+        m = re.match(r"aoi(\d+)_", t.get("description", ""))
+        if m and t.get("state") in ("READY", "RUNNING"):
+            out[int(m.group(1))] = out.get(int(m.group(1)), 0) + 1
+    return out
+
+
+def s2_missing(aoi: int) -> int:
+    """How many Sentinel-2 dates S2_START..S2_END of ``aoi`` are not on GCS yet. Read only: lists the bucket and asks
+    Earth Engine for the dates, but starts no export."""
+    import geopandas as gpd
+    import json
+    from google.cloud import storage
+
+    from .. import auth
+    from .. import config as cm
+    from .. import optical_export as oe
+
+    cfg = cm.load_config(f"config/aoi{aoi}_monsoon2026.yaml")
+    key, bucket = cfg["aoi"]["key"], cfg["gcs"]["bucket"]
+    prefix = cfg["gcs"]["base_folder"] + "/s2_dates_masks"
+    client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
+    existing = {b.name for b in client.list_blobs(bucket, prefix=f"{prefix}/{key}/")}
+    dates = oe.scene_dates(oe.aoi_geojson_2d(gpd.read_file(cm.aoi_path(cfg))), S2_START, S2_END)
+    return len(oe.dates_to_export(dates, lambda d: d[:7], existing, prefix, key))
+
+
 def s2_export(aois, logs: Path = Path("logs/batch2"), chunk: int = S2_CHUNK, queue_max: int = S2_QUEUE_MAX,
               poll: float = 60.0) -> None:
     """Exports every Sentinel-2 date S2_START..S2_END for ``aois`` in rounds of ``chunk`` AOIs, each round only when
     Earth Engine holds fewer than ``queue_max`` open tasks (the project's queue takes about 3,000, and the radar
-    exports share it). When everything is done a second pass resubmits whatever failed; then each AOI is marked ready
-    (:func:`s2_marker`). Files already on GCS are skipped (``optical_export.export_all_dates``)."""
+    exports share it). Files already on GCS are skipped (``optical_export.export_all_dates``).
+
+    Each AOI is marked ready (:func:`s2_marker`) as soon as it has no open task left and no date missing on GCS, so
+    its preparation starts at once instead of after the whole set (user, 7 Oct: start work on each AOI as soon as its
+    data arrives). AOIs with tasks still open when this starts (a restart) are not submitted again. When the queue is
+    empty, a second round resubmits the dates that failed."""
     import subprocess
     import time
 
@@ -329,30 +366,48 @@ def s2_export(aois, logs: Path = Path("logs/batch2"), chunk: int = S2_CHUNK, que
     say = lambda m: print(f"{pd.Timestamp.now():%H:%M:%S} {m}", flush=True)
     auth.init_ee(cm.load_config(f"config/aoi{aois[0]}_monsoon2026.yaml"))
     logs.mkdir(parents=True, exist_ok=True)
+    checked: set[int] = set()                          # finished AOIs found incomplete; rechecked next round
+
+    def sweep(started) -> dict[int, int]:
+        open_ = _open_by_aoi()
+        for a in started:
+            if s2_ready(a) or a in checked or open_.get(a, 0):
+                continue
+            try:
+                missing = s2_missing(a)
+            except Exception as e:                     # a listing error only delays this AOI
+                say(f"aoi{a}: S2 check failed ({e}); retrying next poll")
+                continue
+            if missing == 0:
+                s2_marker(a).parent.mkdir(parents=True, exist_ok=True)
+                s2_marker(a).write_text(str(pd.Timestamp.now()))
+                say(f"S2 READY aoi{a}")
+            else:
+                checked.add(a)
+                say(f"aoi{a}: {missing} S2 dates missing after its tasks ended; resubmitted in the next round")
+        return open_
+
     for attempt in (1, 2):
-        todo = [a for a in aois if not s2_ready(a)]
+        checked.clear()
+        running = set(_open_by_aoi())
+        started = [a for a in aois if a in running]
+        todo = [a for a in aois if not s2_ready(a) and a not in running]
         for i in range(0, len(todo), chunk):
-            while _ee_open_tasks() >= queue_max:
+            while sum(sweep(started).values()) >= queue_max:
                 time.sleep(poll)
             part = todo[i:i + chunk]
             cfgs = [f"config/aoi{a}_monsoon2026.yaml" for a in part]
             with open(logs / "s2_full_export.log", "a") as log:
                 r = subprocess.run(py + ["--configs", *cfgs, "--start", S2_START, "--end", S2_END], stdout=log,
                                    stderr=subprocess.STDOUT)
+            started += part
             say(f"S2 round {attempt}: submitted {part} (exit {r.returncode}); open tasks {_ee_open_tasks()}")
-        while _ee_open_tasks() > 0:
+        while sum(sweep(started).values()) > 0:
             time.sleep(poll)
+        sweep(started)
         say(f"S2 round {attempt}: Earth Engine queue empty")
-    for a in aois:                                    # a third listing: nothing left to export means ready
-        with open(logs / "s2_full_export.log", "a") as log:
-            r = subprocess.run(py + ["--configs", f"config/aoi{a}_monsoon2026.yaml", "--start", S2_START, "--end",
-                                     S2_END], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            log.write(r.stdout)
-        if r.returncode == 0 and ", 0 to export" in r.stdout:
-            s2_marker(a).parent.mkdir(parents=True, exist_ok=True)
-            s2_marker(a).write_text(str(pd.Timestamp.now()))
-            say(f"S2 READY aoi{a}")
-        else:
+    for a in aois:
+        if not s2_ready(a):
             say(f"aoi{a}: S2 still incomplete after two rounds; see {logs / 's2_full_export.log'}")
 
 
