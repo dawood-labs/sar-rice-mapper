@@ -284,7 +284,7 @@ def flow(order, logs: Path, window: int = 30, prep_jobs: int = 0, poll: float = 
                 del preps[a]
                 try:
                     msg = f.result()
-                    if isinstance(msg, str) and "neighbour" in msg:
+                    if isinstance(msg, str) and ("neighbour" in msg or "waits" in msg):
                         say(f"INPUTS {msg}")
                     else:
                         say(f"READY aoi{a}: sheets done, groups in {Path(FRESH) / f'aoi{a}' / 'field_review' / 'groups.txt'}")
@@ -303,17 +303,23 @@ def _prepare_one(aoi: int, logs: str) -> str:
     from . import field_review as fr
     from . import ndvi_5day as nd
 
+    from . import aoi_batch2 as b2
+
+    if b2.is_batch2(aoi) and not b2.s2_ready(aoi):    # the full S2 export first (aoi_batch2.s2_export)
+        return f"aoi{aoi}: waits for its full Sentinel-2 export"
     logs = Path(logs)
     run = status(aoi)["imagery"]["result"]["run"]
     cfg = f"config/aoi{aoi}_monsoon2026.yaml"
     sr = f"processed/_batch/s2_2026_{SERIES_VARIANT}"
     if not _done(aoi, "inputs"):
-        _sh(PY + ["sar_pipeline.analysis.final_audit", "new-passes", "--ids", str(aoi), "--run", run],
-            logs / f"aoi{aoi}_newpasses.log")
+        # the series first: the artefact-pass check needs its evergreen pixels, and an AOI of the second set
+        # (aoi_batch2) has no older series to borrow them from (7 Oct 2026)
         _sh(PY + ["sar_pipeline", "--config", cfg, "pin-run", "--run", run, "--replace"], logs / f"aoi{aoi}_pin.log")
         _sh(PY + ["sar_pipeline.analysis.mask_experiment", "build", "--ids", str(aoi), "--variants", SERIES_VARIANT,
                   "--jobs", "1"], logs / f"aoi{aoi}_series.log")
         nd.pin_analysis_series(aoi, sr, replace=True)
+        _sh(PY + ["sar_pipeline.analysis.final_audit", "new-passes", "--ids", str(aoi), "--run", run],
+            logs / f"aoi{aoi}_newpasses.log")
         for args in (["sar_pipeline.analysis.first_clear", "--aoi", str(aoi), "--start", "2026-09-01",
                       "--end", "2026-09-30"],
                      ["sar_pipeline.analysis.first_clear", "--aoi", str(aoi), "--vegetation"],
@@ -321,7 +327,6 @@ def _prepare_one(aoi: int, logs: str) -> str:
                      ["sar_pipeline.analysis.sowing_fresh", "--aoi", str(aoi), "--series-root", sr]):
             _sh(PY + args, logs / f"aoi{aoi}_steps.log")
         _mark(aoi, "inputs", {"run": run, "series": sr})
-    from . import aoi_batch2 as b2
     if b2.is_batch2(aoi) and aoi not in b2.REVIEW:    # rule set from a neighbour, no review (aoi_batch2.finish_loop)
         return f"aoi{aoi}: inputs done; rule set by neighbour"
     if not _done(aoi, "trials"):

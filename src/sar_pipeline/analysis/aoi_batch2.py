@@ -276,9 +276,81 @@ def finish_loop(aois, poll: float = 60.0, jobs: int = 3) -> None:
     from . import aoi_batch as ab
 
     rest = [a for a in aois if a not in REVIEW]
-    while any(not ab._done(a, "finish") for a in rest):
+    while any(not ab._done(a, "finish") for a in aois):
+        # an AOI whose radar came in while its Sentinel-2 export was still running was skipped by the flow's
+        # preparation; it is prepared here once both are in (reviewed AOIs go on to trials and sheets)
+        waiting = [a for a in aois if ab._done(a, "imagery") and s2_ready(a) and not ab._done(a, "inputs")
+                   or a in REVIEW and ab._done(a, "imagery") and s2_ready(a) and not ab._done(a, "sheets")]
+        if waiting:
+            ab.prepare(waiting, Path("logs/batch2"), jobs=jobs)
         finish_ready(rest, jobs)
         time.sleep(poll)
+
+
+#: The full Sentinel-2 per-date export the first set has (its local mirror starts in September 2025), so the second
+#: set's 5-day series covers the same span (7 Oct 2026). End exclusive: the last date is 1 Oct 2026.
+S2_START, S2_END = "2025-09-01", "2026-10-02"
+S2_CHUNK = 15          # AOIs per export round (about 150 dates each)
+S2_QUEUE_MAX = 500     # the next round waits until fewer Earth Engine tasks than this are queued or running
+
+
+def s2_marker(aoi: int, src: str = SRC) -> Path:
+    return Path(src) / "s2_ready" / f"aoi{aoi}"
+
+
+def s2_ready(aoi: int, src: str = SRC) -> bool:
+    """True once the AOI's full Sentinel-2 export is on GCS. Why: a series built from only the newest date (what the
+    first set's flow exports) was nonsense, and the artefact-pass check built on it was wrong too (aoi1166, 7 Oct)."""
+    return s2_marker(aoi, src).exists()
+
+
+def _ee_open_tasks() -> int:
+    import ee
+
+    return sum(1 for t in ee.data.getTaskList() if t.get("state") in ("READY", "RUNNING"))
+
+
+def s2_export(aois, logs: Path = Path("logs/batch2"), chunk: int = S2_CHUNK, queue_max: int = S2_QUEUE_MAX,
+              poll: float = 60.0) -> None:
+    """Exports every Sentinel-2 date S2_START..S2_END for ``aois`` in rounds of ``chunk`` AOIs, each round only when
+    Earth Engine holds fewer than ``queue_max`` open tasks (the project's queue takes about 3,000, and the radar
+    exports share it). When everything is done a second pass resubmits whatever failed; then each AOI is marked ready
+    (:func:`s2_marker`). Files already on GCS are skipped (``optical_export.export_all_dates``)."""
+    import subprocess
+    import time
+
+    from .. import auth
+    from .. import config as cm
+
+    py = [".venv/bin/python", "-W", "ignore", "-m", "sar_pipeline.optical_export", "dates", "--no-wait"]
+    say = lambda m: print(f"{pd.Timestamp.now():%H:%M:%S} {m}", flush=True)
+    auth.init_ee(cm.load_config(f"config/aoi{aois[0]}_monsoon2026.yaml"))
+    logs.mkdir(parents=True, exist_ok=True)
+    for attempt in (1, 2):
+        todo = [a for a in aois if not s2_ready(a)]
+        for i in range(0, len(todo), chunk):
+            while _ee_open_tasks() >= queue_max:
+                time.sleep(poll)
+            part = todo[i:i + chunk]
+            cfgs = [f"config/aoi{a}_monsoon2026.yaml" for a in part]
+            with open(logs / "s2_full_export.log", "a") as log:
+                r = subprocess.run(py + ["--configs", *cfgs, "--start", S2_START, "--end", S2_END], stdout=log,
+                                   stderr=subprocess.STDOUT)
+            say(f"S2 round {attempt}: submitted {part} (exit {r.returncode}); open tasks {_ee_open_tasks()}")
+        while _ee_open_tasks() > 0:
+            time.sleep(poll)
+        say(f"S2 round {attempt}: Earth Engine queue empty")
+    for a in aois:                                    # a third listing: nothing left to export means ready
+        with open(logs / "s2_full_export.log", "a") as log:
+            r = subprocess.run(py + ["--configs", f"config/aoi{a}_monsoon2026.yaml", "--start", S2_START, "--end",
+                                     S2_END], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            log.write(r.stdout)
+        if r.returncode == 0 and ", 0 to export" in r.stdout:
+            s2_marker(a).parent.mkdir(parents=True, exist_ok=True)
+            s2_marker(a).write_text(str(pd.Timestamp.now()))
+            say(f"S2 READY aoi{a}")
+        else:
+            say(f"aoi{a}: S2 still incomplete after two rounds; see {logs / 's2_full_export.log'}")
 
 
 def all_ids(src: str = SRC) -> list[int]:
@@ -287,8 +359,11 @@ def all_ids(src: str = SRC) -> list[int]:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["build", "finish-loop"])
+    p.add_argument("step", choices=["build", "finish-loop", "s2-export"])
     a = p.parse_args(argv)
+    if a.step == "s2-export":
+        s2_export(all_ids())
+        return 0
     if a.step == "finish-loop":
         finish_loop(all_ids())
         return 0

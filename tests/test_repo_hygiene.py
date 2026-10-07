@@ -29,6 +29,18 @@ def _candidate_files() -> list[Path]:
     return [REPO / line for line in out.splitlines() if line.strip()]
 
 
+def _committed_text(path: Path) -> str:
+    """A notebook as it would be committed (the staged / committed version), else the file on disk. Why (7 Oct 2026):
+    a notebook left running in Jupyter (09, the keep-alive monitor) is autosaved with outputs every few seconds; the
+    rule is that no output or private value gets INTO the repository, not that a running notebook has none."""
+    if path.suffix == ".ipynb" and shutil.which("git"):
+        r = subprocess.run(["git", "show", f":{path.relative_to(REPO).as_posix()}"], cwd=REPO, capture_output=True,
+                           text=True)
+        if r.returncode == 0:
+            return r.stdout
+    return path.read_text(errors="ignore")
+
+
 def _private_values() -> list[str]:
     values: set[str] = set()
     for cfg_path in (REPO / "config").glob("*.yaml"):
@@ -64,7 +76,7 @@ def test_no_private_values_in_tracked_files():
     for f in _candidate_files():
         if f.suffix.lower() not in TEXT_SUFFIXES or not f.is_file() or f.stat().st_size > 2_000_000:
             continue
-        text = f.read_text(errors="ignore").lower()
+        text = _committed_text(f).lower()
         for v in values:
             if v.lower() in text:
                 hits.append(f"{f.relative_to(REPO)}: contains a private value ({len(v)} chars, starts with {v[:2]!r})")
@@ -79,7 +91,7 @@ def test_no_secret_files_tracked():
 
 def test_notebooks_have_no_outputs():
     for nb in (REPO / "notebooks").glob("*.ipynb"):
-        data = json.loads(nb.read_text())
+        data = json.loads(_committed_text(nb))
         for cell in data.get("cells", []):
             if cell.get("cell_type") == "code":
                 assert not cell.get("outputs"), f"{nb.name} has outputs (clear them before committing)"

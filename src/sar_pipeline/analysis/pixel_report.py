@@ -57,6 +57,8 @@ def locate(aoi_id: int, pid: int, season_key: str = "year2025", config_dir="conf
     path = Path(config_dir)
     if not path.is_absolute():
         path = config_mod.repo_root() / path
+    if season_key == "year2025" and not (path / f"aoi{aoi_id}_{season_key}.yaml").exists():
+        season_key = "monsoon2026"                    # the second AOI set (aoi_batch2) has only the monsoon season
     cfg = config_mod.load_config(path / f"aoi{aoi_id}_{season_key}.yaml")
     grid = json.loads((config_mod.grid_dir(cfg) / "grid_def.json").read_text())
     width, height = int(grid["width"]), int(grid["height"])

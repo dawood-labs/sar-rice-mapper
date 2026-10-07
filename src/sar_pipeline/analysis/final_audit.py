@@ -355,7 +355,10 @@ def stable_pixels(aoi_id: int, min_px: int = 20) -> np.ndarray:
 
     from . import ndvi_5day as nd
 
-    d = nd.load(aoi_id)
+    root = "processed/_batch/s2_2026"
+    if not (Path(root) / f"aoi{aoi_id}" / f"aoi{aoi_id}_ndvi5d.tif").exists():
+        root = nd.analysis_series_root(aoi_id)       # an AOI with only the newer series (aoi_batch2)
+    d = nd.load(aoi_id, root)
     ndvi = d["ndvi5d"].reshape(d["ndvi5d"].shape[0], -1)
     with np.errstate(invalid="ignore"):
         ever = np.nanmean(ndvi >= 0.5, axis=0) >= 0.9

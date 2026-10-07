@@ -590,10 +590,14 @@ CACHE_AOIS = 1
 
 
 def load(aoi_id: int, out_root="processed/_batch/s2_2026", folder: str = FOLDER) -> dict:
-    """Raw dates and the written stacks of one AOI, read once and kept in memory."""
+    """Raw dates and the written stacks of one AOI, read once and kept in memory. An AOI without a series under the
+    default root (the second AOI set, aoi_batch2, 7 Oct 2026) reads its pinned series instead."""
     import rasterio
 
     import json
+
+    if str(out_root) == "processed/_batch/s2_2026" and not Path(out_root, f"aoi{aoi_id}", f"aoi{aoi_id}_ndvi5d.tif").exists():
+        out_root = analysis_series_root(aoi_id)
 
     key = (aoi_id, str(out_root))
     if key in _CACHE:
