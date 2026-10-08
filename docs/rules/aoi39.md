@@ -24,6 +24,7 @@ Written by `sar_pipeline.analysis.rule_records`; the switches are in `curve_rule
 
 
 
+
 ### 2026-10-05 (back-filled from the handover table) - rules and reasons until 5 Oct
 
 the aoi160 defaults + `YOUNG_WHILE_RADAR_LOW True`, `YOUNG_RADAR_LOW_NEEDS_RISE True`, `AGE_FROM_WATER True`, `WATER_BOTTOM 0.3`, `WATER_FALL_LOOKBACK_DAYS 45`, `WATER_SPELL_MIN_PASSES 1`, `GROWN_NOT_IF_WATER_VIEW True`, `POND_IF_DRY_WATER True`, `SECOND_CROP_BY_RADAR True` (`WATER_DEPTH_K 3`), `RADAR_DECIDES_WITHOUT_OPTICAL True`, `YOUNG_AFTER_LAST_WATER True`, `HARVEST_NOT_IF_RADAR_RISING True`, `YOUNG_MIN_RISE_DAYS 40`, `YOUNG_NEEDS_WATER True`, `SIEVE_ACRES 0.15` (aoi39 only; the aoi72 set was tried and rejected by the user, its map kept in `rice_fresh/aoi39/rule_trials/rules_aoi72/`); NEW inputs: radar v002_20261002 (to 25 Sep), series hyb40m1late
@@ -61,3 +62,9 @@ Why: best of 15 sets / switches on 200 fields judged by reviewers
 ## Too young rice (not delivered)
 
 Manager's rule (6 Oct 2026): only rice older than about 40 days goes to the client; a field still under open water on the newest clear Sentinel-2 date (2026-09-13) is too young. A rice field is relabelled non-rice when fewer than 5 % of its clear pixels are not open water that day. Result: 34 of 492 rice fields, 19.44 of 294.02 ac (rice standing transplanted 0.71 ac, young rice 18.73 ac).
+
+### 2026-10-08 11:09:00 - v2 rules (weak AOI)
+
+`aoi39` -> `aoi39_fields_v2.gpkg` (delivered files unchanged)
+
+Why: rice vs not right on reviewed fields 63.0 -> 85.5 % (held-out half 65.4 -> 85.6 %); user, 7 Oct 2026

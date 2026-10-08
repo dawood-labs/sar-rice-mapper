@@ -23,6 +23,7 @@ Written by `sar_pipeline.analysis.rule_records`; the switches are in `curve_rule
 
 
 
+
 ### 2026-10-06 07:40:00 - rule set chosen
 
 `aoi13` (switches below)
@@ -54,3 +55,9 @@ Why: best of 15 sets / switches on 200 fields judged by reviewers
 ## Too young rice (not delivered)
 
 Manager's rule (6 Oct 2026): only rice older than about 40 days goes to the client; a field still under open water on the newest clear Sentinel-2 date (2026-10-01) is too young. A rice field is relabelled non-rice when fewer than 5 % of its clear pixels are not open water that day. Result: 14 of 1544 rice fields, 4.93 of 666.54 ac (young rice 4.93 ac).
+
+### 2026-10-08 11:09:00 - v2 rules (weak AOI)
+
+`aoi33` -> `aoi57_fields_v2.gpkg` (delivered files unchanged)
+
+Why: rice vs not right on reviewed fields 68.0 -> 72.5 % (held-out half 75.8 -> 76.8 %); user, 7 Oct 2026
