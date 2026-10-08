@@ -216,6 +216,20 @@ TOO_YOUNG_OPEN_WATER_DAYS = None
 #: never fell below this share of its own peak (``ndvi_low_peak``) AND whose VH hardly swings (``vh_range_rel`` below
 #: the second value) becomes tree/orchard. None = off. aoi19 at (0.30, 3.5): 23 tree deletions, 36 kept fields hit.
 TREE_IF_NEVER_EMPTIED = None
+#: Weak-AOI switches (8 Oct 2026, ``weak_mistakes``: field medians of 50 weak AOIs' reviewed fields; each cut chosen on
+#: one half of the fields and checked on the other; an AOI takes a switch only when its own held-out fields improve,
+#: ``weak_rules.search``). All three are on the pixel's own range, no dB or NDVI number. None = off.
+#: A "rice harvested" pixel whose VH is still at least this high in its own range on the last passes keeps its crop:
+#: a cut field loses its canopy in the radar too (187 standing fields read as harvested had VH at 0.95 of their own
+#: range, the truly harvested / bare ones 0.76).
+HARVEST_NOT_IF_RADAR_TOP = None
+#: A "young rice" pixel whose fitted NDVI low is at most this share of its own peak (negative: open water well below
+#: the crop, ``fit_low_peak``) is flooded / bare: the young crop never showed above the water (109 bare fields read as
+#: young: median -0.31; real young / standing rice 0.18).
+YOUNG_NOT_IF_DEEP_LOW = None
+#: A rice pixel whose fitted NDVI never fell below this share of its own peak (``fit_low_peak``: the field was never
+#: emptied for a new crop) is other vegetation (1,116 grass / tree fields read as rice: median 0.385; rice 0.18).
+RICE_NEEDS_EMPTY_FIELD = None
 #: With ``SOWING_FROM_RADAR``: the sowing is never later than the optical saw the crop rising. When a clear view after
 #: the field's lowest (empty / water) view already shows the crop above ``AGE_LOW_SHARE`` of its own NDVI amplitude, and
 #: that view is earlier than the radar's end of the water spell, the crop was planted at that lowest view; a later radar
@@ -1417,8 +1431,30 @@ def classify_relative(f: pd.DataFrame) -> pd.Series:
             np.zeros(len(f), dtype=bool)
         out = ["rice standing transplanted" if c == "young rice" and sp == 1 and np.isfinite(d) and d >= WATER_DEPTH_K
                and not sh else c for c, d, sp, sh in zip(out, depth, spell, short)]
+    out = weak_aoi_switches(f, out)
     out = delivery_age_and_trees(f, out)
     return pd.Series(out, index=f.index)
+
+
+def weak_aoi_switches(f: pd.DataFrame, out: list) -> list:
+    """``HARVEST_NOT_IF_RADAR_TOP``, ``YOUNG_NOT_IF_DEEP_LOW`` and ``RICE_NEEDS_EMPTY_FIELD`` (all off by default)."""
+    if HARVEST_NOT_IF_RADAR_TOP is None and YOUNG_NOT_IF_DEEP_LOW is None and RICE_NEEDS_EMPTY_FIELD is None:
+        return list(out)
+    col = lambda n: (pd.to_numeric(f[n], errors="coerce").to_numpy() if n in f  # noqa: E731
+                     else np.full(len(f), np.nan))
+    vh, low = col("vh_pos_end"), col("fit_low_peak")
+    wet = (np.nan_to_num(col("water_spell")) == 1) | (np.nan_to_num(col("water_depth")) >= WATER_DEPTH_K)
+    fixed = []
+    for c, v, lo, w in zip(out, vh, low, wet):
+        if HARVEST_NOT_IF_RADAR_TOP is not None and c == "rice harvested" and np.isfinite(v) and \
+                v >= HARVEST_NOT_IF_RADAR_TOP:
+            c = "rice standing transplanted" if w else "rice standing direct seeded"
+        if YOUNG_NOT_IF_DEEP_LOW is not None and c == "young rice" and np.isfinite(lo) and lo <= YOUNG_NOT_IF_DEEP_LOW:
+            c = "flooded / bare"
+        if RICE_NEEDS_EMPTY_FIELD is not None and c in RICE_NAMES and np.isfinite(lo) and lo >= RICE_NEEDS_EMPTY_FIELD:
+            c = "other vegetation"
+        fixed.append(c)
+    return fixed
 
 
 RICE_NAMES = ("rice standing direct seeded", "rice standing transplanted", "young rice")

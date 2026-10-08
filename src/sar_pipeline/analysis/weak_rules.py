@@ -39,7 +39,12 @@ OUT = Path(FRESH) / "weak_rules"
 #: Classes the client receives as rice (``rice_map_delivery.RICE_CODES`` 1, 7, 3).
 RICE_NAMES = ("rice standing direct seeded", "rice standing transplanted", "young rice")
 #: Switches made for the weak AOIs' main mistakes, tried with the others (filled as they are written and validated).
-EXTRA_SWITCHES: dict[str, dict] = {}
+#: Cuts from ``weak_mistakes.best_cut`` (field medians, chosen on the pick half; 8 Oct 2026).
+EXTRA_SWITCHES: dict[str, dict] = {
+    "harvest_not_if_radar_top": {"HARVEST_NOT_IF_RADAR_TOP": 0.94},
+    "young_not_if_deep_low": {"YOUNG_NOT_IF_DEEP_LOW": -0.43},
+    "rice_needs_empty_field": {"RICE_NEEDS_EMPTY_FIELD": 0.435},
+}
 
 
 def half(field_id: str) -> str:
@@ -75,7 +80,7 @@ def _scores(o: pd.DataFrame, cols) -> pd.DataFrame:
     return pd.DataFrame(rows).T.round(1)
 
 
-def search(aoi: int) -> dict:
+def search(aoi: int, out: Path = OUT) -> dict:
     """Steps 2-4 of the module docstring for one AOI; writes and returns its record."""
     from . import curve_rules as cr
     from . import field_review as fr
@@ -106,8 +111,8 @@ def search(aoi: int) -> dict:
            "current_all": s3.at["current", "all"], "found_pick": s3.at["found", "pick"],
            "found_check": s3.at["found", "check"], "found_all": s3.at["found", "all"], "adopt": adopt,
            "at": str(pd.Timestamp.now().floor("s"))}
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / f"aoi{aoi}.json").write_text(json.dumps(rec, indent=1, default=str))
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"aoi{aoi}.json").write_text(json.dumps(rec, indent=1, default=str))
     return rec
 
 
@@ -227,11 +232,11 @@ def v2_summary() -> pd.DataFrame:
     return t
 
 
-def table() -> pd.DataFrame:
+def table(out: Path = OUT) -> pd.DataFrame:
     """All AOI records in one table, written to ``weak_rules.csv``."""
-    rows = [json.loads(p.read_text()) for p in sorted(OUT.glob("aoi*.json"))]
+    rows = [json.loads(p.read_text()) for p in sorted(out.glob("aoi*.json"))]
     t = pd.DataFrame(rows).drop(columns=["rules", "trail"], errors="ignore")
-    t.to_csv(OUT / "weak_rules.csv", index=False)
+    t.to_csv(out / "weak_rules.csv", index=False)
     return t
 
 
@@ -239,10 +244,13 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("step", choices=["search", "table", "build-v2", "upload-v2", "v2-summary"])
     p.add_argument("--aois", type=int, nargs="*", default=[])
+    p.add_argument("--round", default="", help="search / table: sub-folder of weak_rules/ for a later search round "
+                                               "(round2: with EXTRA_SWITCHES), so the adopted records stay")
     a = p.parse_args(argv)
+    out = OUT / a.round if a.round else OUT
     if a.step == "search":
         for x in a.aois:
-            r = search(x)
+            r = search(x, out)
             print(json.dumps({k: v for k, v in r.items() if k != "rules"}, default=str), flush=True)
     if a.step == "v2-summary":
         print(v2_summary().to_string(index=False))
@@ -256,7 +264,7 @@ def main(argv=None) -> int:
             except Exception as e:                     # one AOI's failure (e.g. credentials) does not stop the rest
                 print(json.dumps({"aoi": x, "error": f"{type(e).__name__}: {e}"}), flush=True)
         return 0
-    t = table()
+    t = table(out)
     print(t.to_string(index=False))
     return 0
 
