@@ -14,6 +14,7 @@ Written by `sar_pipeline.analysis.rule_records`; the switches are in `curve_rule
 
 
 
+
 ### 2026-10-06 06:57:00 - rule set chosen
 
 `aoi28` (switches below)
@@ -51,3 +52,9 @@ Manager's rule (6 Oct 2026): only rice older than about 40 days goes to the clie
 `aoi39` -> `aoi88_fields_v2.gpkg` (delivered files unchanged)
 
 Why: rice vs not right on reviewed fields 57.0 -> 71.5 % (held-out half 61.0 -> 69.5 %); user, 7 Oct 2026
+
+### 2026-10-08 16:31:00 - v3 rules (weak AOI)
+
+`aoi39+harvest_not_if_radar_top+rice_needs_empty_field` -> `aoi88_fields_v3.gpkg` (delivered files unchanged)
+
+Why: rice vs not right on reviewed fields 71.5 -> 81.5 % (held-out half 69.5 -> 79.0 %, vs v2)
