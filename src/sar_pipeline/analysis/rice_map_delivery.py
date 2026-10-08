@@ -116,7 +116,7 @@ def step_lock(aoi: int, fresh: str = FRESH) -> str:
     return "locked now (add the AOI to curve_rules.LOCKED_AOIS)"
 
 
-def field_table(aoi: int, fresh: str = FRESH):
+def field_table(aoi: int, fresh: str = FRESH, path: str | Path | None = None):
     """The locked field layer with the delivery attributes: ``field_id`` (``aoi<N>_<polygon id>``, opens in notebook
     08), ``major_class`` (rice / non-rice), ``sub_class`` (the map class), ``acres``, ``origin``."""
     import geopandas as gpd
@@ -124,7 +124,7 @@ def field_table(aoi: int, fresh: str = FRESH):
     from . import curve_rules as cr
 
     tag = f"{int(round(SLIVER_ACRES * 100)):03d}"
-    f = gpd.read_file(_locked(aoi, fresh) / f"aoi{aoi}_rel_fields_sliver{tag}.gpkg")
+    f = gpd.read_file(path or _locked(aoi, fresh) / f"aoi{aoi}_rel_fields_sliver{tag}.gpkg")
     rice = {cr.MAP_CLASSES[k][0] for k in RICE_CODES}
     out = gpd.GeoDataFrame({
         "field_id": [f"aoi{aoi}_{p}" for p in f["polygon_id"]],
@@ -202,7 +202,8 @@ def step_package(aoi: int, fresh: str = FRESH, **kw) -> dict:
     return man
 
 
-def step_too_young(aoi: int, max_dry_share: float = TOO_YOUNG_MAX_DRY_SHARE, dry_run: bool = False, **kw) -> dict:
+def step_too_young(aoi: int, max_dry_share: float = TOO_YOUNG_MAX_DRY_SHARE, dry_run: bool = False, tag: str = "",
+                   **kw) -> dict:
     """Writes ``aoi<N>_fields_too_young.gpkg``: the packaged field layer with its too-young rice fields
     (``qc_compare.too_young_fields`` on the AOI's newest clear S2 date) relabelled non-rice :data:`TOO_YOUNG_CLASS`, and
     ``aoi<N>_too_young.json`` with the counts. The packaged ``aoi<N>_fields.gpkg`` and ``MANIFEST.json`` are NOT changed
@@ -210,8 +211,9 @@ def step_too_young(aoi: int, max_dry_share: float = TOO_YOUNG_MAX_DRY_SHARE, dry
     from . import qc_compare as qcm
 
     d = out_dir(aoi, **kw)
-    gp, new = d / f"aoi{aoi}_fields.gpkg", d / f"aoi{aoi}_fields_too_young.gpkg"
-    js = d / f"aoi{aoi}_too_young.json"
+    # ``tag`` "_v2": the same step on the weak AOIs' new layer (``weak_rules``): aoi<N>_fields_v2_too_young.gpkg
+    gp, new = d / f"aoi{aoi}_fields{tag}.gpkg", d / f"aoi{aoi}_fields{tag}_too_young.gpkg"
+    js = d / f"aoi{aoi}{tag}_too_young.json"
     if not dry_run and new.exists() and js.exists():
         # written already: keep the very same bytes (a GeoPackage rewritten gets a new md5, and the copy in the bucket
         # must stay what was uploaded)
@@ -230,15 +232,15 @@ def step_too_young(aoi: int, max_dry_share: float = TOO_YOUNG_MAX_DRY_SHARE, dry
     hit = f["field_id"].isin(set(young.index))
     f.loc[hit, "major_class"] = "non-rice"
     f.loc[hit, "sub_class"] = TOO_YOUNG_CLASS
-    tmp = d / f"aoi{aoi}_fields_too_young.tmp.gpkg"
+    tmp = d / f"aoi{aoi}_fields{tag}_too_young.tmp.gpkg"
     f.to_file(tmp, driver="GPKG")
     tmp.replace(new)
     fields_qml(new)
     rule = ("rice field with fewer than max_dry_share of its clear pixels NOT open water (NDWI <= 0) on the newest "
             "clear S2 date -> non-rice, too young (not delivered)")
-    (d / f"aoi{aoi}_too_young.json").write_text(json.dumps({**res, "rule": rule, "file": new.name,
-                                                           "sha256": _sha(new)}, indent=1, default=str))
-    _record_too_young(aoi, res)
+    js.write_text(json.dumps({**res, "rule": rule, "file": new.name, "sha256": _sha(new)}, indent=1, default=str))
+    if not tag:
+        _record_too_young(aoi, res)
     return res
 
 
@@ -422,7 +424,7 @@ def remote_files(aoi: int, key: str | None = None) -> dict:
     return {b.name[len(dest):]: b.md5_hash for b in bucket.list_blobs(prefix=dest) if "/" not in b.name[len(dest):]}
 
 
-def step_trees_cut(aoi: int, **kw) -> dict:
+def step_trees_cut(aoi: int, tag: str = "", **kw) -> dict:
     """Writes ``aoi<N>_fields_trees_cut.gpkg`` (+ .qml, ``aoi<N>_trees_cut.json``): the too-young layer with the trees and
     plain roofs on rice-field edges cut off (``basemap_trees.cut_aoi``). Kept once written, like the too-young file. A
     failure (e.g. storage credentials expired) is recorded and does not stop the delivery; the step is run again later
@@ -430,15 +432,16 @@ def step_trees_cut(aoi: int, **kw) -> dict:
     from . import basemap_trees as bt
 
     d = out_dir(aoi, **kw)
-    out, js = d / f"aoi{aoi}_fields_trees_cut.gpkg", d / f"aoi{aoi}_trees_cut.json"
+    out, js = d / f"aoi{aoi}_fields{tag}_trees_cut.gpkg", d / f"aoi{aoi}{tag}_trees_cut.json"
     if out.exists() and js.exists():
         return json.loads(js.read_text())
-    src = d / f"aoi{aoi}_fields_too_young.gpkg"
+    src = d / f"aoi{aoi}_fields{tag}_too_young.gpkg"
+    base = src if src.exists() else d / f"aoi{aoi}_fields{tag}.gpkg"
     try:
-        res = bt.cut_aoi(aoi, src if src.exists() else d / f"aoi{aoi}_fields.gpkg", out)
+        res = bt.cut_aoi(aoi, base, out)
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
-    res["from"] = src.name if src.exists() else f"aoi{aoi}_fields.gpkg"
+    res["from"] = base.name
     js.write_text(json.dumps({**res, "file": out.name, "sha256": _sha(out)}, indent=1, default=str))
     return res
 
