@@ -203,6 +203,30 @@ def upload_v2(aoi: int) -> dict:
     return rd._upload_new_only(aoi, names)
 
 
+def v2_summary() -> pd.DataFrame:
+    """One row per AOI with v2 files: rules, delivered agreement before / after, rice acres of the delivered layer and of
+    the v2 layer after the too-young and trees-cut steps. Written to ``<delivery>/weak_v2_summary.csv`` for the user."""
+    import glob
+
+    from . import aoi_batch2 as b2
+    from . import rice_map_delivery as rd
+
+    rows = []
+    for f in sorted(glob.glob(str(Path(rd.OUT_ROOT) / rd.DELIVERY / "aoi*" / "aoi*_v2.json"))):
+        r = json.loads(Path(f).read_text())
+        tc = r.get("trees_cut", {})
+        rows.append({"aoi": b2.delivery_name(r["aoi"]), "rules_v2": r["rules_from"],
+                     "right_pct_before": r["delivered_right_pct_before"],
+                     "right_pct_after": r["delivered_right_pct_after"],
+                     "check_half_before": r["check_half_before"], "check_half_after": r["check_half_after"],
+                     "rice_acres_v1": r["rice_acres_v1"], "rice_acres_v2": r["rice_acres_v2"],
+                     "too_young_acres_v2": r["too_young"].get("too_young_acres"),
+                     "rice_acres_v2_trees_cut": tc.get("rice_acres_after")})
+    t = pd.DataFrame(rows)
+    t.to_csv(Path(rd.OUT_ROOT) / rd.DELIVERY / "weak_v2_summary.csv", index=False)
+    return t
+
+
 def table() -> pd.DataFrame:
     """All AOI records in one table, written to ``weak_rules.csv``."""
     rows = [json.loads(p.read_text()) for p in sorted(OUT.glob("aoi*.json"))]
@@ -213,13 +237,16 @@ def table() -> pd.DataFrame:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["search", "table", "build-v2", "upload-v2"])
+    p.add_argument("step", choices=["search", "table", "build-v2", "upload-v2", "v2-summary"])
     p.add_argument("--aois", type=int, nargs="*", default=[])
     a = p.parse_args(argv)
     if a.step == "search":
         for x in a.aois:
             r = search(x)
             print(json.dumps({k: v for k, v in r.items() if k != "rules"}, default=str), flush=True)
+    if a.step == "v2-summary":
+        print(v2_summary().to_string(index=False))
+        return 0
     if a.step in ("build-v2", "upload-v2"):
         fn = build_v2 if a.step == "build-v2" else upload_v2
         for x in a.aois:
