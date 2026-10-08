@@ -117,58 +117,87 @@ def search(aoi: int, out: Path = OUT) -> dict:
 
 
 V2 = "processed/_batch/s2_2026/rice_fresh_v2"
-V2_FILES = ("aoi{a}_fields_v2.gpkg", "aoi{a}_fields_v2.qml", "aoi{a}_fields_v2_too_young.gpkg",
-            "aoi{a}_fields_v2_too_young.qml", "aoi{a}_v2_too_young.json", "aoi{a}_fields_v2_trees_cut.gpkg",
-            "aoi{a}_fields_v2_trees_cut.qml", "aoi{a}_v2_trees_cut.json", "aoi{a}_v2.json")
+#: Each new version of a weak AOI's layer: the search records it is built from and its own map folder.
+#: v2 (7 Oct 2026): the best existing rule set and switches; v3 (8 Oct 2026, user: "nayi v3 files"): with the new
+#: switches of ``weak_mistakes`` (search round2), only where round 2 beat what the AOI has now on its held-out half.
+VERSIONS = {"v2": (OUT, V2), "v3": (OUT / "round2", "processed/_batch/s2_2026/rice_fresh_v3")}
+FILES = ("aoi{a}_fields_{v}.gpkg", "aoi{a}_fields_{v}.qml", "aoi{a}_fields_{v}_too_young.gpkg",
+         "aoi{a}_fields_{v}_too_young.qml", "aoi{a}_{v}_too_young.json", "aoi{a}_fields_{v}_trees_cut.gpkg",
+         "aoi{a}_fields_{v}_trees_cut.qml", "aoi{a}_{v}_trees_cut.json", "aoi{a}_{v}.json")
+V2_FILES = tuple(n.replace("{v}", "v2") for n in FILES)
 
 
-def build_v2(aoi: int) -> dict:
-    """The new map and field layers of a weak AOI whose found rules were adopted (``search``), as NEW files next to
-    the delivered ones (user, 7 Oct 2026: ``aoi<N>_fields_v2.gpkg`` and its too-young and trees-cut layers; the
-    delivered files are never touched).
+def now_score(aoi: int) -> dict:
+    """What the AOI is delivered with now: its v2 when that was built (adopted round 1), else its own rules; with the
+    scores on all reviewed fields and on the held-out half."""
+    r1 = json.loads((OUT / f"aoi{aoi}.json").read_text())
+    if r1["adopt"]:
+        return {"version": "v2", "rules": r1["found"], "all": r1["found_all"], "check": r1["found_check"]}
+    return {"version": "v1", "rules": "own", "all": r1["current_all"], "check": r1["current_check"]}
 
-    The map, sieve and fields are rebuilt in :data:`V2` (``rice_fresh_v2/aoi<N>/``), never in ``rice_fresh``, so the
-    locked map and the delivered layers stay as they were. ``aoi<N>_v2.json`` records the rules and the scores."""
+
+def round2_better(aoi: int) -> bool:
+    """Round 2 picked one of the new switches and beat what the AOI has now on its held-out half."""
+    p = VERSIONS["v3"][0] / f"aoi{aoi}.json"
+    if not p.exists():
+        return False
+    r2 = json.loads(p.read_text())
+    return any(k in r2["found"] for k in EXTRA_SWITCHES) and r2["found_check"] > now_score(aoi)["check"]
+
+
+def build_version(aoi: int, ver: str = "v2") -> dict:
+    """The new map and field layers of a weak AOI as NEW files next to the delivered ones (``aoi<N>_fields_<ver>.gpkg``
+    and its too-young and trees-cut layers; files already delivered are never touched; user, 7 and 8 Oct 2026).
+
+    The map, sieve and fields are rebuilt in the version's own folder (``rice_fresh_<ver>/aoi<N>/``), never in
+    ``rice_fresh``, so the locked map and the delivered layers stay as they were. ``aoi<N>_<ver>.json`` records the
+    rules and the scores."""
     import shutil
 
     from . import curve_rules as cr
     from . import ndvi_5day as nd
     from . import rice_map_delivery as rd
 
-    rec = json.loads((OUT / f"aoi{aoi}.json").read_text())
-    if not rec["adopt"]:
-        raise ValueError(f"aoi{aoi}: the found rules did not win on the check half; nothing to build")
+    rec_dir, fresh_v = VERSIONS[ver]
+    rec = json.loads((rec_dir / f"aoi{aoi}.json").read_text())
+    ok = rec["adopt"] if ver == "v2" else round2_better(aoi)
+    if not ok:
+        raise ValueError(f"aoi{aoi}: {ver} rules did not win on the held-out half; nothing to build")
     rules = {**rec["rules"], "SIEVE_ACRES": rd.SLIVER_ACRES}
     d = rd.out_dir(aoi)
-    gp = d / f"aoi{aoi}_fields_v2.gpkg"
-    w = Path(V2) / f"aoi{aoi}"
+    gp = d / f"aoi{aoi}_fields_{ver}.gpkg"
+    w = Path(fresh_v) / f"aoi{aoi}"
     tag = f"{int(round(rd.SLIVER_ACRES * 100)):03d}"
     if gp.exists():                     # built already (a rerun only adds what is missing, e.g. the trees-cut layer)
-        return _finish_v2(aoi, rec, rules, gp)
+        return _finish_version(aoi, ver, rec, rules, gp)
     w.mkdir(parents=True, exist_ok=True)
     shutil.copy2(Path(FRESH) / f"aoi{aoi}" / f"aoi{aoi}_step1_cover.tif", w)   # the map's grid and profile
     old = cr.AOI_OVERRIDES.get(aoi)
     cr.AOI_OVERRIDES[aoi] = rules                          # sieve and fields read the AOI's rules too
     try:
         with cr.rules_for(aoi):
-            cr._run(aoi, nd.analysis_series_root(aoi), V2)
-        cr.sieve(aoi, fresh=V2, force=True)
-        cr.fields(aoi, fresh=V2, force=True)
+            cr._run(aoi, nd.analysis_series_root(aoi), fresh_v)
+        cr.sieve(aoi, fresh=fresh_v, force=True)
+        cr.fields(aoi, fresh=fresh_v, force=True)
     finally:
         if old is None:
             cr.AOI_OVERRIDES.pop(aoi, None)
         else:
             cr.AOI_OVERRIDES[aoi] = old
     t = rd.field_table(aoi, path=w / f"aoi{aoi}_rel_fields_sliver{tag}.gpkg")
-    tmp = d / f"aoi{aoi}_fields_v2.tmp.gpkg"
+    tmp = d / f"aoi{aoi}_fields_{ver}.tmp.gpkg"
     t.to_file(tmp, driver="GPKG")
     tmp.replace(gp)
     rd.fields_qml(gp)
-    return _finish_v2(aoi, rec, rules, gp)
+    return _finish_version(aoi, ver, rec, rules, gp)
 
 
-def _finish_v2(aoi: int, rec: dict, rules: dict, gp: Path) -> dict:
-    """Too-young and trees-cut layers of the v2 field file (each kept once written) and ``aoi<N>_v2.json``."""
+def build_v2(aoi: int) -> dict:
+    return build_version(aoi, "v2")
+
+
+def _finish_version(aoi: int, ver: str, rec: dict, rules: dict, gp: Path) -> dict:
+    """Too-young and trees-cut layers of the version's field file (each kept once written) and ``aoi<N>_<ver>.json``."""
     import geopandas as gpd
 
     from . import rice_map_delivery as rd
@@ -176,36 +205,50 @@ def _finish_v2(aoi: int, rec: dict, rules: dict, gp: Path) -> dict:
 
     d = gp.parent
     t = gpd.read_file(gp)
-    young = rd.step_too_young(aoi, tag="_v2")
-    trees = rd.step_trees_cut(aoi, tag="_v2")
-    old_t = rd.field_table(aoi)
-    res = {"aoi": aoi, "rules_from": rec["found"], "rules": rules,
-           "reviewed_fields": rec["fields"], "delivered_right_pct_before": rec["current_all"],
-           "delivered_right_pct_after": rec["found_all"], "check_half_before": rec["current_check"],
-           "check_half_after": rec["found_check"],
-           "rice_acres_v1": round(float(old_t.loc[old_t["major_class"] == "rice", "acres"].sum()), 1),
-           "rice_acres_v2": round(float(t.loc[t["major_class"] == "rice", "acres"].sum()), 1),
+    young = rd.step_too_young(aoi, tag=f"_{ver}")
+    # the trees-cut step returns its file name and sha256 only when read back from its own json; leave them out so
+    # this record has the same bytes whether the layer was cut in this run or an earlier one
+    trees = {k: v for k, v in rd.step_trees_cut(aoi, tag=f"_{ver}").items() if k not in ("file", "sha256")}
+    rice = lambda g: round(float(g.loc[g["major_class"] == "rice", "acres"].sum()), 1)  # noqa: E731
+    if ver == "v2":                     # the keys of the v2 records already delivered
+        before = {"all": rec["current_all"], "check": rec["current_check"], "version": "v1"}
+        prev = rd.field_table(aoi)
+    else:
+        before = now_score(aoi)
+        prev = gpd.read_file(d / f"aoi{aoi}_fields_v2.gpkg") if before["version"] == "v2" else rd.field_table(aoi)
+    res = {"aoi": aoi, "rules_from": rec["found"], "rules": rules, "reviewed_fields": rec["fields"],
+           "compared_with": before["version"],
+           "delivered_right_pct_before": before["all"], "delivered_right_pct_after": rec["found_all"],
+           "check_half_before": before["check"], "check_half_after": rec["found_check"],
+           (f"rice_acres_v1" if ver == "v2" else "rice_acres_before"): rice(prev), f"rice_acres_{ver}": rice(t),
            "too_young": young, "trees_cut": trees, "file": gp.name, "sha256": rd._sha(gp)}
-    first = not (d / f"aoi{aoi}_v2.json").exists()
-    (d / f"aoi{aoi}_v2.json").write_text(json.dumps(res, indent=1, default=str))
+    if ver == "v2":
+        res.pop("compared_with")
+    js = d / f"aoi{aoi}_{ver}.json"
+    first = not js.exists()
+    js.write_text(json.dumps(res, indent=1, default=str))
     if first:
-            rr.record(aoi, "v2 rules (weak AOI)", f"`{rec['found']}` -> `{gp.name}` (delivered files unchanged)",
-                  reason=f"rice vs not right on reviewed fields {rec['current_all']} -> {rec['found_all']} % "
-                         f"(held-out half {rec['current_check']} -> {rec['found_check']} %); user, 7 Oct 2026")
+        rr.record(aoi, f"{ver} rules (weak AOI)", f"`{rec['found']}` -> `{gp.name}` (delivered files unchanged)",
+                  reason=f"rice vs not right on reviewed fields {before['all']} -> {rec['found_all']} % "
+                         f"(held-out half {before['check']} -> {rec['found_check']} %, vs {before['version']})")
     return res
 
 
-def upload_v2(aoi: int) -> dict:
-    """Uploads the AOI's v2 files only (``rice_map_delivery._upload_new_only``: never replaces a different file, and
-    proves the files already in the bucket kept their md5). Waits for the trees-cut layer: a v2 without it would be
-    one file short of the delivery."""
+def upload_version(aoi: int, ver: str = "v2") -> dict:
+    """Uploads the AOI's files of this version only (``rice_map_delivery._upload_new_only``: never replaces a different
+    file, and proves the files already in the bucket kept their md5). Waits for the trees-cut layer: a version without
+    it would be one file short."""
     from . import rice_map_delivery as rd
 
-    names = [n.format(a=aoi) for n in V2_FILES]
+    names = [n.format(a=aoi, v=ver) for n in FILES]
     missing = [n for n in names if not (rd.out_dir(aoi) / n).exists()]
     if missing:
-        raise FileNotFoundError(f"aoi{aoi}: v2 files missing {missing} (trees cut needs the basemap credentials)")
+        raise FileNotFoundError(f"aoi{aoi}: {ver} files missing {missing} (trees cut needs the basemap credentials)")
     return rd._upload_new_only(aoi, names)
+
+
+def upload_v2(aoi: int) -> dict:
+    return upload_version(aoi, "v2")
 
 
 def v2_summary() -> pd.DataFrame:
@@ -242,11 +285,14 @@ def table(out: Path = OUT) -> pd.DataFrame:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["search", "table", "build-v2", "upload-v2", "v2-summary"])
+    p.add_argument("step", choices=["search", "table", "build-v2", "upload-v2", "v2-summary", "build", "upload",
+                                      "round2-better"])
     p.add_argument("--aois", type=int, nargs="*", default=[])
+    p.add_argument("--version", default="v3", help="build / upload: v2 or v3")
     p.add_argument("--round", default="", help="search / table: sub-folder of weak_rules/ for a later search round "
                                                "(round2: with EXTRA_SWITCHES), so the adopted records stay")
     a = p.parse_args(argv)
+    p_ver = a.version
     out = OUT / a.round if a.round else OUT
     if a.step == "search":
         for x in a.aois:
@@ -255,8 +301,12 @@ def main(argv=None) -> int:
     if a.step == "v2-summary":
         print(v2_summary().to_string(index=False))
         return 0
-    if a.step in ("build-v2", "upload-v2"):
-        fn = build_v2 if a.step == "build-v2" else upload_v2
+    if a.step == "round2-better":
+        print(*[x for x in sorted(int(q.stem[3:]) for q in OUT.glob("aoi*.json")) if round2_better(x)])
+        return 0
+    if a.step in ("build-v2", "upload-v2", "build", "upload"):
+        ver = "v2" if a.step.endswith("-v2") else p_ver
+        fn = (lambda x: build_version(x, ver)) if a.step.startswith("build") else (lambda x: upload_version(x, ver))
         for x in a.aois:
             try:
                 r = fn(x)
