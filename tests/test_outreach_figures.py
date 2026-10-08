@@ -101,3 +101,22 @@ def test_delivery_figures_render_from_summary_files(tmp_path):
     assert n["areas"] == 1 and n["rice_acres_final"] == 95.0 and n["too_young_fields"] == 3
     assert of.delivery_results_figure(n, tmp_path / "r.png").stat().st_size > 10_000
     assert of.delivery_method_figure(n, tmp_path / "m.png").stat().st_size > 10_000
+
+
+def test_weak_area_figures_render_from_search_records(tmp_path):
+    import json
+
+    from sar_pipeline import outreach_figures as of
+
+    w = tmp_path / "weak"
+    (w / "round2").mkdir(parents=True)
+    (w / "aoi5.json").write_text(json.dumps({"current_check": 60.0, "found_check": 70.0, "adopt": True}))
+    (w / "round2" / "aoi5.json").write_text(json.dumps({"found": "x+rice_needs_empty_field", "found_check": 75.0}))
+    (w / "aoi6.json").write_text(json.dumps({"current_check": 80.0, "found_check": 78.0, "adopt": False}))
+    (w / "round2" / "aoi6.json").write_text(json.dumps({"found": "x", "found_check": 90.0}))
+    loss = tmp_path / "loss.csv"
+    loss.write_text("km,loss_pts\n22,4\n70,30\n")
+    n = of.weak_numbers(str(w), str(loss), str(tmp_path / "review"), new_areas=3)
+    assert n["check"].tolist() == [[60.0, 70.0, 75.0], [80.0, 80.0, 80.0]]   # no new switch in aoi6: kept as it was
+    assert of.weak_results_figure(n, tmp_path / "r.png").stat().st_size > 10_000
+    assert of.weak_method_figure(n, tmp_path / "m.png").stat().st_size > 10_000

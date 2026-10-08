@@ -664,6 +664,145 @@ def delivery_method_figure(n: dict, path) -> Path:
     return path
 
 
+WEAK = "processed/_batch/s2_2026/rice_fresh/weak_rules"
+NEAREST_LOSS = "../data/aoi_batch2_2026-09-29/nearest_loss.csv"
+NEW_SWITCHES = ("harvest_not_if_radar_top", "young_not_if_deep_low", "rice_needs_empty_field")
+
+
+def weak_numbers(weak: str = WEAK, nearest_loss: str = NEAREST_LOSS, review: str = REVIEW,
+                 new_areas=None) -> dict:
+    """The numbers of the second-batch / weak-areas milestone (8 Oct 2026), read from the search records.
+
+    Per weak area, the held-out half's rice-vs-not agreement (the half no rule was chosen on) with its own first rules
+    (v1), after round 1 (v2: best existing rule set, adopted only when the held-out half improved) and after round 2
+    (v3: with the new switches, again only when the held-out half improved)."""
+    rows = []
+    for f in sorted(glob.glob(f"{weak}/aoi*.json")):
+        r1 = json.loads(Path(f).read_text())
+        p2 = Path(weak) / "round2" / Path(f).name
+        r2 = json.loads(p2.read_text()) if p2.exists() else None
+        v1 = r1["current_check"]
+        v2 = r1["found_check"] if r1["adopt"] else v1
+        better = r2 is not None and any(k in r2["found"] for k in NEW_SWITCHES) and r2["found_check"] > v2
+        rows.append((v1, v2, r2["found_check"] if better else v2))
+    w = np.array(rows, dtype=float).reshape(-1, 3)
+    nl = pd.read_csv(nearest_loss) if Path(nearest_loss).exists() else pd.DataFrame(columns=["km", "loss_pts"])
+    if new_areas is None:
+        from .analysis import aoi_batch2 as b2
+
+        new_areas = len(b2.all_ids())
+    reviewed_new = sum(len(glob.glob(f"{review}/aoi{a}/field_review/verdicts/*.json"))
+                       for a in range(1000, 2000) if Path(f"{review}/aoi{a}").exists())
+    return {"new_areas": new_areas, "reviewed_new": reviewed_new, "weak": len(w), "check": w,
+            "km": nl["km"].to_numpy(float), "loss": nl["loss_pts"].to_numpy(float)}
+
+
+def weak_results_figure(n: dict, path) -> Path:
+    """Image 1: headline tiles, what borrowing a neighbour's rules costs with distance, and each weak area's held-out
+    agreement before and after its own rules."""
+    import matplotlib.pyplot as plt
+
+    w = n["check"]
+    fig = plt.figure(figsize=(16, 12), dpi=100, facecolor=D_SURFACE)
+    fig.text(0.05, 0.955, "A second batch of areas, and own rules for the weak ones", fontsize=29, weight="bold",
+             color=D_INK)
+    fig.text(0.05, 0.92, "Rice vs not-rice agreement with blind-reviewed fields, scored on the half no rule was chosen on",
+             fontsize=15, color=D_INK2)
+    tiles = [(f"{n['new_areas']}", "new areas mapped and delivered"),
+             (f"{n['reviewed_new']:,}", "new fields blind-reviewed"),
+             (f"{n['weak']}", "weak areas given their own rules"),
+             (f"{w[:, 0].mean():.0f} → {w[:, 2].mean():.0f} %", "held-out agreement, weak areas")]
+    for i, (big, small) in enumerate(tiles):
+        x = 0.05 + i * 0.235
+        fig.patches.append(plt.Rectangle((x, 0.73), 0.215, 0.15, transform=fig.transFigure, facecolor="white",
+                                         edgecolor=D_GRID, lw=1.2))
+        fig.text(x + 0.015, 0.80, big, fontsize=34 if len(big) < 9 else 30, weight="bold", color=D_INK)
+        fig.text(x + 0.015, 0.755, small, fontsize=13, color=D_INK2)
+
+    ax1 = fig.add_axes([0.07, 0.10, 0.38, 0.52])
+    _d_style(ax1)
+    ax1.grid(axis="x", color=D_GRID, lw=1)
+    ax1.scatter(n["km"], n["loss"], s=110, color=D_BLUE, edgecolor=D_SURFACE, lw=2, zorder=3)
+    ax1.set_xlim(0, 100)
+    ax1.set_ylim(0, max(40, float(np.nanmax(n["loss"])) + 5) if len(n["loss"]) else 40)
+    ax1.set_xlabel("distance to the area whose rules were borrowed (km)", fontsize=12, color=D_INK2)
+    ax1.set_ylabel("points of agreement lost", fontsize=12, color=D_INK2)
+    ax1.set_title("Borrowing a neighbour's rules costs more with distance", loc="left", fontsize=15, color=D_INK,
+                  pad=14)
+    near, far = n["loss"][n["km"] <= 35], n["loss"][n["km"] > 35]
+    if len(near):
+        ax1.text(3, 36, f"within 35 km: {near.min():g}-{near.max():g} points", fontsize=12, color=D_INK)
+    if len(far):
+        ax1.text(3, 32.5, f"beyond 60 km: {far.min():g}-{far.max():g} points", fontsize=12, color=D_INK)
+    ax1.text(3, 29, f"{len(n['loss'])} areas reviewed blind and also scored with the neighbour's rules", fontsize=11,
+             color=D_INK2)
+
+    ax2 = fig.add_axes([0.57, 0.10, 0.38, 0.52])
+    _d_style(ax2)
+    order = np.argsort(w[:, 0])
+    y = np.arange(len(w))
+    for k, i in enumerate(order):
+        ax2.plot([w[i, 0], w[i, 2]], [k, k], color=D_GRID, lw=2, zorder=1)
+    ax2.scatter(w[order, 0], y, s=36, color=D_ORANGE, edgecolor=D_SURFACE, lw=1.5, zorder=3, label="own first rules")
+    ax2.scatter(w[order, 2], y, s=36, color=D_GREEN, edgecolor=D_SURFACE, lw=1.5, zorder=3, label="own new rules")
+    ax2.set_yticks([])
+    ax2.grid(axis="y", visible=False)
+    ax2.grid(axis="x", color=D_GRID, lw=1)
+    ax2.set_xlim(25, 102)
+    ax2.set_xticks(range(30, 101, 10), [f"{v}%" for v in range(30, 101, 10)], fontsize=11)
+    ax2.set_title("Each weak area, held-out agreement before and after", loc="left", fontsize=15, color=D_INK, pad=14)
+    up, same, down = int((w[:, 2] > w[:, 0]).sum()), int((w[:, 2] == w[:, 0]).sum()), int((w[:, 2] < w[:, 0]).sum())
+    ax2.legend(loc="lower right", frameon=False, fontsize=12)
+    ax2.text(0.02, 0.97, f"{up} better, {same} unchanged, {down} worse", transform=ax2.transAxes, fontsize=12,
+             color=D_INK, weight="bold", va="top")
+    ax2.text(0.02, 0.92, f"mean {w[:, 0].mean():.1f} → {w[:, 1].mean():.1f} → {w[:, 2].mean():.1f} %  (round 1, round 2)",
+             transform=ax2.transAxes, fontsize=12, color=D_INK2, va="top")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, facecolor=D_SURFACE)
+    plt.close(fig)
+    return path
+
+
+def weak_method_figure(n: dict, path) -> Path:
+    """Image 2: how the weak areas got their own rules, as a flow of numbered steps."""
+    import matplotlib.pyplot as plt
+
+    w = n["check"]
+    fig = plt.figure(figsize=(16, 9), dpi=100, facecolor=D_SURFACE)
+    fig.text(0.04, 0.92, "Own rules for weak areas, without fooling myself", fontsize=28, weight="bold", color=D_INK)
+    steps = [("1  Score what ships", ["Rice vs not rice,", "not seven classes", "30 areas: class 42 %", "rice vs not 68 %"]),
+             ("2  Split the fields", ["Two fixed halves", "Pick on one half", "Judge on the other", "Same halves always"]),
+             ("3  Existing rules", ["Every rule set", "Switches added", "one at a time", "Kept if held-out wins"]),
+             ("4  Read the mistakes", ["Standing as harvested", "Flooded as young", "Grass as rice", "Signals that split them"]),
+             ("5  Three new switches", ["Radar canopy kept", "Water below the crop", "Field never emptied", "Own-range, no dB cuts"])]
+    wd = 0.172
+    for i, (head, facts) in enumerate(steps):
+        x = 0.04 + i * (wd + 0.018)
+        fig.patches.append(plt.Rectangle((x, 0.30), wd, 0.52, transform=fig.transFigure, facecolor="white",
+                                         edgecolor=D_GRID, lw=1.2))
+        fig.patches.append(plt.Rectangle((x, 0.76), wd, 0.06, transform=fig.transFigure, facecolor=D_BLUE, lw=0))
+        fig.text(x + 0.01, 0.778, head, fontsize=14.5, weight="bold", color="white")
+        for k, f in enumerate(facts):
+            fig.text(x + 0.012, 0.69 - k * 0.09, f, fontsize=13, color=D_INK)
+        if i < len(steps) - 1:
+            fig.text(x + wd + 0.002, 0.55, "›", fontsize=26, color=D_INK2)
+    right = 0.04 + len(steps) * (wd + 0.018) - 0.018          # the band spans exactly the row of steps
+    fig.patches.append(plt.Rectangle((0.04, 0.08), right - 0.04, 0.15, transform=fig.transFigure, facecolor="white",
+                                     edgecolor=D_GRID, lw=1.2))
+    fig.text(0.055, 0.185, "What changed", fontsize=15, weight="bold", color=D_GREEN)
+    fig.text(0.055, 0.135, f"Held-out agreement on {len(w)} weak areas: {w[:, 0].mean():.1f} % → {w[:, 1].mean():.1f} % "
+             f"(existing rules) → {w[:, 2].mean():.1f} % (new switches)  ·  no area got worse", fontsize=12.5,
+             color=D_INK2)
+    fig.text(0.055, 0.10, "Each new version shipped as new files beside the delivered ones; nothing overwritten",
+             fontsize=12.5, color=D_INK2)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, facecolor=D_SURFACE)
+    plt.close(fig)
+    return path
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -673,7 +812,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.outreach_figures", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("figure", choices=["radar-story", "clouds", "infographic", "pipeline", "patterns", "patterns-flow",
-                                      "delivery-132"])
+                                      "delivery-132", "weak-areas"])
     p.add_argument("--clusters", default="processed/_batch/s2_2026/rice_fresh/plot_clusters",
                    help="patterns: the plot_clusters output folder")
     p.add_argument("--dates-csv", default="processed/_batch/s2_2026/report/mask_share_year/dates.csv",
@@ -684,6 +823,12 @@ def main(argv=None) -> int:
     p.add_argument("--track", type=int, default=0)
     p.add_argument("--out", help="the image (for delivery-132: a folder for its two images)")
     args = p.parse_args(argv)
+    if args.figure == "weak-areas":
+        n = weak_numbers()
+        d = Path(args.out or OUT)
+        print(weak_results_figure(n, d / "weak_areas_results.png"))
+        print(weak_method_figure(n, d / "weak_areas_method.png"))
+        return 0
     if args.figure == "delivery-132":
         n = delivery_numbers()
         d = Path(args.out or OUT)
