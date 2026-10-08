@@ -309,6 +309,12 @@ def finish_loop(aois, poll: float = 60.0, jobs: int = 3) -> None:
         time.sleep(poll)
 
 
+#: Weak second-set AOIs (rule set taken from a neighbour scored < 50 % right) that get their own blind review before
+#: their own rules are made (user, 7 Oct 2026; ``weak_rules``). Their delivered map stays the review's stratum.
+WEAK_REVIEW = (1136, 1140, 1148, 1150, 1151, 1158, 1160, 1161, 1167, 1168, 1170, 1176, 1177, 1190, 1193, 1195, 1203,
+               1210, 1227, 1238)
+
+
 #: The Sentinel-2 per-date export of the second set: from the start of the dry season the rules read
 #: (``curve_rules.DRY_SEASON_FROM``, 1 March 2026; the user asked for April, March is the rules' own floor) to 1 Oct 2026
 #: (end exclusive). The 5-day series calendar still starts in September 2025; its windows before March stay empty and

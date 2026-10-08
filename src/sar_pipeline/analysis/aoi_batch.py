@@ -401,7 +401,7 @@ def _prepare_one(aoi: int, logs: str) -> str:
                      ["sar_pipeline.analysis.sowing_fresh", "--aoi", str(aoi), "--series-root", sr]):
             _sh(PY + args, logs / f"aoi{aoi}_steps.log")
         _mark(aoi, "inputs", {"run": run, "series": sr})
-    if b2.is_batch2(aoi) and aoi not in b2.REVIEW:    # rule set from a neighbour, no review (aoi_batch2.finish_loop)
+    if b2.is_batch2(aoi) and aoi not in b2.REVIEW + b2.WEAK_REVIEW:   # rule set from a neighbour, no review
         return f"aoi{aoi}: inputs done; rule set by neighbour"
     if b2.is_batch2(aoi):                              # the review's field file (the first set had one already)
         b2.review_fields(aoi)
@@ -413,7 +413,8 @@ def _prepare_one(aoi: int, logs: str) -> str:
 
         src = Path(FRESH) / f"aoi{aoi}" / "rule_trials" / "rules_aoi160" / f"aoi{aoi}"
         for n in (f"aoi{aoi}_rel_class.tif", f"aoi{aoi}_rel_class.qml"):
-            shutil.copy2(src / n, Path(FRESH) / f"aoi{aoi}" / n)
+            if not (Path(FRESH) / f"aoi{aoi}" / n).exists():   # a delivered AOI keeps its own map as the stratum
+                shutil.copy2(src / n, Path(FRESH) / f"aoi{aoi}" / n)
         _mark(aoi, "trials", {"sets": list(CANDIDATE_SETS)})
     if not _done(aoi, "sheets"):
         fc = fr.field_classes(aoi, min_acres=SAMPLE_MIN_ACRES)
