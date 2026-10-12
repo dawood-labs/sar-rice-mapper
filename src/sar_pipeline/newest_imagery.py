@@ -28,6 +28,8 @@ against the old one, window by window).
 Use::
 
     python -m sar_pipeline.newest_imagery check --aois 13 28 39 [--end 2026-10-03]
+    python -m sar_pipeline.newest_imagery fetch-clear --aois 13 28 --report <check json>    # export dates >= 50 % clear
+    python -m sar_pipeline.newest_imagery deliver-clear --aois 13 28 --report <check json>  # copy them to the delivery
     python -m sar_pipeline.newest_imagery compare-radar  --aois 13 --old v001_20260923 --new v002_20261002
     python -m sar_pipeline.newest_imagery inputs --aois 72 [--run v002_20261002] [--series-root <series folder>]
     python -m sar_pipeline.newest_imagery compare-series --aois 13 --old processed/_batch/<old series> \
@@ -424,6 +426,43 @@ def fetch_dates(aoi_id: int, dates, season_key: str = "monsoon2026") -> list[dic
     return oe.submit_each(todo, submit_one, print)
 
 
+#: Sub-folder of an AOI's delivery folder for the newer clear dates (user, 12 Oct 2026: a colleague wants them next
+#: to the delivery). Not ``s2/``: ``rice_map_delivery.step_upload`` removes from ``s2/`` every date its MANIFEST does
+#: not list, so a later upload would delete them there.
+NEW_DATES_FOLDER = "s2_oct2026"
+
+
+def deliver_new_dates(fetch: dict[str, list[str]], season_key: str = "monsoon2026") -> list[dict]:
+    """Copies each fetched date (``clear_dates_to_fetch``) inside the bucket from ``s2_dates_masks/<aoi>/`` to the
+    AOI's delivery folder ``<delivery>/<client name>/`` + :data:`NEW_DATES_FOLDER`, named as the client sees the AOI
+    (``b2_aoi<N>`` for the second set). Server-side copy; a file already there is left as it is."""
+    from google.cloud import storage
+
+    from . import auth
+    from .analysis import rice_map_delivery as rd
+
+    rows = []
+    client = None
+    for key, dates in fetch.items():
+        aoi = int(key[3:])
+        cfg = season_config(aoi, season_key)
+        if client is None:
+            client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
+        b = client.bucket(cfg["gcs"]["bucket"])
+        base = cfg["gcs"]["base_folder"]
+        for d in dates:
+            name = f"{key}_{d[:7]}_S2_{d}.tif"
+            src = b.blob(f"{base}/s2_dates_masks/{key}/{name}")
+            dst = f"{base}/{rd.DELIVERY}/{rd.bucket_name(aoi)}/{NEW_DATES_FOLDER}/{rd.bucket_name(aoi, name)}"
+            if b.get_blob(dst) is None:
+                b.copy_blob(src, b, dst)
+                state = "copied"
+            else:
+                state = "already there"
+            rows.append({"aoi": rd.bucket_name(aoi), "date": d, "gcs_uri": f"gs://{b.name}/{dst}", "state": state})
+    return rows
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -431,7 +470,8 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.newest_imagery", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["check", "compare-radar", "compare-series", "inputs", "describe", "fetch-clear"])
+    p.add_argument("step", choices=["check", "compare-radar", "compare-series", "inputs", "describe", "fetch-clear",
+                                     "deliver-clear"])
     p.add_argument("--report", help="fetch-clear: the JSON written by check --json")
     p.add_argument("--min-clear", type=float, default=MOSTLY_CLEAR_PCT, help="fetch-clear: AOI clear %% needed")
     p.add_argument("--dates", nargs="+", help="describe: the local per-date files to describe (YYYY-MM-DD)")
@@ -473,6 +513,14 @@ def main(argv=None) -> int:
             pd.concat(frames, ignore_index=True).to_csv(args.out, index=False)
         return 0
     auth.init_ee(season_config(args.aois[0], args.season))
+    if args.step == "deliver-clear":
+        todo = clear_dates_to_fetch(json.loads(Path(args.report).read_text()), args.min_clear)
+        todo = {k: v for k, v in todo.items() if int(k[3:]) in set(args.aois)}
+        rows = deliver_new_dates(todo, args.season)
+        print(json.dumps(rows, indent=1))
+        print(f"{sum(r['state'] == 'copied' for r in rows)} copied, "
+              f"{sum(r['state'] != 'copied' for r in rows)} already there")
+        return 0
     if args.step == "fetch-clear":
         todo = clear_dates_to_fetch(json.loads(Path(args.report).read_text()), args.min_clear)
         rows = []
