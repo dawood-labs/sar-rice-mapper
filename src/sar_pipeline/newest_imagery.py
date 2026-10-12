@@ -383,6 +383,47 @@ def analysis_inputs(aoi_id: int, series_root: str, run_id: str | None = None, re
     return out
 
 
+def clear_dates_to_fetch(report: list[dict], min_clear: float = MOSTLY_CLEAR_PCT) -> dict[str, list[str]]:
+    """From a ``check --json`` report: per AOI key, the new dates whose AOI is at least ``min_clear`` % clear (Cloud
+    Score+) and whose Cloud Score+ is complete for every scene of the day (an incomplete day exports a ``clear``
+    band of 0, issue 32: it is left for a later run)."""
+    out = {}
+    for r in report:
+        ds = [d["date"][:10] for d in r["s2_new"]
+              if d.get("aoi_clear_pct") is not None and d["aoi_clear_pct"] >= min_clear and d.get("cloud_score_complete")]
+        if ds:
+            out[r["aoi"]] = sorted(ds)
+    return out
+
+
+def fetch_dates(aoi_id: int, dates, season_key: str = "monsoon2026") -> list[dict]:
+    """Starts the per-date exports of ``dates`` for one AOI exactly as the season's own S2 dates were made
+    (``optical_export.export_image`` with ``BANDS_WITH_MASKS``, the AOI's grid, ``s2_dates_masks/<aoi>/``); a date
+    already on GCS is skipped. Why (manager via the user, 12 Oct 2026): AOIs that had no clear September view get
+    every newer date that is at least half clear."""
+    from google.cloud import storage
+
+    from . import auth
+    from . import optical_export as oe
+
+    cfg = season_config(aoi_id, season_key)
+    key, bucket = cfg["aoi"]["key"], cfg["gcs"]["bucket"]
+    prefix = cfg["gcs"]["base_folder"] + "/s2_dates_masks"
+    grid_def = json.loads((config_mod.grid_dir(cfg) / "grid_def.json").read_text())
+    w, s_, e, n = oe.grid_bounds_4326(grid_def)
+    rect = {"type": "Polygon", "coordinates": [[[w, s_], [e, s_], [e, n], [w, n], [w, s_]]]}
+    client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
+    existing = {b.name for b in client.list_blobs(bucket, prefix=f"{prefix}/{key}/")}
+    todo = oe.dates_to_export(list(dates), lambda d: d[:7], existing, prefix, key)
+
+    def submit_one(date):
+        name = oe.object_name(prefix, key, date[:7], date)
+        task = oe.export_image(date, grid_def, bucket, name, rect, oe.BANDS_WITH_MASKS)
+        return {"aoi": key, "date": date, "gcs_uri": f"gs://{bucket}/{name}.tif", "task_id": task.id}
+
+    return oe.submit_each(todo, submit_one, print)
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -390,7 +431,9 @@ def main(argv=None) -> int:
 
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.newest_imagery", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("step", choices=["check", "compare-radar", "compare-series", "inputs", "describe"])
+    p.add_argument("step", choices=["check", "compare-radar", "compare-series", "inputs", "describe", "fetch-clear"])
+    p.add_argument("--report", help="fetch-clear: the JSON written by check --json")
+    p.add_argument("--min-clear", type=float, default=MOSTLY_CLEAR_PCT, help="fetch-clear: AOI clear %% needed")
     p.add_argument("--dates", nargs="+", help="describe: the local per-date files to describe (YYYY-MM-DD)")
     p.add_argument("--series-root", default="processed/_batch/s2_2026_hyb40m1late",
                    help="inputs: the 5-day series folder to report on")
@@ -430,6 +473,15 @@ def main(argv=None) -> int:
             pd.concat(frames, ignore_index=True).to_csv(args.out, index=False)
         return 0
     auth.init_ee(season_config(args.aois[0], args.season))
+    if args.step == "fetch-clear":
+        todo = clear_dates_to_fetch(json.loads(Path(args.report).read_text()), args.min_clear)
+        rows = []
+        for a in args.aois:
+            if f"aoi{a}" in todo:
+                rows += fetch_dates(a, todo[f"aoi{a}"], args.season)
+        print(f"{len(rows)} exports started for {len(todo)} AOIs with a date >= {args.min_clear} % clear")
+        print(json.dumps(rows, indent=1))
+        return 0
     report = []
     for a in args.aois:
         r = check_aoi(a, args.end, args.season)
