@@ -23,6 +23,23 @@ import sys
 from pathlib import Path
 
 
+#: The sets of the traces running now. An audit hook can never be removed, so one hook is installed once and feeds them.
+_ACTIVE: list[set[str]] = []
+
+
+def _hook_once() -> None:
+    if getattr(_hook_once, "done", False):
+        return
+
+    def hook(event, a):
+        if _ACTIVE and event == "open" and a and isinstance(a[0], (str, bytes, os.PathLike)):
+            for s in _ACTIVE:
+                s.add(os.fsdecode(a[0]))
+
+    sys.addaudithook(hook)
+    _hook_once.done = True
+
+
 def trace_reads(fn, *args, **kw) -> set[str]:
     """Paths (relative to the working directory when inside it) of every file ``fn(*args, **kw)`` opens.
 
@@ -31,11 +48,7 @@ def trace_reads(fn, *args, **kw) -> set[str]:
     import importlib
 
     seen: set[str] = set()
-
-    def hook(event, a):
-        if event == "open" and a and isinstance(a[0], (str, bytes, os.PathLike)):
-            seen.add(os.fsdecode(a[0]))
-
+    _hook_once()
     targets = [("rasterio", "open"), ("pyogrio", "read_dataframe"), ("pyogrio", "read_info"),
                ("pyogrio", "read_arrow"), ("pyogrio.raw", "read"), ("pyogrio.raw", "read_arrow"),
                ("pyarrow.parquet", "read_table"), ("pyarrow.parquet", "ParquetFile")]
@@ -48,7 +61,7 @@ def trace_reads(fn, *args, **kw) -> set[str]:
             return f(path, *a, **k)
         return w
 
-    sys.addaudithook(hook)
+    _ACTIVE.append(seen)
     try:
         for mod, name in targets:
             m = importlib.import_module(mod)
@@ -56,6 +69,7 @@ def trace_reads(fn, *args, **kw) -> set[str]:
             setattr(m, name, wrap(getattr(m, name)))
         fn(*args, **kw)
     finally:
+        _ACTIVE.remove(seen)
         for m, name, f in saved:
             setattr(m, name, f)
     cwd = Path.cwd().resolve()
@@ -66,7 +80,7 @@ def trace_reads(fn, *args, **kw) -> set[str]:
         except (OSError, ValueError):
             continue
         if r.is_file() and "site-packages" not in str(r) and not str(r).startswith(
-                (sys.base_prefix, "/usr", "/opt", "/proc", "/etc", "/tmp")):
+                (sys.base_prefix, "/usr", "/opt", "/proc", "/etc")):
             out.add(str(r.relative_to(cwd)) if r.is_relative_to(cwd) else str(r))
     return out
 
