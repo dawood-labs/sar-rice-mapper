@@ -25,6 +25,7 @@ Run::
     python -m sar_pipeline.storage_plan verify
     python -m sar_pipeline.storage_plan clear
     python -m sar_pipeline.storage_plan restore --under sar-rice-mapper/processed/_batch/s2_2026/sar_only
+    python -m sar_pipeline.storage_plan backup --round 2      # round 2 (13 Oct): every data file; then verify / clear
 """
 from __future__ import annotations
 
@@ -212,12 +213,51 @@ def _bucket_and_base():
     return _client(key, pool=64).bucket(cfg["gcs"]["bucket"]), cfg["gcs"]["base_folder"], key
 
 
-def _manifest_path(root: Path = PROJECT) -> Path:
-    return Path(root) / "sar-rice-mapper" / "logs" / f"{BACKUP}_manifest.csv"
+#: Round 2 (user, 13 Oct 2026: "zruri files ko gcs pr rakho ... free up the space, jitni easily ho skti"): every data
+#: file of the project, code / venv / configs / docs / logs / secrets stay. Files already in the bucket elsewhere
+#: (``s2_dates_masks``: the Earth Engine exports themselves) are not uploaded again; their copy there is verified.
+ALL_DATA_DIRS = ("sar-rice-mapper/processed", "sar-rice-mapper/data", "data", "outputs")
+#: Local folder -> the bucket folder (under the base folder) that already holds the same files.
+ALREADY_IN_BUCKET = {"sar-rice-mapper/data/s2_dates_masks/": "s2_dates_masks/"}
+ROUNDS = {"1": "_pod_backup_2026-10-12", "2": "_pod_backup_2026-10-13"}
 
 
-def backup(processes: int = 0, threads: int = 8, root: Path = PROJECT) -> dict:
-    """Uploads :func:`backup_list` (files already in the bucket with the same size are skipped), then the manifest."""
+def backup_list_all(root: Path = PROJECT) -> list[tuple[str, int]]:
+    """(path from ``root``, size) of every file under :data:`ALL_DATA_DIRS`."""
+    out = []
+    for d in ALL_DATA_DIRS:
+        if (Path(root) / d).exists():
+            out += [(str(p.relative_to(root)), p.stat().st_size) for p in _files(Path(root) / d)]
+    return sorted(out)
+
+
+def gcs_name(path: str, base: str, dest: str) -> str:
+    """Where a backed-up file lives in the bucket: its existing copy for :data:`ALREADY_IN_BUCKET`, else
+    ``<dest>/<path>``."""
+    for local, remote in ALREADY_IN_BUCKET.items():
+        if path.startswith(local):
+            return f"{base}/{remote}{path[len(local):]}"
+    return f"{dest}/{path}"
+
+
+def _manifest_path(root: Path = PROJECT, rnd: str = "1") -> Path:
+    return Path(root) / "sar-rice-mapper" / "logs" / f"{ROUNDS[rnd]}_manifest.csv"
+
+
+def _manifest(rnd: str, root: Path = PROJECT):
+    """The round's manifest with a ``gcs`` column (round 1 was written without it: every file under its prefix)."""
+    import pandas as pd
+
+    m = pd.read_csv(_manifest_path(root, rnd))
+    if "gcs" not in m:
+        _, base, _ = _bucket_and_base()
+        m["gcs"] = [f"{base}/{ROUNDS[rnd]}/{q}" for q in m["path"]]
+    return m
+
+
+def backup(processes: int = 0, threads: int = 8, root: Path = PROJECT, rnd: str = "1") -> dict:
+    """Uploads the round's files (``backup_list`` / :func:`backup_list_all`); a file already in the bucket at its
+    :func:`gcs_name` with the same size is skipped. The manifest (path, size, gcs) goes next to the files."""
     import csv
     import time
     from concurrent.futures import ProcessPoolExecutor
@@ -225,17 +265,25 @@ def backup(processes: int = 0, threads: int = 8, root: Path = PROJECT) -> dict:
     from . import handover as ho
     from . import resources
 
-    files = backup_list(root)
-    mp_ = _manifest_path(root)
+    files = backup_list(root) if rnd == "1" else backup_list_all(root)
+    b, base, key = _bucket_and_base()
+    dest = f"{base}/{ROUNDS[rnd]}"
+    have = {x.name: x.size for x in b.list_blobs(prefix=dest + "/")}
+    for remote in set(ALREADY_IN_BUCKET.values()):
+        have.update({x.name: x.size for x in b.list_blobs(prefix=f"{base}/{remote}")})
+    rows = []
+    for r, sz in files:
+        g = gcs_name(r, base, dest)
+        if not g.startswith(dest + "/") and have.get(g) != sz:      # not (or not the same) where it should be
+            g = f"{dest}/{r}"
+        rows.append((r, sz, g))
+    mp_ = _manifest_path(root, rnd)
     mp_.parent.mkdir(parents=True, exist_ok=True)
     with open(mp_, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["path", "size"])
-        w.writerows(files)
-    b, base, key = _bucket_and_base()
-    dest = f"{base}/{BACKUP}"
-    have = {x.name: x.size for x in b.list_blobs(prefix=dest + "/")}
-    todo = [(r, s) for r, s in files if have.get(f"{dest}/{r}") != s]
+        w.writerow(["path", "size", "gcs"])
+        w.writerows(rows)
+    todo = [(r, sz) for r, sz, g in rows if g.startswith(dest + "/") and have.get(g) != sz]
     n = processes or resources.detect_resources().cpus
     # big files first, dealt round-robin, so every process gets a similar share of bytes
     todo.sort(key=lambda x: -x[1])
@@ -246,9 +294,10 @@ def backup(processes: int = 0, threads: int = 8, root: Path = PROJECT) -> dict:
     b.blob(f"{dest}/_manifest.csv").upload_from_filename(str(mp_))
     sent = sum(r[0] for r in res)
     failed = [f for r in res for f in r[1]]
-    return {"files": len(files), "bytes": sum(s for _, s in files), "sent_files": len(todo) - len(failed),
-            "sent_gb": round(sent / 1e9, 2), "failed": failed[:20], "n_failed": len(failed),
-            "minutes": round((time.time() - t0) / 60, 1), "streams": n * threads}
+    return {"files": len(files), "bytes": sum(sz for _, sz in files),
+            "already_in_bucket": len(rows) - sum(g.startswith(dest + "/") for *_, g in rows),
+            "sent_files": len(todo) - len(failed), "sent_gb": round(sent / 1e9, 2), "failed": failed[:20],
+            "n_failed": len(failed), "minutes": round((time.time() - t0) / 60, 1), "streams": n * threads}
 
 
 def _md5(path: str) -> str:
@@ -262,40 +311,37 @@ def _md5(path: str) -> str:
     return base64.b64encode(h.digest()).decode()
 
 
-def verify(processes: int = 0, root: Path = PROJECT) -> dict:
-    """Size and md5 of every manifest file against the bucket; writes ``<manifest>_verified.csv`` (path, ok)."""
+def verify(processes: int = 0, root: Path = PROJECT, rnd: str = "1") -> dict:
+    """Size and md5 of every manifest file against its object in the bucket; writes ``<manifest>_verified.csv``."""
     from concurrent.futures import ProcessPoolExecutor
-
-    import pandas as pd
 
     from . import resources
 
-    m = pd.read_csv(_manifest_path(root))
+    m = _manifest(rnd, root)
     b, base, _ = _bucket_and_base()
-    dest = f"{base}/{BACKUP}"
-    remote = {x.name[len(dest) + 1:]: (x.size, x.md5_hash) for x in b.list_blobs(prefix=dest + "/")}
-    exists = [Path(root) / p for p in m["path"]]
+    remote = {}
+    for pre in sorted({g.rsplit("/", 1)[0].split("/")[0] + "/" + g.split("/")[1] for g in m["gcs"]}):
+        remote.update({x.name: (x.size, x.md5_hash) for x in b.list_blobs(prefix=pre + "/")})
     with ProcessPoolExecutor(processes or resources.detect_resources().cpus) as ex:
-        md5 = list(ex.map(_md5, [str(p) for p in exists], chunksize=64))
-    ok = [remote.get(p, (None, None)) == (s, h) for p, s, h in zip(m["path"], m["size"], md5)]
-    m["ok"] = ok
-    m.to_csv(str(_manifest_path(root)).replace(".csv", "_verified.csv"), index=False)
-    return {"files": len(m), "ok": int(sum(ok)), "bad": int(len(m) - sum(ok)),
+        md5 = list(ex.map(_md5, [str(Path(root) / p) for p in m["path"]], chunksize=64))
+    m["ok"] = [remote.get(g, (None, None)) == (sz, h) for g, sz, h in zip(m["gcs"], m["size"], md5)]
+    m.to_csv(str(_manifest_path(root, rnd)).replace(".csv", "_verified.csv"), index=False)
+    return {"files": len(m), "ok": int(m["ok"].sum()), "bad": int((~m["ok"]).sum()),
             "ok_gb": round(float(m.loc[m["ok"], "size"].sum()) / 1e9, 2)}
 
 
-def clear(root: Path = PROJECT) -> dict:
+def clear(root: Path = PROJECT, rnd: str = "1") -> dict:
     """Deletes the local copy of every file ``verify`` passed (and only those), then folders left empty."""
     import pandas as pd
 
-    v = pd.read_csv(str(_manifest_path(root)).replace(".csv", "_verified.csv"))
+    v = pd.read_csv(str(_manifest_path(root, rnd)).replace(".csv", "_verified.csv"))
     gone, freed, dirs = 0, 0, set()
-    for p, s in v.loc[v["ok"], ["path", "size"]].itertuples(index=False):
+    for p, sz in v.loc[v["ok"], ["path", "size"]].itertuples(index=False):
         f = Path(root) / p
-        if f.is_file() and f.stat().st_size == s:
+        if f.is_file() and f.stat().st_size == sz:
             f.unlink()
             gone += 1
-            freed += s
+            freed += sz
             dirs.add(f.parent)
     removed = 0
     for d in sorted(dirs, key=lambda x: -len(x.parts)):
@@ -307,26 +353,32 @@ def clear(root: Path = PROJECT) -> dict:
             "kept_unverified": int((~v["ok"]).sum())}
 
 
-def restore(under: str = "", root: Path = PROJECT, threads: int = 32) -> dict:
-    """Downloads backed-up files (those whose path starts with ``under``) back to their place; existing files with
-    the same size are skipped."""
+def restore(under: str = "", root: Path = PROJECT, threads: int = 32, rnd: str = "") -> dict:
+    """Downloads backed-up files whose path starts with ``under`` back to their place, from both rounds (or one),
+    using each round's manifest (``gcs`` column: a file may live in its original bucket folder); files already there
+    with the same size are skipped."""
     from concurrent.futures import ThreadPoolExecutor
 
-    b, base, _ = _bucket_and_base()
-    dest = f"{base}/{BACKUP}"
-    blobs = [x for x in b.list_blobs(prefix=f"{dest}/{under}".rstrip("/")) if not x.name.endswith("_manifest.csv")]
+    b, _, _ = _bucket_and_base()
+    rows = []
+    for r in ([rnd] if rnd else list(ROUNDS)):
+        if _manifest_path(root, r).exists():
+            m = _manifest(r, root)
+            rows += [(p, sz, g) for p, sz, g in m[["path", "size", "gcs"]].itertuples(index=False)
+                     if p.startswith(under)]
 
-    def one(x):
-        p = Path(root) / x.name[len(dest) + 1:]
-        if p.exists() and p.stat().st_size == x.size:
+    def one(row):
+        p, sz, g = row
+        f = Path(root) / p
+        if f.exists() and f.stat().st_size == sz:
             return 0
-        p.parent.mkdir(parents=True, exist_ok=True)
-        x.download_to_filename(str(p))
-        return x.size
+        f.parent.mkdir(parents=True, exist_ok=True)
+        b.blob(g).download_to_filename(str(f))
+        return sz
 
     with ThreadPoolExecutor(threads) as ex:
-        got = sum(ex.map(one, blobs))
-    return {"files": len(blobs), "downloaded_gb": round(got / 1e9, 2)}
+        got = sum(ex.map(one, rows))
+    return {"files": len(rows), "downloaded_gb": round(got / 1e9, 2)}
 
 
 def main(argv=None) -> int:
@@ -334,12 +386,14 @@ def main(argv=None) -> int:
     p.add_argument("step", choices=["trace", "list", "backup", "verify", "clear", "restore"])
     p.add_argument("--under", default="", help="restore: only files under this path (from the project folder)")
     p.add_argument("--threads", type=int, default=8, help="backup: threads per process")
+    p.add_argument("--round", dest="rnd", default="1", choices=list(ROUNDS),
+                   help="list / backup / verify / clear: 1 = files not needed (12 Oct), 2 = all data files (13 Oct)")
     p.add_argument("--field", action="append", default=[], help="field ids for inspect_field")
     p.add_argument("--aoi", type=int, action="append", default=[], help="AOIs for inspect_pixel (with --pixel)")
     p.add_argument("--pixel", type=int, action="append", default=[])
     a = p.parse_args(argv)
     if a.step == "list":
-        f = backup_list()
+        f = backup_list() if a.rnd == "1" else backup_list_all()
         from collections import Counter
 
         top = Counter()
@@ -351,8 +405,8 @@ def main(argv=None) -> int:
         print(f"{len(f):,} files, {sum(s for _, s in f) / 1e9:.1f} GB to move")
         return 0
     if a.step in ("backup", "verify", "clear", "restore"):
-        fn = {"backup": lambda: backup(threads=a.threads), "verify": verify, "clear": clear,
-              "restore": lambda: restore(a.under)}[a.step]
+        fn = {"backup": lambda: backup(threads=a.threads, rnd=a.rnd), "verify": lambda: verify(rnd=a.rnd),
+              "clear": lambda: clear(rnd=a.rnd), "restore": lambda: restore(a.under)}[a.step]
         print(json.dumps(fn(), indent=1, default=str))
         return 0
     import matplotlib

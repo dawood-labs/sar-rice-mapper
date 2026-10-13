@@ -47,3 +47,19 @@ def test_backup_list_keeps_what_inspection_reads(tmp_path):
                    f"{sp.SR}/_batch/s2_2026/rice_fresh/aoi1/field_review/sheets/f.png",
                    f"{sp.SR}/_batch/s2_2026/report/other.csv", f"{sp.SR}/_batch/s2_2026/aoi1/aoi1_monsoon2026_x.tif",
                    f"{sp.SR}/aoi1/year2025/runs/v1/a.tif", f"{sp.SR}/aoi1/monsoon2026/runs/v001/a.tif"}
+
+
+def test_round2_maps_s2_exports_to_their_bucket_copy():
+    assert sp.gcs_name("sar-rice-mapper/data/s2_dates_masks/aoi1/aoi1_2026-10_S2_2026-10-06.tif", "B", "B/X") == \
+        "B/s2_dates_masks/aoi1/aoi1_2026-10_S2_2026-10-06.tif"
+    assert sp.gcs_name("data/delineation/a.gpkg", "B", "B/X") == "B/X/data/delineation/a.gpkg"
+
+
+def test_backup_list_all_takes_data_not_code(tmp_path):
+    for rel in ("sar-rice-mapper/processed/a.tif", "data/b.gpkg", "sar-rice-mapper/src/c.py",
+                "sar-rice-mapper/.venv/d.py", "outputs/e.png"):
+        p = tmp_path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x")
+    assert [r for r, _ in sp.backup_list_all(tmp_path)] == ["data/b.gpkg", "outputs/e.png",
+                                                            "sar-rice-mapper/processed/a.tif"]
