@@ -63,3 +63,17 @@ def test_backup_list_all_takes_data_not_code(tmp_path):
         p.write_text("x")
     assert [r for r, _ in sp.backup_list_all(tmp_path)] == ["data/b.gpkg", "outputs/e.png",
                                                             "sar-rice-mapper/processed/a.tif"]
+
+
+def test_aoi_prefixes_do_not_catch_other_aois():
+    pre = tuple(sp.aoi_prefixes(1))
+    assert "sar-rice-mapper/processed/aoi1/monsoon2026/LATEST.txt".startswith(pre)
+    assert not "sar-rice-mapper/processed/aoi11/monsoon2026/LATEST.txt".startswith(pre)
+    assert not "sar-rice-mapper/processed/_batch/s2_2026/baseline_v3/aoi11_monsoon2026_final.tif".startswith(pre)
+
+
+def test_internal_field_id_maps_the_client_name():
+    from sar_pipeline.qgis_review import internal_field_id
+
+    assert internal_field_id("b2_aoi198_p000277") == "aoi1198_p000277"
+    assert internal_field_id("aoi66_p000013") == "aoi66_p000013"

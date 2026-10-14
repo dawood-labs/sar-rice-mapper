@@ -404,6 +404,17 @@ def inspect(lon: float, lat: float, block: int = 3, out_dir=f"{OUT}/inspect") ->
     return info
 
 
+def internal_field_id(field_id: str) -> str:
+    """A field id as the client sees it for the second AOI set (``b2_aoi198_p000277``) in the pipeline's own form
+    (``aoi1198_p000277``, ``aoi_batch2.OFFSET`` + N); any other id is returned as it is."""
+    import re
+
+    from .analysis.aoi_batch2 import OFFSET
+
+    m = re.match(r"b2_aoi(\d+)_(.+)$", field_id)
+    return f"aoi{OFFSET + int(m.group(1))}_{m.group(2)}" if m else field_id
+
+
 def field_by_id(field_id: str):
     """(aoi_id, field row in EPSG:32646, pixel ids) for a ``field_id`` such as ``aoi116_000123``."""
     import geopandas as gpd
@@ -413,7 +424,11 @@ def field_by_id(field_id: str):
 
     from .analysis import pixel_report as pr
 
+    field_id = internal_field_id(field_id)
     aoi_id = int(field_id.split("_")[0][3:])
+    from . import storage_plan as sp
+
+    sp.ensure_aoi(aoi_id)                   # the AOI's data, fetched from the backup when not on the pod
     path = Path(SRC) / "fields" / f"aoi{aoi_id}_fields_monsoon2026.gpkg"
     if field_id.split("_", 1)[1].startswith("p"):
         # a field of the delivered (locked) field layer, id aoi<N>_p<polygon> (analysis.rice_map_delivery)
@@ -472,6 +487,9 @@ def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect
     from .analysis import ndvi_5day as nd
     from .analysis import water_investigation as wi
 
+    from . import storage_plan as sp
+
+    sp.ensure_aoi(aoi_id)                   # the AOI's data, fetched from the backup when not on the pod
     info = {"aoi": f"aoi{aoi_id}", "pixel_id": pid, "classes_at_pixel": classes_at(aoi_id, pid)}
     g = nd.load(aoi_id, out_root=series_root(aoi_id))["loc"]["grid"]
     block_pids = wi.block_pids(int(pid), int(g["width"]), int(g["height"]), block)

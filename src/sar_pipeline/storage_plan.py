@@ -381,10 +381,64 @@ def restore(under: str = "", root: Path = PROJECT, threads: int = 32, rnd: str =
     return {"files": len(rows), "downloaded_gb": round(got / 1e9, 2)}
 
 
+def aoi_prefixes(aoi: int) -> list[str]:
+    """Paths (from the project folder) that the inspection notebook reads for one AOI (measured with ``trace``)."""
+    r, b = "sar-rice-mapper/", "sar-rice-mapper/processed/_batch/s2_2026"
+    out = [f"{r}data/s2_dates_masks/aoi{aoi}/", f"{r}data/aoi/", f"{r}processed/aoi{aoi}/", f"{b}/aoi{aoi}/",
+           f"{b}/baseline_v3/aoi{aoi}_", f"{b}/report/final_audit/", f"{b}/rice_fresh/aoi{aoi}/",
+           f"{b}/rice_fresh/labels_v2/", f"{b}/rice_fresh/locked/aoi{aoi}/", f"{b}/fields/aoi{aoi}_",
+           f"{r}processed/_batch/{KEEP_SERIES}/aoi{aoi}/"]
+    if aoi >= 1000:                                            # the second AOI set's own AOI file
+        out.append(f"data/aoi_batch2_2026-09-29/split/b2_{aoi}/")
+    return out
+
+
+_ROUND2 = None
+
+
+def ensure_aoi(aoi: int, root: Path = PROJECT, threads: int = 32, log=print) -> dict:
+    """Downloads, from the round-2 backup, the files the inspection notebook needs for ``aoi`` that are not on the
+    pod (user, 14 Oct 2026: "jis aoi k lye data chaiye hoga wo download ho ajye run time pr"). A file already there
+    with the same size is not fetched again, so the second call for an AOI costs one look at the disk."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    global _ROUND2
+    if _ROUND2 is None:
+        mp_ = _manifest_path(root, "2")
+        if not mp_.exists():
+            return {"aoi": aoi, "files": 0, "downloaded_gb": 0.0}
+        _ROUND2 = _manifest("2", root)
+    pre = tuple(aoi_prefixes(aoi))
+    m = _ROUND2[_ROUND2["path"].str.startswith(pre)]
+    todo = [(p, sz, g) for p, sz, g in m[["path", "size", "gcs"]].itertuples(index=False)
+            if not ((Path(root) / p).is_file() and (Path(root) / p).stat().st_size == sz)]
+    if not todo:
+        return {"aoi": aoi, "files": 0, "downloaded_gb": 0.0}
+    t0 = time.time()
+    log(f"aoi{aoi}: fetching {len(todo)} files ({sum(t[1] for t in todo) / 1e9:.2f} GB) from the backup ...")
+    b, _, _ = _bucket_and_base()
+
+    def one(row):
+        p, sz, g = row
+        f = Path(root) / p
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_name(f".{f.name}.part")
+        b.blob(g).download_to_filename(str(tmp))
+        tmp.replace(f)
+        return sz
+
+    with ThreadPoolExecutor(threads) as ex:
+        got = sum(ex.map(one, todo))
+    log(f"aoi{aoi}: done in {time.time() - t0:.0f} s")
+    return {"aoi": aoi, "files": len(todo), "downloaded_gb": round(got / 1e9, 2)}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("step", choices=["trace", "list", "backup", "verify", "clear", "restore"])
     p.add_argument("--under", default="", help="restore: only files under this path (from the project folder)")
+    p.add_argument("--restore-round", default="", choices=["", *ROUNDS], help="restore: one round only (default both)")
     p.add_argument("--threads", type=int, default=8, help="backup: threads per process")
     p.add_argument("--round", dest="rnd", default="1", choices=list(ROUNDS),
                    help="list / backup / verify / clear: 1 = files not needed (12 Oct), 2 = all data files (13 Oct)")
@@ -406,7 +460,8 @@ def main(argv=None) -> int:
         return 0
     if a.step in ("backup", "verify", "clear", "restore"):
         fn = {"backup": lambda: backup(threads=a.threads, rnd=a.rnd), "verify": lambda: verify(rnd=a.rnd),
-              "clear": lambda: clear(rnd=a.rnd), "restore": lambda: restore(a.under)}[a.step]
+              "clear": lambda: clear(rnd=a.rnd),
+              "restore": lambda: restore(a.under, rnd=a.restore_round)}[a.step]
         print(json.dumps(fn(), indent=1, default=str))
         return 0
     import matplotlib
