@@ -206,11 +206,54 @@ def run(aois=None, jobs: int = 0) -> pd.DataFrame:
     return t
 
 
+SOWING_GROUP = "with_sowing_no_clear_sep"     # user, 15 Oct 2026: the 43 AOIs with sowing in their own folder
+
+
+def upload(threads: int = 32) -> dict:
+    """Uploads every AOI's QC layer, style and report, plus the summaries, to ``<base>/<GCS_FOLDER>/`` (a new folder;
+    nothing delivered is touched). The AOIs of ``qc_sowing.NO_CLEAR_SEPTEMBER`` go under :data:`SOWING_GROUP`, so
+    they are easy to review. Second-set files carry the client's name inside and out
+    (``rice_map_delivery.client_file``). Each upload is checked by md5 afterwards."""
+    import base64
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import qc_sowing as qs
+    from . import rice_map_delivery as rd
+
+    b, base = rd._bucket(19, None)
+    dest = f"{base}/{GCS_FOLDER}"
+    items = []
+    for d in sorted(Path(OUT).glob("*_set/aoi*")):
+        aoi = int(d.name[3:])
+        group = f"{SOWING_GROUP}/" if aoi in qs.NO_CLEAR_SEPTEMBER else ""
+        for f in sorted(d.glob(f"aoi{aoi}_fields_qc.*")):
+            c = rd.client_file(aoi, f)
+            items.append((c, f"{dest}/{group}{set_folder(aoi)}/{rd.bucket_name(aoi)}/{c.name}"))
+    for name, src in (("qc_summary.csv", Path(OUT) / "_summary" / "qc_summary.csv"),
+                      ("sowing_review_score.csv", qs.SOWING_DIR / "review_score.csv")):
+        if src.exists():
+            items.append((src, f"{dest}/_summary/{name}"))
+    md5 = lambda p: base64.b64encode(hashlib.md5(Path(p).read_bytes()).digest()).decode()  # noqa: E731
+
+    def one(it):
+        src, name = it
+        b.blob(name).upload_from_filename(str(src), timeout=600)
+        return b.get_blob(name).md5_hash == md5(src)
+
+    with ThreadPoolExecutor(threads) as ex:
+        ok = list(ex.map(one, items))
+    return {"files": len(items), "verified": int(sum(ok)), "gcs": f"gs://{b.name}/{dest}/"}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["run"])
+    p.add_argument("step", choices=["run", "upload"])
     p.add_argument("--aois", type=int, nargs="*", default=[])
     a = p.parse_args(argv)
+    if a.step == "upload":
+        print(json.dumps(upload(), indent=1))
+        return 0
     t = run(a.aois or None)
     print(t.to_string(index=False))
     return 0
