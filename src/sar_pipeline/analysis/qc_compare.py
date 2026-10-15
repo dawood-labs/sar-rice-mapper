@@ -573,6 +573,75 @@ def o_ac(t) -> float:
     return float(t.loc[t["major_class"] == "rice", "acres"].sum())
 
 
+QC2_DIR = "../data/qc/qc_2026-10-15"
+DELIVERED_DIR = "../data/qc/delivered_2026-10-15"
+LAYERS = ("fields_v3_trees_cut", "fields_v3_too_young", "fields_v3", "fields_v2_trees_cut", "fields_v2_too_young",
+          "fields_v2", "fields_trees_cut", "fields_too_young", "fields")
+
+
+def qc2_files(folder: str = QC2_DIR) -> dict[int, Path]:
+    """{internal AOI id: QC file} for the second QC round (15 Oct 2026). The assistant named them ``AOI_<NN>`` (first
+    set) and ``b2_AOI_<N>`` / ``b2_AOI<N>`` (second set, ``aoi_batch2.OFFSET`` + N)."""
+    import re
+
+    out = {}
+    for f in sorted(Path(folder).glob("*.gpkg")):
+        m = re.match(r"(b2_)?AOI_?(\d+)\.gpkg$", f.name)
+        if m:
+            out[(1000 if m.group(1) else 0) + int(m.group(2))] = f
+    return out
+
+
+def qc_base(aoi: int, qc_file, delivered: str = DELIVERED_DIR) -> pd.DataFrame:
+    """Which delivered layer the QC started from: per layer, the share of the QC's field ids found in it and of the
+    QC polygons whose geometry is exactly the delivered one."""
+    import geopandas as gpd
+
+    from .rice_map_delivery import bucket_name
+
+    q = gpd.read_file(qc_file)
+    d = Path(delivered) / bucket_name(aoi)
+    rows = []
+    for lay in LAYERS:
+        f = d / f"{bucket_name(aoi)}_{lay}.gpkg"
+        if not f.exists():
+            continue
+        g = gpd.read_file(f).set_index("field_id")
+        common = q[q["field_id"].isin(g.index)]
+        same = sum(geom.equals_exact(g.geometry.loc[fid], 1e-6) for fid, geom in zip(common["field_id"], common.geometry)
+                   if isinstance(g.geometry.loc[fid], type(geom)))
+        rows.append({"layer": lay, "qc_ids_found_pct": round(100 * len(common) / max(len(q), 1), 1),
+                     "same_geometry_pct": round(100 * same / max(len(q), 1), 1), "layer_fields": len(g)})
+    return pd.DataFrame(rows).sort_values(["same_geometry_pct", "qc_ids_found_pct"], ascending=False)
+
+
+def qc_edits(aoi: int, qc_file, base_layer: str, delivered: str = DELIVERED_DIR) -> dict:
+    """What the assistant changed against ``base_layer``: polygons drawn new (no delivered id), major class flips both
+    ways (with the sub classes involved), fields deleted, outlines changed; areas in acres."""
+    import geopandas as gpd
+
+    from .rice_map_delivery import bucket_name
+
+    q = gpd.read_file(qc_file)
+    g = gpd.read_file(Path(delivered) / bucket_name(aoi) / f"{bucket_name(aoi)}_{base_layer}.gpkg").set_index("field_id")
+    ac = lambda x: round(float(x.to_crs(32646).area.sum()) / 4046.8564224, 2)  # noqa: E731
+    new = q[~q["field_id"].isin(g.index) | q["field_id"].isna()]
+    old = q[q["field_id"].isin(g.index)].copy()
+    old["was"] = g.loc[old["field_id"], "major_class"].to_numpy()
+    to_rice = old[(old["was"] != "rice") & (old["major_class"] == "rice")]
+    to_non = old[(old["was"] == "rice") & (old["major_class"] != "rice")]
+    gone = g[~g.index.isin(q["field_id"])]
+    reshaped = sum(not geom.equals_exact(g.geometry.loc[f], 1e-6) for f, geom in zip(old["field_id"], old.geometry))
+    return {"aoi": bucket_name(aoi), "base": base_layer, "qc_polygons": len(q),
+            "qc_rice": int((q["major_class"] == "rice").sum()), "qc_rice_ac": ac(q[q["major_class"] == "rice"]),
+            "new_polygons": len(new), "new_ac": ac(new), "new_major": new["major_class"].value_counts(dropna=False).to_dict(),
+            "new_sub": new["sub_class"].value_counts(dropna=False).to_dict(),
+            "non_rice_to_rice": len(to_rice), "non_rice_to_rice_ac": ac(to_rice),
+            "to_rice_sub": to_rice["sub_class"].value_counts(dropna=False).to_dict(),
+            "rice_to_non_rice": len(to_non), "deleted": len(gone), "deleted_rice": int((gone["major_class"] == "rice").sum()),
+            "reshaped": int(reshaped)}
+
+
 def main(argv=None) -> int:
     import geopandas as gpd
 
