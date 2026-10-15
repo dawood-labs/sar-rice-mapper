@@ -383,27 +383,39 @@ def restore(under: str = "", root: Path = PROJECT, threads: int = 32, rnd: str =
     return {"files": len(rows), "downloaded_gb": round(got / 1e9, 2)}
 
 
-def aoi_prefixes(aoi: int) -> list[str]:
-    """Paths (from the project folder) that the inspection notebook reads for one AOI (measured with ``trace``)."""
+#: Groups of an AOI's inputs (:func:`aoi_prefixes`); a caller that needs only some asks for those.
+PARTS = ("s2", "radar", "series", "maps")
+
+
+def aoi_prefixes(aoi: int, parts=PARTS) -> list[str]:
+    """Paths (from the project folder) that the inspection notebook reads for one AOI (measured with ``trace``), by
+    group: ``s2`` the per-date Sentinel-2 files (chips), ``radar`` the radar run and grid, ``series`` the 5-day optical
+    series, ``maps`` the maps, field layers and records."""
     r, b = "sar-rice-mapper/", "sar-rice-mapper/processed/_batch/s2_2026"
-    out = [f"{r}data/s2_dates_masks/aoi{aoi}/", f"{r}data/aoi/", f"{r}processed/aoi{aoi}/", f"{b}/aoi{aoi}/",
-           f"{b}/baseline_v3/aoi{aoi}_", f"{b}/report/final_audit/", f"{b}/rice_fresh/aoi{aoi}/",
-           f"{b}/rice_fresh/labels_v2/", f"{b}/rice_fresh/locked/aoi{aoi}/", f"{b}/fields/aoi{aoi}_",
-           f"{r}processed/_batch/{KEEP_SERIES}/aoi{aoi}/"]
+    groups = {
+        "s2": [f"{r}data/s2_dates_masks/aoi{aoi}/"],
+        "radar": [f"{r}processed/aoi{aoi}/", f"{r}data/aoi/", f"{b}/report/final_audit/"],
+        "series": [f"{r}processed/_batch/{KEEP_SERIES}/aoi{aoi}/"],
+        "maps": [f"{b}/aoi{aoi}/", f"{b}/baseline_v3/aoi{aoi}_", f"{b}/rice_fresh/aoi{aoi}/", f"{b}/rice_fresh/labels_v2/",
+                 f"{b}/rice_fresh/locked/aoi{aoi}/", f"{b}/fields/aoi{aoi}_"]}
+    out = [q for k in parts for q in groups[k]]
     if aoi >= 1000:                                            # the second AOI set's own AOI file
         out.append(f"data/aoi_batch2_2026-09-29/split/b2_{aoi}/")
     return out
 
 
 _ROUND2 = None
+_ROUND1 = None
 
 
-def ensure_aoi(aoi: int, root: Path = PROJECT, threads: int = 32, log=print) -> dict:
+def ensure_aoi(aoi: int, root: Path = PROJECT, threads: int = 32, log=print, parts=PARTS) -> dict:
     """Downloads, from the round-2 backup, the files the inspection notebook needs for ``aoi`` that are not on the
     pod (user, 14 Oct 2026: "jis aoi k lye data chaiye hoga wo download ho ajye run time pr"). A file already there
     with the same size is not fetched again, so the second call for an AOI costs one look at the disk."""
     import time
     from concurrent.futures import ThreadPoolExecutor
+
+    import pandas as pd
 
     global _ROUND2
     if _ROUND2 is None:
@@ -411,8 +423,19 @@ def ensure_aoi(aoi: int, root: Path = PROJECT, threads: int = 32, log=print) -> 
         if not mp_.exists():
             return {"aoi": aoi, "files": 0, "downloaded_gb": 0.0}
         _ROUND2 = _manifest("2", root)
-    pre = tuple(aoi_prefixes(aoi))
+    pre = tuple(aoi_prefixes(aoi, parts))
     m = _ROUND2[_ROUND2["path"].str.startswith(pre)]
+    if "radar" in parts:
+        # the series' grid is found through the year2025 season, whose config looks for a complete run (a folder with
+        # its run_config.yaml) although no radar of that season is read; the runs went to round 1, so only these
+        # small files come back (15 Oct 2026: aoi15 "No run yet"; an existence check, unseen by ``trace``)
+        global _ROUND1
+        if _ROUND1 is None and _manifest_path(root, "1").exists():
+            _ROUND1 = _manifest("1", root)
+        if _ROUND1 is not None:
+            y = _ROUND1[_ROUND1["path"].str.startswith(f"sar-rice-mapper/processed/aoi{aoi}/year2025/runs/")
+                        & _ROUND1["path"].str.endswith("/run_config.yaml")]
+            m = pd.concat([m, y], ignore_index=True)
     todo = [(p, sz, g) for p, sz, g in m[["path", "size", "gcs"]].itertuples(index=False)
             if not ((Path(root) / p).is_file() and (Path(root) / p).stat().st_size == sz)]
     if not todo:
