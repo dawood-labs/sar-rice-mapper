@@ -42,7 +42,22 @@ AGE_DAY = pd.Timestamp("2026-09-15")
 #: ``sowing_from`` codes of ``curve_rules.own_range_features``.
 SOURCES = {0: "NDVI: end of the empty spell", 1: "radar: end of the water spell", 2: "radar: start of the rise",
            3: "radar: start of the water spell", 4: "NDVI: lowest view before the crop was seen rising"}
+#: Sowing from the radar for every field (``curve_rules.SOWING_FROM_RADAR``), dated this many days before the radar
+#: date (end of the water spell / start of the rise). Why (blind review of 160 fields, user 15 Oct 2026): the start
+#: of the water spell came ~3 weeks before the planting the reviewers read (30 % within 14 days); radar first put it
+#: ~8 days late; radar first minus 7 days ("radar rise se 7 din pehle"): 76 % within 14 days, 50 % within 7, median
+#: 3 days. The 7 days were chosen on those same fields, so the true rate is likely a little lower.
+RADAR_FIRST = True
+RADAR_LEAD_DAYS = 7
+RADAR_CODES = (1, 2)
 REVIEW = Path(OUT) / "sowing_review"
+
+
+def _source(code) -> str:
+    if pd.isna(code):
+        return ""
+    name = SOURCES.get(int(code), "")
+    return f"{name} - {RADAR_LEAD_DAYS} days" if RADAR_FIRST and int(code) in RADAR_CODES else name
 
 
 def rules_for_layer(aoi: int, base_layer: str) -> dict:
@@ -95,7 +110,10 @@ def field_sowing(aoi: int, layer=None, base_layer: str | None = None) -> pd.Data
                                      "sowing_note"])
     px, row = pixel_index(aoi, layer)
     key = -994
-    cr.AOI_OVERRIDES[key] = rules_for_layer(aoi, base_layer)
+    rules = rules_for_layer(aoi, base_layer)
+    if RADAR_FIRST:
+        rules = {**rules, "SOWING_FROM_RADAR": True}
+    cr.AOI_OVERRIDES[key] = rules
     try:
         with cr.rules_for(key):
             f = cr.own_range_features(aoi, px)
@@ -106,6 +124,8 @@ def field_sowing(aoi: int, layer=None, base_layer: str | None = None) -> pd.Data
                       "src": pd.to_numeric(f.get("sowing_from", pd.Series(np.nan, index=f.index)),
                                            errors="coerce").to_numpy()})
     t.loc[t["day"] < 0, "day"] = np.nan
+    if RADAR_FIRST:                                   # radar dates: the planting is a week before the radar's date
+        t.loc[t["src"].isin(RADAR_CODES), "day"] -= RADAR_LEAD_DAYS
     n_all = t.groupby("field_id").size()
     g = t.dropna(subset=["day"]).groupby("field_id")
     out = pd.DataFrame({"day": g["day"].median(), "n": g.size()}).reindex(n_all.index)
@@ -114,7 +134,7 @@ def field_sowing(aoi: int, layer=None, base_layer: str | None = None) -> pd.Data
     age = (AGE_DAY - date).dt.days
     res = pd.DataFrame({"field_id": out.index, "sowing_date": date.dt.strftime("%Y-%m-%d").to_numpy(),
                         "crop_age_15sep": age.where(age >= 0).astype("Int64").to_numpy(),
-                        "sowing_source": out["src"].map(lambda s: SOURCES.get(int(s), "") if pd.notna(s) else "").to_numpy(),
+                        "sowing_source": out["src"].map(lambda s: _source(s)).to_numpy(),
                         "sowing_pixels_pct": (100 * out["n"].fillna(0) / n_all).round(1).to_numpy()})
     res["sowing_note"] = np.where(age.to_numpy() < 0, "sown after 15 Sep",
                                   np.where(res["sowing_date"].isna(), "no sowing date", ""))
@@ -251,6 +271,9 @@ def score() -> pd.DataFrame:
     """Rule vs reviewers, per sowing source: days from the rule's date to the reviewer's planting, water start and rise
     start (median, and share within 14 days). Written to ``<OUT>/sowing/review_score.csv``."""
     t = pd.read_csv(TRUTH)
+    # the dates as the fields' tables hold them NOW (after a method change), not as they were when sampled
+    cur = pd.concat([pd.read_csv(SOWING_DIR / f"aoi{a}_sowing.csv") for a in sorted(t["aoi"].unique())])
+    t = t.drop(columns=["sowing_date"]).merge(cur[["field_id", "sowing_date"]], on="field_id", how="left")
     v = []
     for f in sorted((REVIEW / "verdicts").glob("*.json")):
         v.append(json.loads(f.read_text()))
@@ -274,9 +297,85 @@ def score() -> pd.DataFrame:
     return out
 
 
+def annotated_sheet(aoi: int, field_id: str, lines: dict[str, str], out_dir: Path | None = None) -> Path:
+    """The field's curve sheet (as the reviewers saw it) with vertical lines at the given dates ({label: YYYY-MM-DD}),
+    for showing the user how the rule's and the reviewers' dates sit on the curves. Not used by the review itself."""
+    import geopandas as gpd
+    import matplotlib
+    import matplotlib.pyplot as plt
+    import shapely
+
+    from .. import qgis_review as q
+    from . import ndvi_5day as nd
+    from . import pixel_2026 as p26
+    from . import water_investigation as wi
+
+    matplotlib.use("Agg")
+    out_dir = Path(out_dir or SOWING_DIR / "examples")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    lay = gpd.read_file(out_path(aoi))
+    px, row = pixel_index(aoi, lay)
+    sel = (lay["field_id"] == field_id).to_numpy()
+    fpids = px[sel[row]]
+    g = nd.load(aoi, out_root=q.series_root(aoi))["loc"]["grid"]
+    geom = shapely.union_all(lay.geometry[sel].to_numpy())
+    geom = geom if geom.geom_type == "Polygon" else max(geom.geoms, key=lambda x: x.area)
+    rr, cc = np.divmod(fpids, int(g["width"]))
+    centre = int(np.round(np.median(rr)) * int(g["width"]) + np.round(np.median(cc)))
+    r0, c0 = divmod(centre, int(g["width"]))
+    xs, ys = geom.exterior.xy
+    ox = (np.asarray(xs) - g["x0"]) / g["res"] - 0.5 - (c0 - p26.HALF)
+    oy = (g["y0"] - np.asarray(ys)) / g["res"] - 0.5 - (r0 - p26.HALF)
+    fig, _, _ = wi.group_sheet(aoi, centre, out_dir=out_dir / "_tmp", file_stem=field_id, label=f"field {field_id}",
+                               pids=fpids, outline=(ox, oy), series_root=q.series_root(aoi), sowing=np.nan,
+                               sowing_label="")
+    colours = ["#d62728", "#1f77b4", "#2ca02c", "#9467bd", "#ff7f0e"]
+    for k, (lab, d) in enumerate(lines.items()):
+        if not d:
+            continue
+        for ax in fig.axes:
+            ax.axvline(pd.Timestamp(d), color=colours[k % len(colours)], lw=2, ls="--")
+        fig.axes[0].text(pd.Timestamp(d), 0.98 - 0.07 * k, f" {lab}: {d}", color=colours[k % len(colours)],
+                         transform=fig.axes[0].get_xaxis_transform(), fontsize=10, va="top", weight="bold")
+    path = out_dir / f"{field_id}_annotated.png"
+    fig.savefig(path, dpi=90, facecolor="white")
+    plt.close("all")
+    return path
+
+
+ATTRS = ("sowing_date", "crop_age_15sep", "sowing_source", "sowing_pixels_pct", "sowing_note")
+
+
+def attach(aoi: int) -> dict:
+    """Adds the sowing columns (:data:`ATTRS`) to the AOI's QC layer, by ``field_id`` (every part of a field gets its
+    field's values). Only attribute columns change; each geometry is written back exactly as it was read."""
+    import geopandas as gpd
+
+    from .qc_post import qml
+
+    path = out_path(aoi)
+    lay = gpd.read_file(path)
+    t = pd.read_csv(SOWING_DIR / f"aoi{aoi}_sowing.csv", dtype={"field_id": str})
+    lay = lay.drop(columns=[c for c in ATTRS if c in lay.columns])
+    lay["field_id"] = lay["field_id"].astype(str) if len(lay) else lay["field_id"].astype(object)
+    lay = lay.merge(t[["field_id", *ATTRS]], on="field_id", how="left")      # an empty layer gets the empty columns
+    lay["crop_age_15sep"] = pd.to_numeric(lay["crop_age_15sep"], errors="coerce").astype("Int64")
+    cols = [c for c in lay.columns if c != "geometry"] + ["geometry"]
+    tmp = path.with_name(f".{path.name}")
+    gpd.GeoDataFrame(lay[cols], geometry="geometry", crs=lay.crs).to_file(tmp, driver="GPKG", layer=path.stem)
+    tmp.replace(path)
+    qml(path)
+    rep = json.loads(path.with_suffix(".json").read_text())
+    rep["sowing"] = {"fields": int(lay["field_id"].nunique()), "with_date": int(lay["sowing_date"].notna().sum()),
+                     "method": f"rule sowing, radar first minus {RADAR_LEAD_DAYS} days; field = median of its pixels",
+                     "age_day": str(AGE_DAY.date())}
+    path.with_suffix(".json").write_text(json.dumps(rep, indent=1, default=str))
+    return {"aoi": aoi, **rep["sowing"]}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["fields", "fields-all", "sample", "render", "score"])
+    p.add_argument("step", choices=["fields", "fields-all", "sample", "render", "score", "attach"])
     p.add_argument("--per-source", type=int, default=40)
     p.add_argument("--aois", type=int, nargs="*", default=[])
     a = p.parse_args(argv)
@@ -287,6 +386,10 @@ def main(argv=None) -> int:
         return 0
     if a.step == "render":
         print(render(), "sheets drawn")
+        return 0
+    if a.step == "attach":
+        for x in a.aois or NO_CLEAR_SEPTEMBER:
+            print(attach(x))
         return 0
     if a.step == "score":
         print(score().to_string(index=False))

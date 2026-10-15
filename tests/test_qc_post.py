@@ -43,3 +43,11 @@ def test_check_of_an_empty_layer_is_all_zero():
     qc = _qc()
     f = qp.clean(qp.label(1, qc[qc["major_class"] == "non-rice"]))
     assert qp.check(f)["polygons_out"] == 0
+
+
+def test_sowing_source_names_the_radar_lead():
+    from sar_pipeline.analysis import qc_sowing as qs
+
+    assert qs._source(1) == f"radar: end of the water spell - {qs.RADAR_LEAD_DAYS} days"
+    assert qs._source(0) == "NDVI: end of the empty spell"
+    assert qs._source(float("nan")) == ""
