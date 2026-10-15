@@ -481,6 +481,23 @@ def spread_sample(fields, labels, per_label: int = 10, min_acres: float = 0.5) -
     return out
 
 
+def pixel_at(aoi_id: int, lon: float, lat: float) -> int:
+    """The pixel id (the value of the AOI's ``grid/pixel_index.tif``) at a longitude / latitude, for
+    :func:`inspect_pixel` when the id is not at hand (user, 16 Oct 2026: notebook 08 pixel cell)."""
+    import pyproj
+
+    from . import storage_plan as sp
+    from .analysis import pixel_report as pr
+
+    sp.ensure_aoi(aoi_id, parts=("radar",))          # the AOI's grid, fetched from the backup when not on the pod
+    g = pr.locate(aoi_id, 0, season_key="monsoon2026")["grid"]
+    x, y = pyproj.Transformer.from_crs("EPSG:4326", g["crs"], always_xy=True).transform(lon, lat)
+    col, row = int((x - g["x0"]) // g["res"]), int((g["y0"] - y) // g["res"])
+    if not (0 <= col < int(g["width"]) and 0 <= row < int(g["height"])):
+        raise ValueError(f"{lon}, {lat} is outside aoi{aoi_id}'s grid")
+    return row * int(g["width"]) + col
+
+
 def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect", keep_cache: bool = True) -> dict:
     """Curves and chips for a pixel block, by AOI and pixel id (the pixel id is the value of the AOI's
     ``grid/pixel_index.tif`` in QGIS)."""

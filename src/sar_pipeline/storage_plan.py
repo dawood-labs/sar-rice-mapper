@@ -395,7 +395,8 @@ def aoi_prefixes(aoi: int, parts=PARTS) -> list[str]:
     groups = {
         "s2": [f"{r}data/s2_dates_masks/aoi{aoi}/"],
         "radar": [f"{r}processed/aoi{aoi}/", f"{r}data/aoi/", f"{b}/report/final_audit/"],
-        "series": [f"{r}processed/_batch/{KEEP_SERIES}/aoi{aoi}/"],
+        # the AOI's own pinned series (ANALYSIS_SERIES.txt; not always KEEP_SERIES): resolved in ensure_aoi
+        "series": [f"{r}processed/aoi{aoi}/monsoon2026/ANALYSIS_SERIES.txt"],
         "maps": [f"{b}/aoi{aoi}/", f"{b}/baseline_v3/aoi{aoi}_", f"{b}/rice_fresh/aoi{aoi}/", f"{b}/rice_fresh/labels_v2/",
                  f"{b}/rice_fresh/locked/aoi{aoi}/", f"{b}/fields/aoi{aoi}_"]}
     out = [q for k in parts for q in groups[k]]
@@ -409,37 +410,53 @@ _ROUND1 = None
 
 
 def ensure_aoi(aoi: int, root: Path = PROJECT, threads: int = 32, log=print, parts=PARTS) -> dict:
-    """Downloads, from the round-2 backup, the files the inspection notebook needs for ``aoi`` that are not on the
-    pod (user, 14 Oct 2026: "jis aoi k lye data chaiye hoga wo download ho ajye run time pr"). A file already there
-    with the same size is not fetched again, so the second call for an AOI costs one look at the disk."""
-    import time
-    from concurrent.futures import ThreadPoolExecutor
+    """Downloads, from the backups, the files the inspection notebook needs for ``aoi`` that are not on the pod
+    (user, 14 Oct 2026: "jis aoi k lye data chaiye hoga wo download ho ajye run time pr"). A file already there with
+    the same size is not fetched again, so the second call for an AOI costs one look at the disk.
 
+    The AOI's 5-day series is the one its ``ANALYSIS_SERIES.txt`` pins (or the default), found in either backup
+    round: a few AOIs (aoi160, 16 Oct 2026) read an older series that went to round 1."""
     import pandas as pd
 
-    global _ROUND2
-    if _ROUND2 is None:
-        mp_ = _manifest_path(root, "2")
-        if not mp_.exists():
-            return {"aoi": aoi, "files": 0, "downloaded_gb": 0.0}
+    global _ROUND1, _ROUND2
+    if _ROUND2 is None and _manifest_path(root, "2").exists():
         _ROUND2 = _manifest("2", root)
-    pre = tuple(aoi_prefixes(aoi, parts))
-    m = _ROUND2[_ROUND2["path"].str.startswith(pre)]
+    if _ROUND1 is None and _manifest_path(root, "1").exists():
+        _ROUND1 = _manifest("1", root)
+    both = pd.concat([m for m in (_ROUND2, _ROUND1) if m is not None], ignore_index=True)
+    if both.empty:
+        return {"aoi": aoi, "files": 0, "downloaded_gb": 0.0}
+    m = both[both["path"].str.startswith(tuple(aoi_prefixes(aoi, parts)))]
     if "radar" in parts:
         # the series' grid is found through the year2025 season, whose config looks for a complete run (a folder with
         # its run_config.yaml) although no radar of that season is read; the runs went to round 1, so only these
         # small files come back (15 Oct 2026: aoi15 "No run yet"; an existence check, unseen by ``trace``)
-        global _ROUND1
-        if _ROUND1 is None and _manifest_path(root, "1").exists():
-            _ROUND1 = _manifest("1", root)
-        if _ROUND1 is not None:
-            y = _ROUND1[_ROUND1["path"].str.startswith(f"sar-rice-mapper/processed/aoi{aoi}/year2025/runs/")
-                        & _ROUND1["path"].str.endswith("/run_config.yaml")]
-            m = pd.concat([m, y], ignore_index=True)
+        m = pd.concat([m, both[both["path"].str.startswith(f"sar-rice-mapper/processed/aoi{aoi}/year2025/runs/")
+                               & both["path"].str.endswith("/run_config.yaml")]], ignore_index=True)
+    got = _fetch(m, aoi, root, threads, log)
+    if "series" in parts:
+        from .analysis import ndvi_5day as nd
+
+        series = nd.analysis_series_root(aoi).strip("/")
+        got = _add(got, _fetch(both[both["path"].str.startswith(f"sar-rice-mapper/{series}/aoi{aoi}/")], aoi, root,
+                               threads, log))
+    return {"aoi": aoi, **got}
+
+
+def _add(a: dict, b: dict) -> dict:
+    return {"files": a["files"] + b["files"], "downloaded_gb": round(a["downloaded_gb"] + b["downloaded_gb"], 2)}
+
+
+def _fetch(m, aoi: int, root: Path, threads: int, log) -> dict:
+    """Downloads the manifest rows ``m`` whose file is not on the pod with the same size (through a temporary file)."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    m = m.drop_duplicates("path")
     todo = [(p, sz, g) for p, sz, g in m[["path", "size", "gcs"]].itertuples(index=False)
             if not ((Path(root) / p).is_file() and (Path(root) / p).stat().st_size == sz)]
     if not todo:
-        return {"aoi": aoi, "files": 0, "downloaded_gb": 0.0}
+        return {"files": 0, "downloaded_gb": 0.0}
     t0 = time.time()
     log(f"aoi{aoi}: fetching {len(todo)} files ({sum(t[1] for t in todo) / 1e9:.2f} GB) from the backup ...")
     b, _, _ = _bucket_and_base()
@@ -454,9 +471,9 @@ def ensure_aoi(aoi: int, root: Path = PROJECT, threads: int = 32, log=print, par
         return sz
 
     with ThreadPoolExecutor(threads) as ex:
-        got = sum(ex.map(one, todo))
+        n = sum(ex.map(one, todo))
     log(f"aoi{aoi}: done in {time.time() - t0:.0f} s")
-    return {"aoi": aoi, "files": len(todo), "downloaded_gb": round(got / 1e9, 2)}
+    return {"files": len(todo), "downloaded_gb": round(n / 1e9, 2)}
 
 
 def main(argv=None) -> int:

@@ -77,3 +77,20 @@ def test_internal_field_id_maps_the_client_name():
 
     assert internal_field_id("b2_aoi198_p000277") == "aoi1198_p000277"
     assert internal_field_id("aoi66_p000013") == "aoi66_p000013"
+
+
+def test_pixel_at_round_trips_with_locate(monkeypatch):
+    """pixel_at is the inverse of pixel_report.locate's lon / lat for a pixel centre."""
+    from sar_pipeline import qgis_review as q
+    from sar_pipeline import storage_plan
+    from sar_pipeline.analysis import pixel_report as pr
+
+    grid = {"crs": "EPSG:32646", "x0": 800000.0, "y0": 2000000.0, "res": 10.0, "width": 50, "height": 40}
+    monkeypatch.setattr(storage_plan, "ensure_aoi", lambda *a, **k: {})
+    monkeypatch.setattr(pr, "locate", lambda *a, **k: {"grid": grid})
+    import pyproj
+
+    pid = 7 * 50 + 13
+    x, y = grid["x0"] + 13.5 * 10, grid["y0"] - 7.5 * 10
+    lon, lat = pyproj.Transformer.from_crs("EPSG:32646", "EPSG:4326", always_xy=True).transform(x, y)
+    assert q.pixel_at(1, lon, lat) == pid
