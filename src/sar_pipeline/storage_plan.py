@@ -373,7 +373,9 @@ def restore(under: str = "", root: Path = PROJECT, threads: int = 32, rnd: str =
         if f.exists() and f.stat().st_size == sz:
             return 0
         f.parent.mkdir(parents=True, exist_ok=True)
-        b.blob(g).download_to_filename(str(f))
+        tmp = f.with_name(f".{f.name}.part")         # an interrupted download never leaves a half file in place
+        b.blob(g).download_to_filename(str(tmp))
+        tmp.replace(f)
         return sz
 
     with ThreadPoolExecutor(threads) as ex:
