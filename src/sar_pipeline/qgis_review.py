@@ -498,9 +498,11 @@ def pixel_at(aoi_id: int, lon: float, lat: float) -> int:
     return row * int(g["width"]) + col
 
 
-def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect", keep_cache: bool = True) -> dict:
+def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect", keep_cache: bool = True,
+                  sowing_line: bool = True) -> dict:
     """Curves and chips for a pixel block, by AOI and pixel id (the pixel id is the value of the AOI's
-    ``grid/pixel_index.tif`` in QGIS)."""
+    ``grid/pixel_index.tif`` in QGIS). ``sowing_line=False`` leaves the sowing line off the curve (user, 16 Oct: the
+    notebook view reads cleaner without it); the sowing date stays in the printed info."""
     from .analysis import ndvi_5day as nd
     from .analysis import water_investigation as wi
 
@@ -518,8 +520,8 @@ def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect
     figs["curve"], figs["chips"], ev = wi.group_sheet(aoi_id, int(pid), block=block, out_dir=out_dir,
                                                       file_stem=f"aoi{aoi_id}_pid{pid}_{block}x{block}",
                                                       label=f"({block}x{block} pixels)", series_root=series_root(aoi_id),
-                                                      sowing=_sowing(rule, fresh),
-                                                      sowing_label=_sowing_label(rule))
+                                                      sowing=_sowing(rule, fresh) if sowing_line else float("nan"),
+                                                      sowing_label=_sowing_label(rule) if sowing_line else "")
     annotate_rule(figs["curve"], rule)
     if "sowing_date" in fresh:
         info["sowing_date"] = str(ev.get("sowing_date", ""))
@@ -532,8 +534,9 @@ def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect
     return info
 
 
-def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = True) -> dict:
+def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = True, sowing_line: bool = True) -> dict:
     """Curves (averaged over all the field's pixels) and chips with the field outline, by ``field_id``.
+    ``sowing_line=False``: no sowing line on the curve, as in :func:`inspect_pixel`.
     ``keep_cache`` (default): the AOI's series stays in memory, so the next field of the same AOI plots in seconds
     (``ndvi_5day.CACHE_AOIS`` bounds it to one AOI)."""
     import numpy as np
@@ -569,8 +572,8 @@ def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = Tr
     figs["curve"], figs["chips"], ev = wi.group_sheet(aoi_id, centre, out_dir=out_dir, file_stem=field_id,
                                                       label=f"field {field_id} ({len(fpids)} px)",
                                                       pids=fpids, outline=(ox, oy), series_root=series_root(aoi_id),
-                                                      sowing=_sowing(rule, fresh),
-                                                      sowing_label=_sowing_label(rule))
+                                                      sowing=_sowing(rule, fresh) if sowing_line else float("nan"),
+                                                      sowing_label=_sowing_label(rule) if sowing_line else "")
     annotate_rule(figs["curve"], rule)
     if "sowing_date" in fresh:
         info["sowing_date"] = str(ev.get("sowing_date", ""))
