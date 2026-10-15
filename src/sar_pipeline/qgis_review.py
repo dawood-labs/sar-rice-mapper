@@ -324,8 +324,9 @@ def _sowing(rule: dict, fresh: dict):
 TITLE_WRAP = 130
 
 
-def annotate_rule(fig, rule: dict) -> None:
-    """Writes the rule's class (and the user's label) in the curve figure's title and the features in a box."""
+def annotate_rule(fig, rule: dict, feature_box: bool = True) -> None:
+    """Writes the rule's class (and the user's label) in the curve figure's title and the features in a box.
+    ``feature_box=False`` leaves the box out and lets the curves use the full width (user, 16 Oct)."""
     if fig is None or not rule:
         return
     head = f"rule now: {rule['rule_class']}"
@@ -345,9 +346,11 @@ def annotate_rule(fig, rule: dict) -> None:
     head = "\n".join(textwrap.fill(h, TITLE_WRAP, subsequent_indent="    ") for h in head.split("\n"))
     n_head = head.count("\n") + 1
     fig.set_size_inches(20, 10 + 0.25 * n_head)
-    fig.subplots_adjust(left=0.05, right=0.80, bottom=0.06, top=1 - (0.35 + 0.25 * n_head) / (10 + 0.25 * n_head),
+    fig.subplots_adjust(left=0.05, right=0.80 if feature_box else 0.98, bottom=0.06, top=1 - (0.35 + 0.25 * n_head) / (10 + 0.25 * n_head),
                         hspace=0.12)
     fig.suptitle(head, fontsize=11, fontweight="bold", x=0.01, ha="left", y=0.995)
+    if not feature_box:
+        return
     lines = [f"{RULE_FEATURE_NAMES[k]}: {rule['rule_features'][k]}" for k in RULE_FEATURE_NAMES
              if k in rule.get("rule_features", {})]
     ax = fig.axes[0]
@@ -499,10 +502,11 @@ def pixel_at(aoi_id: int, lon: float, lat: float) -> int:
 
 
 def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect", keep_cache: bool = True,
-                  sowing_line: bool = True) -> dict:
+                  sowing_line: bool = True, feature_box: bool = True) -> dict:
     """Curves and chips for a pixel block, by AOI and pixel id (the pixel id is the value of the AOI's
     ``grid/pixel_index.tif`` in QGIS). ``sowing_line=False`` leaves the sowing line off the curve (user, 16 Oct: the
-    notebook view reads cleaner without it); the sowing date stays in the printed info."""
+    notebook view reads cleaner without it); the sowing date stays in the printed info. ``feature_box=False`` drops the
+    rule-feature box on the right so the curves are wider (the features are still printed)."""
     from .analysis import ndvi_5day as nd
     from .analysis import water_investigation as wi
 
@@ -522,7 +526,7 @@ def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect
                                                       label=f"({block}x{block} pixels)", series_root=series_root(aoi_id),
                                                       sowing=_sowing(rule, fresh) if sowing_line else float("nan"),
                                                       sowing_label=_sowing_label(rule) if sowing_line else "")
-    annotate_rule(figs["curve"], rule)
+    annotate_rule(figs["curve"], rule, feature_box)
     if "sowing_date" in fresh:
         info["sowing_date"] = str(ev.get("sowing_date", ""))
     else:                                   # no fresh-start output for this AOI yet: the old rule's events
@@ -534,9 +538,10 @@ def inspect_pixel(aoi_id: int, pid: int, block: int = 3, out_dir=f"{OUT}/inspect
     return info
 
 
-def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = True, sowing_line: bool = True) -> dict:
+def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = True, sowing_line: bool = True,
+                  feature_box: bool = True) -> dict:
     """Curves (averaged over all the field's pixels) and chips with the field outline, by ``field_id``.
-    ``sowing_line=False``: no sowing line on the curve, as in :func:`inspect_pixel`.
+    ``sowing_line=False`` / ``feature_box=False``: as in :func:`inspect_pixel`.
     ``keep_cache`` (default): the AOI's series stays in memory, so the next field of the same AOI plots in seconds
     (``ndvi_5day.CACHE_AOIS`` bounds it to one AOI)."""
     import numpy as np
@@ -574,7 +579,7 @@ def inspect_field(field_id: str, out_dir=f"{OUT}/inspect", keep_cache: bool = Tr
                                                       pids=fpids, outline=(ox, oy), series_root=series_root(aoi_id),
                                                       sowing=_sowing(rule, fresh) if sowing_line else float("nan"),
                                                       sowing_label=_sowing_label(rule) if sowing_line else "")
-    annotate_rule(figs["curve"], rule)
+    annotate_rule(figs["curve"], rule, feature_box)
     if "sowing_date" in fresh:
         info["sowing_date"] = str(ev.get("sowing_date", ""))
     else:                                   # no fresh-start output for this AOI yet: the old rule's events
