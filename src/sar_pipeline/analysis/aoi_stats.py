@@ -29,6 +29,10 @@ acres with 3 decimals, measured in EPSG:32646.
 Run::
 
     python -m sar_pipeline.analysis.aoi_stats build
+    python -m sar_pipeline.analysis.aoi_stats upload    # to the QC folder's _summary/ on GCS, md5-checked
+
+Sowing / crop-age columns: added on 15 Oct for the AOIs that had them, removed again on 16 Oct (user: the dates were
+almost all wrong, ``qc_sowing.detach``); with no sowing columns in the QC layers the build writes none.
 """
 from __future__ import annotations
 
@@ -171,10 +175,36 @@ def build(jobs: int = 0) -> tuple[Path, Path, Path]:
     return shp, gp, csv
 
 
+def upload(threads: int = 32) -> dict:
+    """Uploads the layer and the CSV to ``<base>/<qc_post.GCS_FOLDER>/_summary/`` and checks each by md5."""
+    import base64
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import rice_map_delivery as rd
+    from .qc_post import GCS_FOLDER
+
+    b, base = rd._bucket(19, None)
+    files = sorted(SUMMARY.glob("all_aois.*")) + [SUMMARY / "aoi_stats.csv"]
+    md5 = lambda p: base64.b64encode(hashlib.md5(p.read_bytes()).digest()).decode()  # noqa: E731
+
+    def one(f):
+        name = f"{base}/{GCS_FOLDER}/_summary/{f.name}"
+        b.blob(name).upload_from_filename(str(f), timeout=600)
+        return b.get_blob(name).md5_hash == md5(f)
+
+    with ThreadPoolExecutor(threads) as ex:
+        ok = list(ex.map(one, files))
+    return {"files": len(files), "verified": int(sum(ok)), "gcs": f"gs://{b.name}/{base}/{GCS_FOLDER}/_summary/"}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["build"])
-    p.parse_args(argv)
+    p.add_argument("step", choices=["build", "upload"])
+    a = p.parse_args(argv)
+    if a.step == "upload":
+        print(json.dumps(upload(), indent=1))
+        return 0
     for f in build():
         print(f)
     return 0

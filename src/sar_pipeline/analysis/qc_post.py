@@ -230,10 +230,13 @@ def upload(threads: int = 32) -> dict:
         for f in sorted(d.glob(f"aoi{aoi}_fields_qc.*")):
             c = rd.client_file(aoi, f)
             items.append((c, f"{dest}/{group}{set_folder(aoi)}/{rd.bucket_name(aoi)}/{c.name}"))
-    for name, src in (("qc_summary.csv", Path(OUT) / "_summary" / "qc_summary.csv"),
-                      ("sowing_review_score.csv", qs.SOWING_DIR / "review_score.csv")):
+    for name, src in (("qc_summary.csv", Path(OUT) / "_summary" / "qc_summary.csv"),):
         if src.exists():
             items.append((src, f"{dest}/_summary/{name}"))
+    # the sowing dates left the delivery (user, 16 Oct 2026: almost all wrong), so does their review score
+    old = b.get_blob(f"{dest}/_summary/sowing_review_score.csv")
+    if old is not None:
+        old.delete()
     md5 = lambda p: base64.b64encode(hashlib.md5(Path(p).read_bytes()).digest()).decode()  # noqa: E731
 
     def one(it):

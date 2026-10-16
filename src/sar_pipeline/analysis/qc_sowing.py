@@ -22,6 +22,10 @@ Run::
     python -m sar_pipeline.analysis.qc_sowing sample --per-source 40  # blind-review sample over the test AOIs
     python -m sar_pipeline.analysis.qc_sowing render
     python -m sar_pipeline.analysis.qc_sowing score
+    python -m sar_pipeline.analysis.qc_sowing detach                  # 16 Oct: sowing columns removed again (wrong)
+
+Status (user, 16 Oct 2026): the dates were found almost all wrong and were removed from the delivery (``detach``); the
+module stays for the record and for a later, better attempt.
 """
 from __future__ import annotations
 
@@ -373,9 +377,47 @@ def attach(aoi: int) -> dict:
     return {"aoi": aoi, **rep["sowing"]}
 
 
+BACKUP = Path(OUT) / "_backup_with_sowing_2026-10-16"
+
+
+def detach(aoi: int) -> dict:
+    """Removes the sowing columns (:data:`ATTRS`) and the report's ``sowing`` entry from the AOI's QC layer again.
+
+    Why (user, 16 Oct 2026): the sowing dates and crop ages turned out almost all wrong, so they leave the delivery;
+    the polygons stay exactly as they are. The columns are dropped inside the GeoPackage (SQLite ``ALTER TABLE ...
+    DROP COLUMN``), so every geometry blob stays byte for byte the same; a copy of the layer and its report as they
+    were goes to :data:`BACKUP` first."""
+    import shutil
+    import sqlite3
+
+    path = out_path(aoi)
+    keep = BACKUP / path.parent.relative_to(OUT)
+    keep.mkdir(parents=True, exist_ok=True)
+    for f in (path, path.with_suffix(".json")):
+        if not (keep / f.name).exists():
+            shutil.copy2(f, keep / f.name)
+    con = sqlite3.connect(path)
+    try:
+        table = con.execute("SELECT table_name FROM gpkg_contents WHERE data_type = 'features'").fetchone()[0]
+        cols = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")')}
+        dropped = [c for c in ATTRS if c in cols]
+        for c in dropped:
+            con.execute(f'ALTER TABLE "{table}" DROP COLUMN "{c}"')
+        if con.execute("SELECT 1 FROM sqlite_master WHERE name = 'gpkg_data_columns'").fetchone():
+            con.execute(f"DELETE FROM gpkg_data_columns WHERE table_name = ? AND column_name IN "
+                        f"({','.join('?' * len(ATTRS))})", (table, *ATTRS))
+        con.commit()
+    finally:
+        con.close()
+    rep = json.loads(path.with_suffix(".json").read_text())
+    had = rep.pop("sowing", None) is not None
+    path.with_suffix(".json").write_text(json.dumps(rep, indent=1, default=str))
+    return {"aoi": aoi, "columns_dropped": len(dropped), "report_entry_dropped": had}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["fields", "fields-all", "sample", "render", "score", "attach"])
+    p.add_argument("step", choices=["fields", "fields-all", "sample", "render", "score", "attach", "detach"])
     p.add_argument("--per-source", type=int, default=40)
     p.add_argument("--aois", type=int, nargs="*", default=[])
     a = p.parse_args(argv)
@@ -390,6 +432,10 @@ def main(argv=None) -> int:
     if a.step == "attach":
         for x in a.aois or NO_CLEAR_SEPTEMBER:
             print(attach(x))
+        return 0
+    if a.step == "detach":
+        for x in a.aois or NO_CLEAR_SEPTEMBER:
+            print(detach(x))
         return 0
     if a.step == "score":
         print(score().to_string(index=False))
