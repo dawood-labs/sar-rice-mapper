@@ -28,6 +28,7 @@ against the old one, window by window).
 Use::
 
     python -m sar_pipeline.newest_imagery check --aois 13 28 39 [--end 2026-10-03]
+    python -m sar_pipeline.newest_imagery clear-since --aois 3 4 --start 2026-09-01 --own-mask --out <csv>  # each date's clear %
     python -m sar_pipeline.newest_imagery fetch-clear --aois 13 28 --report <check json>    # export dates >= 50 % clear
     python -m sar_pipeline.newest_imagery deliver-clear --aois 13 28 --report <check json>  # copy them to the delivery
     python -m sar_pipeline.newest_imagery compare-radar  --aois 13 --old v001_20260923 --new v002_20261002
@@ -97,16 +98,21 @@ def s2_newest_local(aoi_key: str, folder: str = "s2_dates_masks") -> pd.Timestam
     return max(pd.Timestamp(p.stem.rsplit("_S2_", 1)[1]) for p in files)
 
 
-def s2_newest_gcs(cfg: dict, folder: str = "s2_dates_masks") -> pd.Timestamp | None:
-    """Newest date among the per-date Sentinel-2 files on GCS (a listing; nothing is downloaded)."""
+def s2_dates_gcs(cfg: dict, folder: str = "s2_dates_masks") -> list[pd.Timestamp]:
+    """Dates of the per-date Sentinel-2 files on GCS (a listing; nothing is downloaded)."""
     from google.cloud import storage
 
     from . import auth
 
     prefix = f"{cfg['gcs']['base_folder']}/{folder}/{cfg['aoi']['key']}/"
     client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
-    dates = [pd.Timestamp(b.name.rsplit("_S2_", 1)[1][:10]) for b in client.list_blobs(cfg["gcs"]["bucket"], prefix=prefix)
-             if b.name.endswith(".tif") and "_S2_" in b.name]
+    return [pd.Timestamp(b.name.rsplit("_S2_", 1)[1][:10]) for b in client.list_blobs(cfg["gcs"]["bucket"], prefix=prefix)
+            if b.name.endswith(".tif") and "_S2_" in b.name]
+
+
+def s2_newest_gcs(cfg: dict, folder: str = "s2_dates_masks") -> pd.Timestamp | None:
+    """Newest date among the per-date Sentinel-2 files on GCS (a listing; nothing is downloaded)."""
+    dates = s2_dates_gcs(cfg, folder)
     return max(dates) if dates else None
 
 
@@ -129,6 +135,75 @@ def aoi_clear_pct(polygon_4326, dates, threshold: float = CLEAR_CDF) -> dict[str
             .reduceRegion(ee.Reducer.mean(), region, 30, maxPixels=1e10).get("cs_cdf").getInfo()
         out[str(d)[:10]] = round(100 * float(frac or 0), 1)
     return out
+
+
+def clear_since(aoi_id: int, start: str, end: str, season_key: str = "monsoon2026") -> pd.DataFrame:
+    """Every Sentinel-2 date over the AOI from ``start`` (inclusive) to ``end`` (exclusive), with the share of the AOI
+    Cloud Score+ calls clear and whether the date is already exported (``held_gcs``). Read-only.
+
+    Why (user, 16 Oct 2026): for the AOIs without a clear September view the question is "which date, up to today, is
+    the clearest, and how clear?", over the whole period, not only the dates after our newest export (``check``)."""
+    import geopandas as gpd
+
+    from . import optical_export as oe
+
+    cfg = season_config(aoi_id, season_key)
+    polygon = oe.aoi_geojson_2d(gpd.read_file(config_mod.aoi_path(cfg)))
+    clouds = oe.scene_dates(polygon, start, end)
+    t = pd.DataFrame({"date": sorted(clouds)})
+    if not len(t):
+        return t.assign(aoi=cfg["aoi"]["key"])
+    clear = aoi_clear_pct(polygon, t["date"])
+    held = {d.strftime("%Y-%m-%d") for d in s2_dates_gcs(cfg)}
+    t["scene_cloud_pct_min"] = [round(clouds[d], 1) for d in t["date"]]
+    t["aoi_clear_pct"] = [clear.get(str(d)[:10]) for d in t["date"]]
+    t["held_gcs"] = [str(d)[:10] in held for d in t["date"]]
+    t.insert(0, "aoi", cfg["aoi"]["key"])
+    return t
+
+
+def _own_mask_one(args) -> list[dict]:
+    """Our own mask's kept share for one AOI's local per-date files (a worker process)."""
+    aoi, dates = args
+    t = describe_dates(int(str(aoi).removeprefix("aoi")), dates, png_dir=None)
+    return [{"aoi": aoi, "date": r["date"], "own_mask_clear_pct": r.get("series_kept_pct")} for r in t.to_dict("records")]
+
+
+def with_own_mask(t: pd.DataFrame, jobs: int = 0) -> pd.DataFrame:
+    """Adds ``own_mask_clear_pct``: the share of the AOI our series mask keeps on that date (local file needed; NaN
+    when the date is not on the pod).
+
+    Why (16 Oct 2026): Cloud Score+ called 16 September 100 % clear over AOIs whose September view is a haze veil; our
+    mask (QA60 + the blue-band haze test, the one the series and the rule use) keeps 0-45 % of them. The clear share
+    the user is told must be the one the map can actually use."""
+    from concurrent.futures import ProcessPoolExecutor
+
+    from . import resources
+
+    todo = [(a, list(g["date"])) for a, g in t.groupby("aoi", sort=False)]
+    with ProcessPoolExecutor(jobs or resources.detect_resources().cpus) as ex:
+        own = pd.DataFrame([r for rows in ex.map(_own_mask_one, todo) for r in rows])
+    t = t.merge(own, on=["aoi", "date"], how="left") if len(own) else t.assign(own_mask_clear_pct=np.nan)
+    # Both must agree (16 Oct, aoi12 on 1 October: a cloud edge with rainbow fringes that our mask kept at 88 % while
+    # Cloud Score+ said 15 %): the smaller of the two; Cloud Score+ alone where the date is not on the pod.
+    t["clear_pct_both"] = t[["aoi_clear_pct", "own_mask_clear_pct"]].min(axis=1, skipna=True)
+    return t
+
+
+def clear_summary(t: pd.DataFrame, cut: float = MOSTLY_CLEAR_PCT, col: str = "aoi_clear_pct") -> pd.DataFrame:
+    """One row per AOI of a :func:`clear_since` table: the clearest date overall and in each month, and how many
+    dates reach ``cut`` % and 80 % clear, by ``col`` (``clear_pct_both`` after :func:`with_own_mask`)."""
+    t = t.dropna(subset=[col]).assign(month=lambda x: pd.to_datetime(x["date"]).dt.strftime("%b"))
+    rows = []
+    for aoi, g in t.groupby("aoi", sort=False):
+        b = g.loc[g[col].idxmax()]
+        r = {"aoi": aoi, "clearest_date": b["date"], "clearest_pct": b[col], "dates": len(g),
+             f"dates_ge{cut:g}": int((g[col] >= cut).sum()), "dates_ge80": int((g[col] >= 80).sum())}
+        for m, gm in g.groupby("month", sort=False):
+            bm = gm.loc[gm[col].idxmax()]
+            r[f"best_{m.lower()}"] = f"{bm['date']} ({bm[col]:g} %)"
+        rows.append(r)
+    return pd.DataFrame(rows)
 
 
 def check_aoi(aoi_id: int, end: str, season_key: str = "monsoon2026") -> dict:
@@ -471,8 +546,10 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.newest_imagery", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("step", choices=["check", "compare-radar", "compare-series", "inputs", "describe", "fetch-clear",
-                                     "deliver-clear"])
-    p.add_argument("--report", help="fetch-clear: the JSON written by check --json")
+                                     "deliver-clear", "clear-since"])
+    p.add_argument("--start", default="2026-09-01", help="clear-since: first date to list")
+    p.add_argument("--own-mask", action="store_true", help="clear-since: also our own mask's clear share (local files)")
+    p.add_argument("--report", help="fetch-clear: the JSON written by check --json; clear-since: a CSV it wrote")
     p.add_argument("--min-clear", type=float, default=MOSTLY_CLEAR_PCT, help="fetch-clear: AOI clear %% needed")
     p.add_argument("--dates", nargs="+", help="describe: the local per-date files to describe (YYYY-MM-DD)")
     p.add_argument("--series-root", default="processed/_batch/s2_2026_hyb40m1late",
@@ -512,7 +589,22 @@ def main(argv=None) -> int:
             Path(args.out).parent.mkdir(parents=True, exist_ok=True)
             pd.concat(frames, ignore_index=True).to_csv(args.out, index=False)
         return 0
-    auth.init_ee(season_config(args.aois[0], args.season))
+    if args.step != "clear-since" or not args.report:
+        auth.init_ee(season_config(args.aois[0], args.season))
+    if args.step == "clear-since":
+        t = (pd.read_csv(args.report) if args.report else
+             pd.concat([clear_since(a, args.start, args.end, args.season) for a in args.aois], ignore_index=True))
+        col = "aoi_clear_pct"
+        if args.own_mask:
+            t, col = with_own_mask(t), "clear_pct_both"
+        s = clear_summary(t, col=col)
+        print(t.to_string(index=False))
+        print(s.to_string(index=False))
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            t.to_csv(args.out, index=False)
+            s.to_csv(Path(args.out).with_name(Path(args.out).stem + "_summary.csv"), index=False)
+        return 0
     if args.step == "deliver-clear":
         todo = clear_dates_to_fetch(json.loads(Path(args.report).read_text()), args.min_clear)
         todo = {k: v for k, v in todo.items() if int(k[3:]) in set(args.aois)}
