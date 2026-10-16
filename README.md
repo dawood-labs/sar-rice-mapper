@@ -434,6 +434,28 @@ The same module also compares a QC with the delivery:
 - `choose` / `without`: rule sets scored against the QC by pixel;
 - `trial`: one AOI re-mapped with extra switches in its own folder.
 
+## The client's three layers (`client_delivery`)
+
+After every AOI's QC layer is final (`qc_post`), the client receives three shapefiles in WGS84 (EPSG:4326):
+
+| Step | Input | Output (`processed/_batch/s2_2026/client_delivery_2026-10-16/`) | What it holds |
+|---|---|---|---|
+| `originals` | the client's shapefiles, unzipped to `../data/client_aoi_files_2026-10-16/unzipped/` | `1_original_aois/original_aois.shp` | every AOI polygon they sent, their columns as given, plus `source` (which of their files) |
+| `final-aois` | `../data/aoi/first_set_132_merged.gpkg`, `../data/aoi_batch2_2026-09-29/aois_new_106_merged.gpkg` | `2_final_aois/final_aois.shp` | the 233 AOIs we mapped (no duplicates, no empty polygons): `aoi_id`, `Company`, `District`, `VT` (local script), `VTE` (English) |
+| `rice` | every QC layer | `3_rice/rice_fields.shp` | all rice fields, dissolved where AOIs overlap, single parts: `predicted` (7 = rice) and `area_ac` (acres, 3 decimals, measured in EPSG:32646) |
+| `upload` | the three folders | `<base>/client_delivery_2026-10-16/` on GCS | md5-checked copies |
+
+```bash
+python -m sar_pipeline.analysis.client_delivery originals
+python -m sar_pipeline.analysis.client_delivery final-aois
+python -m sar_pipeline.analysis.client_delivery rice        # ~40 s for ~200,000 fields
+python -m sar_pipeline.analysis.client_delivery upload
+```
+
+Why the rice layer is dissolved: some AOIs overlap and two hold another AOI's fields, so the same field appears in
+two QC layers; dissolving merges those copies (about 1,060 acres would otherwise be counted twice). Fields that only
+sit side by side are not merged, because the QC step leaves a 0.2 m gap between them.
+
 ## Bringing in newer imagery without changing accepted AOIs
 
 **Why this needs care.** The rule reads two inputs per AOI: a Sentinel-1 *run* (`processed/<aoi>/<season>/runs/<run>/`)
