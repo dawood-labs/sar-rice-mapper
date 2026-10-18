@@ -51,3 +51,20 @@ def test_clear_summary_picks_clearest_overall_and_per_month():
     s = ni.clear_summary(t).iloc[0]
     assert (s["clearest_date"], s["clearest_pct"], s["dates_ge50"], s["dates_ge80"]) == ("2026-10-06", 90.0, 2, 1)
     assert s["best_sep"] == "2026-09-26 (55 %)"
+
+
+def test_choose_follows_the_window_rules():
+    import pandas as pd
+
+    from sar_pipeline import newest_imagery as ni
+
+    t = pd.DataFrame([
+        # an AOI without a clear September view: October only
+        ("aoi5", "2026-09-26", 90.0), ("aoi5", "2026-10-01", 70.0), ("aoi5", "2026-10-06", 60.0),
+        # early September good enough: the early date wins over a clearer late one
+        ("aoi20", "2026-09-11", 85.0), ("aoi20", "2026-09-28", 99.0),
+        # early September all cloudy: the late date
+        ("aoi21", "2026-09-11", 40.0), ("aoi21", "2026-09-28", 95.0), ("aoi21", "2026-10-01", 100.0),
+    ], columns=["aoi", "date", "clear_pct_both"])
+    c = ni.choose(t, oct_aois=(5,)).set_index("aoi")["date"].to_dict()
+    assert c == {"aoi5": "2026-10-01", "aoi20": "2026-09-11", "aoi21": "2026-09-28"}

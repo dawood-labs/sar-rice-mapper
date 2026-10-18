@@ -29,6 +29,7 @@ Use::
 
     python -m sar_pipeline.newest_imagery check --aois 13 28 39 [--end 2026-10-03]
     python -m sar_pipeline.newest_imagery clear-since --aois 3 4 --start 2026-09-01 --own-mask --out <csv>  # each date's clear %
+    python -m sar_pipeline.newest_imagery best-clear --aois 0 --report <clear-since csv> --dest <folder>  # one per AOI
     python -m sar_pipeline.newest_imagery fetch-clear --aois 13 28 --report <check json>    # export dates >= 50 % clear
     python -m sar_pipeline.newest_imagery deliver-clear --aois 13 28 --report <check json>  # copy them to the delivery
     python -m sar_pipeline.newest_imagery compare-radar  --aois 13 --old v001_20260923 --new v002_20261002
@@ -204,6 +205,105 @@ def clear_summary(t: pd.DataFrame, cut: float = MOSTLY_CLEAR_PCT, col: str = "ao
             r[f"best_{m.lower()}"] = f"{bm['date']} ({bm[col]:g} %)"
         rows.append(r)
     return pd.DataFrame(rows)
+
+
+def download_dates(aoi_id: int, dates, season_key: str = "monsoon2026", folder: str = "s2_dates_masks") -> list[Path]:
+    """Copies the AOI's per-date files of ``dates`` from GCS to ``data/<folder>/<aoi>/`` (a file already there is kept).
+    Why: our own mask (:func:`describe_dates`) reads local files, and most AOIs' files live only on GCS now."""
+    from google.cloud import storage
+
+    from . import auth
+
+    cfg = season_config(aoi_id, season_key)
+    key = cfg["aoi"]["key"]
+    local = config_mod.repo_root() / "data" / folder / key
+    local.mkdir(parents=True, exist_ok=True)
+    want = {str(d)[:10] for d in dates}
+    client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
+    out = []
+    for b in client.list_blobs(cfg["gcs"]["bucket"], prefix=f"{cfg['gcs']['base_folder']}/{folder}/{key}/"):
+        if b.name.endswith(".tif") and b.name.rsplit("_S2_", 1)[-1][:10] in want:
+            target = local / b.name.rsplit("/", 1)[-1]
+            if not target.exists():
+                tmp = target.with_name(f".{target.name}.part")
+                b.download_to_filename(str(tmp))
+                tmp.replace(target)
+            out.append(target)
+    return out
+
+
+def candidates(t: pd.DataFrame, oct_aois, min_cs: float = 50.0, per_aoi: int = 6) -> pd.DataFrame:
+    """The dates of each AOI worth judging with our own mask: inside its window (October for ``oct_aois``,
+    September for the others), Cloud Score+ at least ``min_cs`` %, the ``per_aoi`` best (and at least the best one)."""
+    t = t.dropna(subset=["aoi_clear_pct"]).copy()
+    d = pd.to_datetime(t["date"])
+    is_oct = t["aoi"].map(lambda a: int(str(a)[3:]) in set(oct_aois))
+    t = t[(is_oct & (d.dt.month == 10)) | (~is_oct & (d.dt.month == 9))]
+    t = t.sort_values(["aoi", "aoi_clear_pct", "date"], ascending=[True, False, False])
+    best = t.groupby("aoi").head(1)
+    keep = t[t["aoi_clear_pct"] >= min_cs].groupby("aoi").head(per_aoi)
+    return pd.concat([keep, best]).drop_duplicates(["aoi", "date"]).reset_index(drop=True)
+
+
+def choose(t: pd.DataFrame, oct_aois, early_end: str = "2026-09-25", good: float = 80.0) -> pd.DataFrame:
+    """One date per AOI (user, 18 Oct 2026): the AOIs of ``oct_aois`` (no clear September view) take their clearest
+    October date; the others their clearest September date up to ``early_end``, unless none of those reaches ``good``
+    % clear, then their clearest date after it (26-30 September), if that is clearer. Clear = ``clear_pct_both``."""
+    col = "clear_pct_both" if "clear_pct_both" in t else "aoi_clear_pct"
+    t = t.dropna(subset=[col]).assign(_d=lambda x: pd.to_datetime(x["date"]))
+    rows = []
+    for aoi, g in t.groupby("aoi", sort=False):
+        g = g.sort_values([col, "date"], ascending=[False, False])
+        if int(str(aoi)[3:]) in set(oct_aois):
+            pick, why = g[g["_d"].dt.month == 10].head(1), "October (no clear September view)"
+        else:
+            s = g[g["_d"].dt.month == 9]
+            early, late = s[s["_d"] <= pd.Timestamp(early_end)], s[s["_d"] > pd.Timestamp(early_end)]
+            if len(early) and (early[col].iloc[0] >= good or not len(late) or early[col].iloc[0] >= late[col].iloc[0]):
+                pick, why = early.head(1), f"September up to {early_end[-5:]}"
+            else:
+                pick, why = late.head(1), f"late September (nothing >= {good:g} % before)"
+        if len(pick):
+            rows.append(pick.assign(window=why))
+    return pd.concat(rows, ignore_index=True).drop(columns="_d") if rows else t.iloc[:0]
+
+
+def package_best(best: pd.DataFrame, dest: str, season_key: str = "monsoon2026", threads: int = 32) -> list[dict]:
+    """Copies each AOI's chosen date on GCS (server side) to ``<base>/<dest>/<aoi name>_S2_<date>_clear<pct>.tif``, the
+    AOI under its delivered name (``aoi<N>`` / ``b2_aoi<N>``), and writes ``index.csv`` beside them. Why (manager via
+    the user, 18 Oct 2026): one clear September / October image per AOI, its AOI and date readable from the name."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from google.cloud import storage
+
+    from . import auth
+    from .analysis.rice_map_delivery import bucket_name
+
+    cfg = season_config(int(str(best["aoi"].iloc[0])[3:]), season_key)
+    client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
+    bucket = client.bucket(cfg["gcs"]["bucket"])
+    base = cfg["gcs"]["base_folder"]
+
+    def one(r):
+        n = int(str(r["aoi"])[3:])
+        name = bucket_name(n)
+        src = f"{base}/s2_dates_masks/{r['aoi']}/{r['aoi']}_{r['date'][:7]}_S2_{r['date']}.tif"
+        pct = r.get("clear_pct_both", r["aoi_clear_pct"])
+        dst = f"{base}/{dest}/{name}_S2_{r['date']}_clear{int(round(pct))}pct.tif"
+        blob = bucket.get_blob(src)
+        if blob is None:
+            return {"aoi_id": name, "date": r["date"], "state": "missing on GCS"}
+        new = bucket.copy_blob(blob, bucket, dst)
+        return {"aoi_id": name, "date": r["date"], "chosen_from": r.get("window", ""), "clear_pct": round(float(pct), 1),
+                "clear_pct_cloud_score": r["aoi_clear_pct"], "clear_pct_own_mask": r.get("own_mask_clear_pct"),
+                "file": dst.rsplit("/", 1)[-1], "state": "copied" if new.md5_hash == blob.md5_hash else "md5 differs"}
+
+    with ThreadPoolExecutor(threads) as ex:
+        rows = list(ex.map(one, [r for _, r in best.iterrows()]))
+    idx = pd.DataFrame(rows).sort_values("aoi_id", key=lambda s: s.str.startswith("b2_").astype(int) * 10000
+                                         + s.str.extract(r"(\d+)$")[0].astype(int))
+    bucket.blob(f"{base}/{dest}/index.csv").upload_from_string(idx.to_csv(index=False), content_type="text/csv")
+    return rows
 
 
 def check_aoi(aoi_id: int, end: str, season_key: str = "monsoon2026") -> dict:
@@ -546,7 +646,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.newest_imagery", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("step", choices=["check", "compare-radar", "compare-series", "inputs", "describe", "fetch-clear",
-                                     "deliver-clear", "clear-since"])
+                                     "deliver-clear", "clear-since", "best-clear"])
+    p.add_argument("--dest", help="best-clear: GCS folder under the base for the chosen images (none: only the table)")
     p.add_argument("--start", default="2026-09-01", help="clear-since: first date to list")
     p.add_argument("--own-mask", action="store_true", help="clear-since: also our own mask's clear share (local files)")
     p.add_argument("--report", help="fetch-clear: the JSON written by check --json; clear-since: a CSV it wrote")
@@ -589,8 +690,23 @@ def main(argv=None) -> int:
             Path(args.out).parent.mkdir(parents=True, exist_ok=True)
             pd.concat(frames, ignore_index=True).to_csv(args.out, index=False)
         return 0
-    if args.step != "clear-since" or not args.report:
+    if args.step not in ("clear-since", "best-clear") or not args.report:
         auth.init_ee(season_config(args.aois[0], args.season))
+    if args.step == "best-clear":
+        from concurrent.futures import ThreadPoolExecutor
+
+        from .analysis.qc_sowing import NO_CLEAR_SEPTEMBER
+
+        cand = candidates(pd.read_csv(args.report), NO_CLEAR_SEPTEMBER)
+        with ThreadPoolExecutor(32) as ex:
+            list(ex.map(lambda g: download_dates(int(g[0][3:]), list(g[1]["date"])), cand.groupby("aoi")))
+        best = choose(with_own_mask(cand), NO_CLEAR_SEPTEMBER)
+        best.to_csv(Path(args.report).with_name(Path(args.report).stem + "_best.csv"), index=False)
+        print(best.to_string(index=False))
+        if args.dest:
+            rows = package_best(best, args.dest, args.season)
+            print(pd.Series([r["state"] for r in rows]).value_counts().to_dict())
+        return 0
     if args.step == "clear-since":
         t = (pd.read_csv(args.report) if args.report else
              pd.concat([clear_since(a, args.start, args.end, args.season) for a in args.aois], ignore_index=True))
