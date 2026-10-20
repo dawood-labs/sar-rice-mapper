@@ -26,6 +26,8 @@ Run::
     python -m sar_pipeline.storage_plan clear
     python -m sar_pipeline.storage_plan restore --under sar-rice-mapper/processed/_batch/s2_2026/sar_only
     python -m sar_pipeline.storage_plan backup --round 2      # round 2 (13 Oct): every data file; then verify / clear
+    python -m sar_pipeline.storage_plan backup --round 3      # round 3 (20 Oct): every data file left; verify / clear
+    python -m sar_pipeline.storage_plan code-backup           # code, docs, config, logs as one tar.gz (no secrets)
 """
 from __future__ import annotations
 
@@ -219,7 +221,9 @@ def _bucket_and_base():
 ALL_DATA_DIRS = ("sar-rice-mapper/processed", "sar-rice-mapper/data", "data", "outputs")
 #: Local folder -> the bucket folder (under the base folder) that already holds the same files.
 ALREADY_IN_BUCKET = {"sar-rice-mapper/data/s2_dates_masks/": "s2_dates_masks/"}
-ROUNDS = {"1": "_pod_backup_2026-10-12", "2": "_pod_backup_2026-10-13"}
+ROUNDS = {"1": "_pod_backup_2026-10-12", "2": "_pod_backup_2026-10-13", "3": "_pod_backup_2026-10-20"}
+#: Round 3 (user, 20 Oct 2026: "sara data raster or outputs gcs pr backup kr k pod se delete kr do"): every data file
+#: left, like round 2. A path in a later round is the newer copy, so lookups go newest round first.
 
 
 def backup_list_all(root: Path = PROJECT) -> list[tuple[str, int]]:
@@ -360,12 +364,14 @@ def restore(under: str = "", root: Path = PROJECT, threads: int = 32, rnd: str =
     from concurrent.futures import ThreadPoolExecutor
 
     b, _, _ = _bucket_and_base()
-    rows = []
-    for r in ([rnd] if rnd else list(ROUNDS)):
+    rows, seen = [], set()
+    for r in ([rnd] if rnd else sorted(ROUNDS, reverse=True)):     # newest round first: its copy wins
         if _manifest_path(root, r).exists():
             m = _manifest(r, root)
-            rows += [(p, sz, g) for p, sz, g in m[["path", "size", "gcs"]].itertuples(index=False)
-                     if p.startswith(under)]
+            for p, sz, g in m[["path", "size", "gcs"]].itertuples(index=False):
+                if p.startswith(under) and p not in seen:
+                    seen.add(p)
+                    rows.append((p, sz, g))
 
     def one(row):
         p, sz, g = row
@@ -405,8 +411,7 @@ def aoi_prefixes(aoi: int, parts=PARTS) -> list[str]:
     return out
 
 
-_ROUND2 = None
-_ROUND1 = None
+_MANIFESTS: dict = {}
 
 
 def ensure_aoi(aoi: int, root: Path = PROJECT, threads: int = 32, log=print, parts=PARTS) -> dict:
@@ -418,12 +423,11 @@ def ensure_aoi(aoi: int, root: Path = PROJECT, threads: int = 32, log=print, par
     round: a few AOIs (aoi160, 16 Oct 2026) read an older series that went to round 1."""
     import pandas as pd
 
-    global _ROUND1, _ROUND2
-    if _ROUND2 is None and _manifest_path(root, "2").exists():
-        _ROUND2 = _manifest("2", root)
-    if _ROUND1 is None and _manifest_path(root, "1").exists():
-        _ROUND1 = _manifest("1", root)
-    both = pd.concat([m for m in (_ROUND2, _ROUND1) if m is not None], ignore_index=True)
+    for r in ROUNDS:
+        if r not in _MANIFESTS and _manifest_path(root, r).exists():
+            _MANIFESTS[r] = _manifest(r, root)
+    ms = [_MANIFESTS[r] for r in sorted(_MANIFESTS, reverse=True)]       # newest round first: _fetch keeps the first
+    both = pd.concat(ms, ignore_index=True) if ms else pd.DataFrame(columns=["path", "size", "gcs"])
     if both.empty:
         return {"aoi": aoi, "files": 0, "downloaded_gb": 0.0}
     m = both[both["path"].str.startswith(tuple(aoi_prefixes(aoi, parts)))]
@@ -476,18 +480,62 @@ def _fetch(m, aoi: int, root: Path, threads: int, log) -> dict:
     return {"files": len(todo), "downloaded_gb": round(n / 1e9, 2)}
 
 
+CODE_BACKUP = "_code_docs_backup_2026-10-20"
+#: Left out of the code backup: the data folders (round 3 holds them), the rebuildable virtual environment, and every
+#: credential (``secrets/`` and the key files at the project root, the only ``.json`` files there; they never go to the
+#: bucket).
+CODE_EXCLUDE = ("sar-rice-mapper/data", "sar-rice-mapper/processed", "sar-rice-mapper/.venv", "sar-rice-mapper/secrets",
+                "data", "outputs")
+
+
+def code_backup(root: Path = PROJECT, out_dir: Path | None = None) -> dict:
+    """Packs everything in the project folder except :data:`CODE_EXCLUDE` (code with its git history, docs, config,
+    notebooks, logs and backup manifests, notes) into one ``tar.gz``, uploads it to ``<base>/<CODE_BACKUP>/`` and checks
+    the md5. Why (user, 20 Oct 2026): code and docs stay on the pod, but a copy belongs in the bucket too."""
+    import tarfile
+    import time
+
+    root = Path(root)
+    name = f"project_code_docs_{time.strftime('%Y-%m-%d')}.tar.gz"
+    out = Path(out_dir or root / "sar-rice-mapper" / "logs") / name
+    skip = tuple(str(root / e) for e in CODE_EXCLUDE)
+
+    def keep(ti):
+        full = str(root / ti.name)
+        if full.startswith(skip) or "/__pycache__" in ti.name or "/.ipynb_checkpoints" in ti.name or \
+                ti.name.endswith(".tar.gz") or ("/" not in ti.name and ti.name.endswith(".json")) or \
+                any(x in ("secrets", ".venv") for x in ti.name.split("/")):      # in any copy of the repository too
+            return None
+        return ti
+
+    with tarfile.open(out, "w:gz") as tf:
+        for p in sorted(root.iterdir()):
+            tf.add(p, arcname=p.name, filter=keep)
+    b, base, _ = _bucket_and_base()
+    g = f"{base}/{CODE_BACKUP}/{name}"
+    b.blob(g).upload_from_filename(str(out), timeout=1800)
+    ok = b.get_blob(g).md5_hash == _md5(str(out))
+    with tarfile.open(out) as tf:
+        n = len(tf.getnames())
+    return {"gcs": f"gs://{b.name}/{g}", "entries": n, "mb": round(out.stat().st_size / 1e6, 1), "md5_ok": ok}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["trace", "list", "backup", "verify", "clear", "restore"])
+    p.add_argument("step", choices=["trace", "list", "backup", "verify", "clear", "restore", "code-backup"])
     p.add_argument("--under", default="", help="restore: only files under this path (from the project folder)")
     p.add_argument("--restore-round", default="", choices=["", *ROUNDS], help="restore: one round only (default both)")
     p.add_argument("--threads", type=int, default=8, help="backup: threads per process")
     p.add_argument("--round", dest="rnd", default="1", choices=list(ROUNDS),
-                   help="list / backup / verify / clear: 1 = files not needed (12 Oct), 2 = all data files (13 Oct)")
+                   help="list / backup / verify / clear: 1 = files not needed (12 Oct), 2 / 3 = all data files "
+                        "(13 / 20 Oct)")
     p.add_argument("--field", action="append", default=[], help="field ids for inspect_field")
     p.add_argument("--aoi", type=int, action="append", default=[], help="AOIs for inspect_pixel (with --pixel)")
     p.add_argument("--pixel", type=int, action="append", default=[])
     a = p.parse_args(argv)
+    if a.step == "code-backup":
+        print(json.dumps(code_backup(), indent=1))
+        return 0
     if a.step == "list":
         f = backup_list() if a.rnd == "1" else backup_list_all()
         from collections import Counter
