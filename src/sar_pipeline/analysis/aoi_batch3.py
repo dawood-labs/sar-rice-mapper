@@ -20,7 +20,8 @@ images as the map date (user, 29 Sep: next runs use the latest date).
 * ``setup``: configs from a second-set template, grid + audit per AOI, tracks by rule (``prep batch-tracks``);
 * ``radar``: new run + export per AOI, then monitor, download and stack (``aoi_batch._download_stack``);
 * ``s2``: the full per-date Sentinel-2 export (``aoi_batch2.s2_export`` with this set's dates);
-* ``inputs``: pin the run, build the series and the per-AOI steps (``aoi_batch._prepare_one``, up to its inputs).
+* ``inputs``: pin the run, build the series and the per-AOI steps (``aoi_batch._prepare_one``, up to its inputs);
+* ``map``: each AOI's rule set from its neighbour (:data:`RULE_SOURCE`), then the pixel map and sieve.
 
 Run::
 
@@ -30,6 +31,7 @@ Run::
     python -m sar_pipeline.analysis.aoi_batch3 setup
     python -m sar_pipeline.analysis.aoi_batch3 radar      # and, at the same time:  ... s2
     python -m sar_pipeline.analysis.aoi_batch3 inputs
+    python -m sar_pipeline.analysis.aoi_batch3 map
 """
 from __future__ import annotations
 
@@ -221,9 +223,61 @@ def inputs(aois=None) -> list[str]:
         return list(ex.map(ab._prepare_one, todo, [str(LOGS)] * len(todo)))
 
 
+#: Whose accepted rule set each AOI takes (user, 27 Oct 2026, the second set's rule: the nearest AOI within 20 km):
+#: the two near Shwe Se fields -> aoi61; Farmer x3 and Wakhema -> aoi145 (their nearest second-set AOIs had no rice to
+#: learn from); the pilot site -> aoi28 (its locked own rules). AOI 241 is 31 km from any mapped AOI: blind review
+#: first, so it only gets a provisional map with the default rules (:data:`REVIEW`).
+RULE_SOURCE = {1239: 145, 1240: 145, 1242: 145, 1243: 61, 1244: 61, 1245: 145, 1246: 28}
+REVIEW = (1241,)
+
+
+def choose(aoi: int) -> dict | None:
+    """Writes the AOI's rule set (its source's) to ``aoi_rules_chosen.json`` and the rule record."""
+    from . import aoi_batch as ab
+    from . import curve_rules as cr
+    from . import rule_records as rr
+    from .aoi_batch2 import delivery_name
+
+    src = RULE_SOURCE.get(aoi)
+    if src is None:
+        return None
+    chosen = json.loads(ab.CHOSEN.read_text()) if ab.CHOSEN.exists() else {}
+    if str(src) in chosen:
+        rules, origin = dict(chosen[str(src)]["rules"]), chosen[str(src)]["from"]
+    else:                                              # a locked AOI with its own overrides (aoi28)
+        rules, origin = dict(cr.AOI_OVERRIDES[src]), f"aoi{src} own (locked)"
+    entry = {"rules": rules, "from": f"{delivery_name(src)}: {origin}", "fields": 0, "right_pct": None,
+             "merged_pct": None, "at": str(pd.Timestamp.now().floor("s")), "by": "neighbour (no review)"}
+    ab.set_chosen(aoi, entry)
+    cr.AOI_OVERRIDES[aoi] = {k: v for k, v in rules.items() if k != "SIEVE_ACRES"}
+    rr.record(aoi, "rule set by neighbour", f"{entry['from']} (nearest mapped AOI; user, 27 Oct 2026)")
+    ab._mark(aoi, "choose", entry)
+    return entry
+
+
+def _map_one(aoi: int) -> dict:
+    from . import curve_rules as cr
+
+    e = choose(aoi)
+    t = cr.run(aoi, force=True)
+    cr.sieve(aoi, force=True)
+    return {"aoi": aoi, "rules_from": e["from"] if e else "defaults (provisional, awaits review)",
+            "classes": t.to_dict("records") if hasattr(t, "to_dict") else str(t)}
+
+
+def pixel_map(aois=None) -> list[dict]:
+    """Rule set by neighbour, then the pixel map and its sieve (fields wait for the delineation)."""
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing as mp
+
+    todo = list(aois or ids())
+    with ProcessPoolExecutor(min(len(todo), 8), mp_context=mp.get_context("spawn")) as ex:
+        return list(ex.map(_map_one, todo))
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs"])
+    p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs", "map"])
     a = p.parse_args(argv)
     if a.step == "prepare":
         print(prepare().to_string(index=False))
@@ -237,6 +291,9 @@ def main(argv=None) -> int:
         print(json.dumps(radar(), indent=1))
     elif a.step == "s2":
         s2()
+    elif a.step == "map":
+        for r in pixel_map():
+            print(json.dumps(r, default=str))
     else:
         print("\n".join(inputs()))
     return 0
