@@ -18,3 +18,10 @@ def test_prepare_numbers_polygons_in_zip_then_file_order(tmp_path):
     assert list(idx["source_file"].str.split("/").str[-1]) == ["A_AOI.shp", "B_AOI.shp", "B_AOI.shp", "Pilot.shp"]
     g = gpd.read_file(tmp_path / "out" / "AOI_242" / "AOI_242.gpkg", layer="AOI_242")
     assert g["AOI_NUMBER"].iloc[0] == 242 and g["layer"].iloc[0] == "Pilot"
+
+
+def test_delivery_names_of_the_three_sets():
+    from sar_pipeline.analysis.aoi_batch2 import delivery_name
+
+    assert [delivery_name(a) for a in (19, 1133, 1238, 1239, 1246)] == ["aoi19", "b2_aoi133", "b2_aoi238", "b3_aoi239",
+                                                                         "b3_aoi246"]

@@ -11,10 +11,25 @@ another zip is read once) and the gitignored :data:`CONFIG` (``{"zips": [...in n
 name the client, so they stay out of the repository). Outputs: ``<OUT_DIR>/AOI_<N>/AOI_<N>.gpkg`` + ``index.csv``;
 ``upload`` copies them to the S3 prefix with the AWS CLI (credentials from the environment) and checks each object's size.
 
+Processing (user, 27 Oct 2026: start while the delineation runs), the second set's recipe
+(``scripts/monsoon_batch_chain.sh``, ``aoi_batch2``) with this set's dates: internal ids ``OFFSET`` + number (1239...),
+season 15 March to today, Sentinel-2 per-date export from 1 March (the rules' dry-season floor) to today, the newest
+images as the map date (user, 29 Sep: next runs use the latest date).
+
+* ``split``: ``<SRC>/split/b3_<id>/b3_<id>.gpkg`` (the layout ``prep batch-configs`` reads);
+* ``setup``: configs from a second-set template, grid + audit per AOI, tracks by rule (``prep batch-tracks``);
+* ``radar``: new run + export per AOI, then monitor, download and stack (``aoi_batch._download_stack``);
+* ``s2``: the full per-date Sentinel-2 export (``aoi_batch2.s2_export`` with this set's dates);
+* ``inputs``: pin the run, build the series and the per-AOI steps (``aoi_batch._prepare_one``, up to its inputs).
+
 Run::
 
     python -m sar_pipeline.analysis.aoi_batch3 prepare
     source secrets/aws_env.sh && python -m sar_pipeline.analysis.aoi_batch3 upload
+    python -m sar_pipeline.analysis.aoi_batch3 split
+    python -m sar_pipeline.analysis.aoi_batch3 setup
+    python -m sar_pipeline.analysis.aoi_batch3 radar      # and, at the same time:  ... s2
+    python -m sar_pipeline.analysis.aoi_batch3 inputs
 """
 from __future__ import annotations
 
@@ -86,14 +101,144 @@ def upload(out: Path = OUT_DIR, prefix: str | None = None) -> dict:
     return {"files": len(files), "size_ok": int(sum(ok)), "s3": prefix + "/"}
 
 
+SRC = Path("../data/aoi_batch3_2026-10-27")
+TEMPLATE = "config/aoi1133_monsoon2026.yaml"
+SEASON = "monsoon2026"
+SEASON_START = "2026-03-15"
+S2_START = "2026-03-01"
+LOGS = Path("logs/batch3")
+PY = [".venv/bin/python", "-W", "ignore", "-m"]
+
+
+def season_end() -> str:
+    """Tomorrow (the season end is exclusive): every image up to today."""
+    return (pd.Timestamp.now().normalize() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def ids(src: Path = OUT_DIR) -> list[int]:
+    from .aoi_batch2 import internal_id
+
+    return [internal_id(n) for n in pd.read_csv(src / "index.csv")["AOI_NUMBER"]]
+
+
+def split(src: Path = OUT_DIR, dest: Path = SRC) -> list[Path]:
+    """One folder per AOI (``split/b3_<id>/b3_<id>.gpkg``: ``aoi``, ``number``, ``acres``, ``aoi_name``)."""
+    import geopandas as gpd
+
+    from .aoi_batch2 import delivery_name, internal_id
+
+    out = []
+    for n in pd.read_csv(src / "index.csv")["AOI_NUMBER"]:
+        g = gpd.read_file(src / f"AOI_{n}" / f"AOI_{n}.gpkg").to_crs(4326)
+        a = internal_id(int(n))
+        one = gpd.GeoDataFrame({"aoi": [a], "number": [int(n)],
+                                "acres": [round(float(g.to_crs(32646).area.sum()) / 4046.8564224, 3)],
+                                "aoi_name": [delivery_name(a)]}, geometry=[g.geometry.union_all()], crs=4326)
+        d = dest / "split" / f"b3_{a}"
+        d.mkdir(parents=True, exist_ok=True)
+        one.to_file(d / f"b3_{a}.gpkg", driver="GPKG")
+        out.append(d / f"b3_{a}.gpkg")
+    return out
+
+
+def _sh(args: list[str], log: Path) -> None:
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, "a") as fh:
+        r = subprocess.run(args, stdout=fh, stderr=subprocess.STDOUT)
+    if r.returncode:
+        raise RuntimeError(f"{' '.join(args[3:6])} failed (exit {r.returncode}); see {log}")
+
+
+def setup(aois=None) -> None:
+    """Configs, grid, audit and track choice for every AOI (the second set's recipe)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    aois = aois or ids()
+    _sh(PY + ["sar_pipeline.prep", "batch-configs", "--template", TEMPLATE, "--split-dir", str(SRC / "split"),
+              "--season-key", SEASON, "--start", SEASON_START, "--end", season_end(), "--ids", *map(str, aois)],
+        LOGS / "configs.log")
+
+    def one(a):
+        cfg = f"config/aoi{a}_{SEASON}.yaml"
+        _sh(PY + ["sar_pipeline", "--config", cfg, "grid"], LOGS / f"aoi{a}_prep.log")
+        _sh(PY + ["sar_pipeline", "--config", cfg, "audit"], LOGS / f"aoi{a}_prep.log")
+        return a
+
+    with ThreadPoolExecutor(len(aois)) as ex:
+        list(ex.map(one, aois))
+    _sh(PY + ["sar_pipeline.prep", "batch-tracks", "--season-key", SEASON, "--flood-start", "2026-05-01",
+              "--flood-end", "2026-08-31", "--ids", *map(str, aois)], LOGS / "tracks.log")
+
+
+def radar(aois=None) -> dict:
+    """New run + export, then monitor until done, download and stack, every AOI in its own thread."""
+    import re
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import aoi_batch as ab
+
+    aois = aois or ids()
+
+    def one(a):
+        cfg = f"config/aoi{a}_{SEASON}.yaml"
+        st = ab.status(a)
+        run = st.get("run")
+        if not run:
+            log = LOGS / f"aoi{a}_newrun.log"
+            _sh(PY + ["sar_pipeline", "--config", cfg, "new-run"], log)
+            run = re.findall(r"/runs/(\S+)", log.read_text())[-1].rstrip("/").split("/")[0]
+            st["run"] = run
+            ab._status_path(a).parent.mkdir(parents=True, exist_ok=True)
+            ab._status_path(a).write_text(json.dumps(st, indent=1, default=str))
+        if not ab._done(a, "imagery"):
+            _sh(PY + ["sar_pipeline", "--config", cfg, "export", "--run", run, "--all", "--yes"],
+                LOGS / f"aoi{a}_export.log")
+            _sh(PY + ["sar_pipeline", "--config", cfg, "monitor", "--run", run, "--yes"], LOGS / f"aoi{a}_monitor.log")
+            ab._download_stack(a, run, LOGS)
+            ab._mark(a, "imagery", {"run": run})
+        return a, run
+
+    with ThreadPoolExecutor(len(aois)) as ex:
+        return dict(ex.map(one, aois))
+
+
+def s2(aois=None) -> None:
+    from . import aoi_batch2 as b2
+
+    b2.s2_export(aois or ids(), logs=LOGS, start=S2_START, end=season_end())
+
+
+def inputs(aois=None) -> list[str]:
+    """Pin, series and the per-AOI steps for every AOI whose radar and Sentinel-2 are both in."""
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing as mp
+
+    from . import aoi_batch as ab
+    from . import aoi_batch2 as b2
+
+    todo = [a for a in (aois or ids()) if ab._done(a, "imagery") and b2.s2_ready(a)]
+    with ProcessPoolExecutor(min(len(todo), 4) or 1, mp_context=mp.get_context("spawn")) as ex:
+        return list(ex.map(ab._prepare_one, todo, [str(LOGS)] * len(todo)))
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["prepare", "upload"])
+    p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs"])
     a = p.parse_args(argv)
     if a.step == "prepare":
         print(prepare().to_string(index=False))
-    else:
+    elif a.step == "upload":
         print(json.dumps(upload(), indent=1))
+    elif a.step == "split":
+        print("\n".join(map(str, split())))
+    elif a.step == "setup":
+        setup()
+    elif a.step == "radar":
+        print(json.dumps(radar(), indent=1))
+    elif a.step == "s2":
+        s2()
+    else:
+        print("\n".join(inputs()))
     return 0
 
 

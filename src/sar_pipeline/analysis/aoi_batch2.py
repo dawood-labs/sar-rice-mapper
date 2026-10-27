@@ -54,9 +54,17 @@ def is_batch2(aoi: int) -> bool:
     return int(aoi) >= OFFSET
 
 
+#: The client's numbers from here on belong to the third AOI set (``aoi_batch3``, 27 Oct 2026): ``b3_aoi<N>``.
+BATCH3_FROM = 239
+
+
 def delivery_name(aoi: int) -> str:
-    """The name the client sees: ``aoi19`` for the first set, ``b2_aoi133`` for new AOI 133."""
-    return f"b2_aoi{int(aoi) - OFFSET}" if is_batch2(aoi) else f"aoi{int(aoi)}"
+    """The name the client sees: ``aoi19`` for the first set, ``b2_aoi133`` for new AOI 133, ``b3_aoi239`` for the
+    third set's first AOI (internal id ``OFFSET`` + number for both later sets)."""
+    if not is_batch2(aoi):
+        return f"aoi{int(aoi)}"
+    n = int(aoi) - OFFSET
+    return f"b3_aoi{n}" if n >= BATCH3_FROM else f"b2_aoi{n}"
 
 
 def _number(path) -> int:
@@ -353,7 +361,7 @@ def _open_by_aoi() -> dict[int, int]:
     return out
 
 
-def s2_missing(aoi: int) -> int:
+def s2_missing(aoi: int, start: str | None = None, end: str | None = None) -> int:
     """How many Sentinel-2 dates S2_START..S2_END of ``aoi`` are not on GCS yet. Read only: lists the bucket and asks
     Earth Engine for the dates, but starts no export."""
     import geopandas as gpd
@@ -369,12 +377,12 @@ def s2_missing(aoi: int) -> int:
     prefix = cfg["gcs"]["base_folder"] + "/s2_dates_masks"
     client = storage.Client(credentials=auth.credentials(cfg), project=cfg["auth"]["project"])
     existing = {b.name for b in client.list_blobs(bucket, prefix=f"{prefix}/{key}/")}
-    dates = oe.scene_dates(oe.aoi_geojson_2d(gpd.read_file(cm.aoi_path(cfg))), S2_START, S2_END)
+    dates = oe.scene_dates(oe.aoi_geojson_2d(gpd.read_file(cm.aoi_path(cfg))), start or S2_START, end or S2_END)
     return len(oe.dates_to_export(dates, lambda d: d[:7], existing, prefix, key))
 
 
 def s2_export(aois, logs: Path = Path("logs/batch2"), chunk: int = S2_CHUNK, queue_max: int = S2_QUEUE_MAX,
-              poll: float = 60.0) -> None:
+              poll: float = 60.0, start: str = S2_START, end: str = S2_END) -> None:
     """Exports every Sentinel-2 date S2_START..S2_END for ``aois`` in rounds of ``chunk`` AOIs, each round only when
     Earth Engine holds fewer than ``queue_max`` open tasks (the project's queue takes about 3,000, and the radar
     exports share it). Files already on GCS are skipped (``optical_export.export_all_dates``).
@@ -401,7 +409,7 @@ def s2_export(aois, logs: Path = Path("logs/batch2"), chunk: int = S2_CHUNK, que
             if s2_ready(a) or a in checked or open_.get(a, 0):
                 continue
             try:
-                missing = s2_missing(a)
+                missing = s2_missing(a, start, end)
             except Exception as e:                     # a listing error only delays this AOI
                 say(f"aoi{a}: S2 check failed ({e}); retrying next poll")
                 continue
@@ -423,7 +431,7 @@ def s2_export(aois, logs: Path = Path("logs/batch2"), chunk: int = S2_CHUNK, que
             if s2_ready(a) or a in running:
                 continue
             try:
-                complete = s2_missing(a) == 0
+                complete = s2_missing(a, start, end) == 0
             except Exception:
                 complete = False
             if complete:
@@ -438,7 +446,7 @@ def s2_export(aois, logs: Path = Path("logs/batch2"), chunk: int = S2_CHUNK, que
             part = todo[i:i + chunk]
             cfgs = [f"config/aoi{a}_monsoon2026.yaml" for a in part]
             with open(logs / "s2_full_export.log", "a") as log:
-                r = subprocess.run(py + ["--configs", *cfgs, "--start", S2_START, "--end", S2_END], stdout=log,
+                r = subprocess.run(py + ["--configs", *cfgs, "--start", start, "--end", end], stdout=log,
                                    stderr=subprocess.STDOUT)
             started += part
             say(f"S2 round {attempt}: submitted {part} (exit {r.returncode}); open tasks {_ee_open_tasks()}")
