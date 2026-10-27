@@ -70,3 +70,4 @@ logs/
 # Private assistant context (project-specific)
 CLAUDE.local.md
 src/sar_pipeline/analysis/aoi_rules_chosen.lock
+config/aoi_batch3.json
