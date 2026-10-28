@@ -607,12 +607,13 @@ def tiles_prefix(aoi: int) -> str:
     from .. import config as config_mod
 
     cfg = yaml.safe_load((config_mod.repo_root() / "config" / "basemap_local.yaml").read_text())
-    if aoi >= 1000:                                   # the second AOI set (aoi_batch2): its own folder layout
-        from .aoi_batch2 import OFFSET
+    if aoi >= 1000:                                   # the second / third AOI set: their own folder layouts
+        from .aoi_batch2 import BATCH3_FROM, OFFSET
 
         num = aoi - OFFSET
         name = "AoI_233" if num == 233 else f"AOI_{num}"
-        return cfg["s3_tiles_template_b2"].format(n=num, name=name)
+        key = "s3_tiles_template_b3" if num >= BATCH3_FROM else "s3_tiles_template_b2"
+        return cfg[key].format(n=num, name=name)
     return cfg["s3_tiles_template"].format(aoi=aoi)
 
 

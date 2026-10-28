@@ -24,7 +24,8 @@ images as the map date (user, 29 Sep: next runs use the latest date).
 * ``map``: each AOI's rule set from its neighbour (:data:`RULE_SOURCE`), then the pixel map and sieve;
 * ``delineation``: the delineation team's fields from S3, merged for ``field_rice.load_fields``;
 * ``radar-to-map-date``: a new radar run ending at the delivered sets' map date (then ``inputs`` and ``map`` again);
-* ``fields``: the delineated fields labelled from the sieved map.
+* ``fields``: the delineated fields labelled from the sieved map;
+* ``deliver``: the QC package per AOI, uploaded like the delivered sets'.
 
 Run::
 
@@ -358,6 +359,31 @@ def fields(aois=None) -> list[dict]:
         return list(ex.map(_fields_one, todo))
 
 
+def _deliver_one(aoi: int, redo=()) -> tuple[int, dict | str]:
+    from . import rice_map_delivery as rd
+
+    st0 = rd.load_status(aoi)
+    if not st0.get("trees_cut", {}).get("done") and st0.get("upload", {}).get("done"):
+        redo = tuple(redo) + ("trees_cut", "upload")   # trees cut later (e.g. after S3 creds came back): upload again
+    try:
+        st = rd.run_one(aoi, redo=redo)
+        return aoi, {k: (v.get("done"), str(v.get("result"))[:200]) for k, v in st.items()}
+    except Exception as e:                            # one AOI's failure does not stop the others
+        return aoi, f"FAILED {type(e).__name__}: {e}"
+
+
+def deliver(aois=None) -> dict:
+    """The QC package of every AOI, as for the delivered sets (``rice_map_delivery.run_one``: lock, package, too-young,
+    trees cut, upload to ``<base>/rice_map_2026-10-05/b3_aoi<N>/`` with its clear S2 dates in ``s2/``). Why (user,
+    28 Oct 2026): the QC assistant takes the files from the same place as before."""
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing as mp
+
+    todo = list(aois or ids())
+    with ProcessPoolExecutor(min(len(todo), 8), mp_context=mp.get_context("spawn")) as ex:
+        return dict(ex.map(_deliver_one, todo))
+
+
 def pixel_map(aois=None) -> list[dict]:
     """Rule set by neighbour, then the pixel map and its sieve (fields wait for the delineation)."""
     from concurrent.futures import ProcessPoolExecutor
@@ -371,7 +397,7 @@ def pixel_map(aois=None) -> list[dict]:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs", "map",
-                                      "delineation", "radar-to-map-date", "fields"])
+                                      "delineation", "radar-to-map-date", "fields", "deliver"])
     a = p.parse_args(argv)
     if a.step == "prepare":
         print(prepare().to_string(index=False))
@@ -387,6 +413,8 @@ def main(argv=None) -> int:
         s2()
     elif a.step == "radar-to-map-date":
         print(json.dumps(radar_to_map_date(), indent=1))
+    elif a.step == "deliver":
+        print(json.dumps(deliver(), indent=1, default=str))
     elif a.step == "fields":
         for r in fields():
             print(json.dumps(r, default=str))
