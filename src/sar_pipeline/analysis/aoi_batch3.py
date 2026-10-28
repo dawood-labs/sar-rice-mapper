@@ -21,7 +21,10 @@ images as the map date (user, 29 Sep: next runs use the latest date).
 * ``radar``: new run + export per AOI, then monitor, download and stack (``aoi_batch._download_stack``);
 * ``s2``: the full per-date Sentinel-2 export (``aoi_batch2.s2_export`` with this set's dates);
 * ``inputs``: pin the run, build the series and the per-AOI steps (``aoi_batch._prepare_one``, up to its inputs);
-* ``map``: each AOI's rule set from its neighbour (:data:`RULE_SOURCE`), then the pixel map and sieve.
+* ``map``: each AOI's rule set from its neighbour (:data:`RULE_SOURCE`), then the pixel map and sieve;
+* ``delineation``: the delineation team's fields from S3, merged for ``field_rice.load_fields``;
+* ``radar-to-map-date``: a new radar run ending at the delivered sets' map date (then ``inputs`` and ``map`` again);
+* ``fields``: the delineated fields labelled from the sieved map.
 
 Run::
 
@@ -204,6 +207,36 @@ def radar(aois=None) -> dict:
         return dict(ex.map(one, aois))
 
 
+#: Map date of the delivered sets (user, 27 Oct 2026: map the third set like the others, ~5 Oct): radar to 4 Oct
+#: (season end 5 Oct, exclusive); the optical series (``aoi_batch.SERIES_VARIANT``) already ends on the 1 Oct images.
+MAP_SEASON_END = "2026-10-05"
+
+
+def radar_to_map_date(aois=None, end: str = MAP_SEASON_END) -> dict:
+    """A new radar run per AOI ending at the map date, then the AOI's inputs again on it (pin, pass audit, steps).
+    Why a new run and not a cut of the old one: the multi-temporal speckle filter mixes each pass with its
+    neighbours, so only a run that ends there equals the other sets' runs."""
+    import re as _re
+
+    from . import aoi_batch as ab
+
+    aois = list(aois or ids())
+    for a in aois:
+        p = Path(f"config/aoi{a}_{SEASON}.yaml")
+        p.write_text(_re.sub(r"(season: \{[^}]*end: ')[0-9-]+(')", rf"\g<1>{end}\g<2>", p.read_text(), count=1))
+        # the export takes its passes from the latest audit, so the audit is redone for the new season end first
+        # (27 Oct: without it the new run still held the passes to 19 Oct)
+        _sh(PY + ["sar_pipeline", "--config", str(p), "audit"], LOGS / f"aoi{a}_prep.log")
+        st = ab.status(a)
+        old = (st.get("imagery") or {}).get("result", {}).get("run")
+        if old and (st.get("run_to_map_date") or {}).get("audited") != end:
+            for k in ("run", "imagery", "inputs", "choose"):
+                st.pop(k, None)
+            st["run_to_map_date"] = {"from": old, "end": end, "audited": end}
+            ab._status_path(a).write_text(json.dumps(st, indent=1, default=str))
+    return radar(aois)
+
+
 def s2(aois=None) -> None:
     from . import aoi_batch2 as b2
 
@@ -221,6 +254,49 @@ def inputs(aois=None) -> list[str]:
     todo = [a for a in (aois or ids()) if ab._done(a, "imagery") and b2.s2_ready(a)]
     with ProcessPoolExecutor(min(len(todo), 4) or 1, mp_context=mp.get_context("spawn")) as ex:
         return list(ex.map(ab._prepare_one, todo, [str(LOGS)] * len(todo)))
+
+
+MIN_FIELD_M2 = 10.0
+
+
+def delineation(aois=None) -> Path:
+    """Downloads each AOI's ``Final_Output`` delineation from the S3 prefix (newest run) and writes all fields to
+    ``<SRC>/delineation_merged.gpkg`` with ``source_aoi`` = ``b3_<id>_delineation`` (how ``field_rice.load_fields``
+    finds an AOI), 2D, cut to the AOI, pieces under :data:`MIN_FIELD_M2` dropped (the second set's recipe)."""
+    import geopandas as gpd
+    import shapely
+
+    from .aoi_batch2 import internal_id
+
+    prefix = _config()["s3_prefix"].rstrip("/")
+    ls = subprocess.run(["aws", "s3", "ls", "--recursive", prefix + "/"], check=True, capture_output=True, text=True)
+    keys = sorted(line.split(maxsplit=3)[3] for line in ls.stdout.splitlines()
+                  if line.endswith("_Final_Output.gpkg"))
+    bucket = prefix.split("/")[2]
+    frames = []
+    for n in pd.read_csv(OUT_DIR / "index.csv")["AOI_NUMBER"]:
+        a = internal_id(int(n))
+        mine = [k for k in keys if f"/AOI_{n}/" in k]
+        if not mine or (aois and a not in aois):
+            continue
+        local = SRC / "delineation" / f"AOI_{n}_Final_Output.gpkg"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["aws", "s3", "cp", "--only-show-errors", f"s3://{bucket}/{mine[-1]}", str(local)], check=True)
+        shape = gpd.read_file(SRC / "split" / f"b3_{a}" / f"b3_{a}.gpkg").to_crs(32646).geometry.union_all()
+        f = gpd.read_file(local)
+        f["geometry"] = shapely.force_2d(f.geometry.values)
+        f = f.to_crs(32646)
+        f["geometry"] = [shapely.make_valid(g.intersection(shape)) for g in f.geometry]
+        f = f[~f.is_empty].explode(index_parts=False)
+        f = f[(f.geom_type == "Polygon") & (f.area >= MIN_FIELD_M2)]
+        f.insert(0, "source_aoi", f"b3_{a}_delineation")
+        frames.append(f.drop(columns=["src_uids"], errors="ignore").to_crs(4326))
+    out = SRC / "delineation_merged.gpkg"
+    allf = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True), crs=4326)
+    tmp = out.with_suffix(".tmp.gpkg")
+    allf.to_file(tmp, driver="GPKG")
+    tmp.replace(out)
+    return out
 
 
 #: Whose accepted rule set each AOI takes (user, 27 Oct 2026, the second set's rule: the nearest AOI within 20 km):
@@ -265,6 +341,23 @@ def _map_one(aoi: int) -> dict:
             "classes": t.to_dict("records") if hasattr(t, "to_dict") else str(t)}
 
 
+def _fields_one(aoi: int) -> dict:
+    from . import curve_rules as cr
+
+    t = cr.fields(aoi, force=True)
+    return {"aoi": aoi, "acres": t.to_dict("records") if hasattr(t, "to_dict") else str(t)}
+
+
+def fields(aois=None) -> list[dict]:
+    """Field labels from the sieved map on the delineation (``curve_rules.fields``), every AOI in parallel."""
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing as mp
+
+    todo = list(aois or ids())
+    with ProcessPoolExecutor(min(len(todo), 8), mp_context=mp.get_context("spawn")) as ex:
+        return list(ex.map(_fields_one, todo))
+
+
 def pixel_map(aois=None) -> list[dict]:
     """Rule set by neighbour, then the pixel map and its sieve (fields wait for the delineation)."""
     from concurrent.futures import ProcessPoolExecutor
@@ -277,7 +370,8 @@ def pixel_map(aois=None) -> list[dict]:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs", "map"])
+    p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs", "map",
+                                      "delineation", "radar-to-map-date", "fields"])
     a = p.parse_args(argv)
     if a.step == "prepare":
         print(prepare().to_string(index=False))
@@ -291,6 +385,13 @@ def main(argv=None) -> int:
         print(json.dumps(radar(), indent=1))
     elif a.step == "s2":
         s2()
+    elif a.step == "radar-to-map-date":
+        print(json.dumps(radar_to_map_date(), indent=1))
+    elif a.step == "fields":
+        for r in fields():
+            print(json.dumps(r, default=str))
+    elif a.step == "delineation":
+        print(delineation())
     elif a.step == "map":
         for r in pixel_map():
             print(json.dumps(r, default=str))
