@@ -92,6 +92,23 @@ def prepare(root: Path = CLIENT_DIR, out: Path = OUT_DIR, first: int = FIRST_NUM
     return idx
 
 
+def boundaries(src: Path = OUT_DIR) -> Path:
+    """All the set's AOI polygons in one GeoPackage (``<SRC>/b3_aois_boundaries.gpkg``): ``aoi_id`` (``b3_aoi<N>``),
+    ``area_ac`` (acres, 3 decimals, EPSG:32646) and the client's columns as given, EPSG:4326. Why (user, 30 Oct 2026):
+    one file to download and open in QGIS."""
+    import geopandas as gpd
+
+    parts = []
+    for n in pd.read_csv(src / "index.csv")["AOI_NUMBER"]:
+        g = gpd.read_file(src / f"AOI_{n}" / f"AOI_{n}.gpkg").to_crs(4326)
+        g.insert(0, "aoi_id", f"b3_aoi{n}")
+        g.insert(1, "area_ac", (g.to_crs(32646).area / 4046.8564224).round(3))
+        parts.append(g)
+    out = SRC / "b3_aois_boundaries.gpkg"
+    gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=4326).to_file(out, driver="GPKG", layer="b3_aois")
+    return out
+
+
 def upload(out: Path = OUT_DIR, prefix: str | None = None) -> dict:
     """``aws s3 cp`` of every prepared file to the prefix, then a size check of each object."""
     prefix = (prefix or _config()["s3_prefix"]).rstrip("/")
@@ -397,7 +414,7 @@ def pixel_map(aois=None) -> list[dict]:
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs", "map",
-                                      "delineation", "radar-to-map-date", "fields", "deliver"])
+                                      "delineation", "radar-to-map-date", "fields", "deliver", "boundaries"])
     a = p.parse_args(argv)
     if a.step == "prepare":
         print(prepare().to_string(index=False))
@@ -413,6 +430,8 @@ def main(argv=None) -> int:
         s2()
     elif a.step == "radar-to-map-date":
         print(json.dumps(radar_to_map_date(), indent=1))
+    elif a.step == "boundaries":
+        print(boundaries())
     elif a.step == "deliver":
         print(json.dumps(deliver(), indent=1, default=str))
     elif a.step == "fields":
