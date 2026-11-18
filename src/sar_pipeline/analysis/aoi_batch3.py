@@ -413,6 +413,8 @@ def pixel_map(aois=None) -> list[dict]:
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("--aois", type=int, nargs="*", help="only these internal AOI ids (e.g. 1246)")
+    p.add_argument("--end", help="radar-to-map-date: season end (exclusive), e.g. tomorrow for every pass to today")
     p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs", "map",
                                       "delineation", "radar-to-map-date", "fields", "deliver", "boundaries"])
     a = p.parse_args(argv)
@@ -429,7 +431,7 @@ def main(argv=None) -> int:
     elif a.step == "s2":
         s2()
     elif a.step == "radar-to-map-date":
-        print(json.dumps(radar_to_map_date(), indent=1))
+        print(json.dumps(radar_to_map_date(a.aois, a.end or MAP_SEASON_END), indent=1))
     elif a.step == "boundaries":
         print(boundaries())
     elif a.step == "deliver":
