@@ -22,6 +22,8 @@ back-off. Run::
     python -m sar_pipeline.direct_fetch s1 --config config/aoi1246_monsoon2026.yaml --run <run>
     python -m sar_pipeline --config config/aoi1246_monsoon2026.yaml stack --run <run>
     python -m sar_pipeline.direct_fetch s2 --config config/aoi1246_monsoon2026.yaml --start 2026-03-01 --end <tomorrow>
+    source secrets/aws_env.sh && python -m sar_pipeline.direct_fetch upload --to s3://<bucket>/<prefix> \
+        --pair processed/aoi1246/monsoon2026/runs/<run> s1/<run> --pair data/s2_dates_masks/aoi1246 s2
 """
 from __future__ import annotations
 
@@ -179,15 +181,43 @@ def s2_dates(config: str, start: str, end: str, folder: str = "data/s2_dates_mas
     return rows
 
 
+def s3_sync(pairs, prefix: str) -> dict:
+    """``aws s3 sync`` of each (local folder, sub-folder) to ``<prefix>/<sub-folder>/``, then every local file's size
+    compared with its object (credentials from the environment). Why: the data is kept on S3 (user, 18 Nov 2026)."""
+    import subprocess
+
+    prefix = prefix.rstrip("/")
+    files, ok = 0, 0
+    for local, sub in pairs:
+        local = Path(local)
+        dest = f"{prefix}/{sub.strip('/')}"
+        subprocess.run(["aws", "s3", "sync", "--only-show-errors", str(local), dest + "/"], check=True)
+        ls = subprocess.run(["aws", "s3", "ls", "--recursive", dest + "/"], check=True, capture_output=True,
+                            text=True).stdout
+        key_root = dest.split("/", 3)[3] + "/"
+        remote = {ln.split(maxsplit=3)[3][len(key_root):]: int(ln.split()[2]) for ln in ls.splitlines()
+                  if len(ln.split(maxsplit=3)) == 4}
+        for f in local.rglob("*"):
+            if f.is_file():
+                files += 1
+                ok += remote.get(str(f.relative_to(local))) == f.stat().st_size
+    return {"files": files, "size_ok": ok, "s3": prefix + "/"}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("what", choices=["s1", "s2"])
-    p.add_argument("--config", required=True)
+    p.add_argument("what", choices=["s1", "s2", "upload"])
+    p.add_argument("--to", help="upload: S3 prefix (s3://bucket/...)")
+    p.add_argument("--pair", nargs=2, action="append", metavar=("LOCAL", "SUB"), help="upload: local folder and its sub-folder")
+    p.add_argument("--config", help="s1 / s2: the AOI config")
     p.add_argument("--run", help="s1: the planned run id")
     p.add_argument("--start", help="s2: first date")
     p.add_argument("--end", help="s2: end date (exclusive)")
     p.add_argument("--threads", type=int, default=THREADS)
     a = p.parse_args(argv)
+    if a.what == "upload":
+        print(json.dumps(s3_sync(a.pair, a.to), indent=1))
+        return 0
     if a.what == "s1":
         print(json.dumps(s1_run(a.config, a.run, a.threads), indent=1))
     else:
