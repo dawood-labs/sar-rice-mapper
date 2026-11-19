@@ -214,8 +214,22 @@ def plot_field(aoi: int, field, start: str = "2026-04-01"):
         ax.xaxis.set_minor_formatter(mdates.DateFormatter("%d"))
         ax.tick_params(axis="x", which="minor", labelsize=7, colors="#666666")
     ac, px = float(fields.loc[fid, "acres"]), int(fields.loc[fid, "pixels"])
-    fig.suptitle(f"{fid}  ·  {ac:.3f} ac  ·  {px} pixels  ·  radar first, NDVI as support", x=0.01, ha="left",
-                 fontsize=13, weight="bold")
+    rule = ""
+    if (d / "field_stage.csv").exists():                   # the rule's reading of this field, to compare by eye
+        fs = pd.read_csv(d / "field_stage.csv").set_index("field_id")
+        if fid in fs.index:
+            r = fs.loc[fid]
+            rule = (f"\nrule: planting {r['sowing_median']} (pixels {r['sowing_q25']} .. {r['sowing_q75']}), "
+                    f"transplanted {r['transplanted_pct']:.0f} %, harvested {r['harvested_pct']:.0f} % of pixels"
+                    + (f" between {r['harvest_from']} and {r['harvest_to']}" if r["harvested_pct"] > 0 else "")
+                    + f", age {r['age_median']:.0f} d")
+            for ax in axes:
+                if isinstance(r["sowing_median"], str):
+                    ax.axvline(pd.Timestamp(r["sowing_median"]), color="#444444", ls="--", lw=1)
+                if r["harvested_pct"] > 0 and isinstance(r["harvest_from"], str):
+                    ax.axvspan(pd.Timestamp(r["harvest_from"]), pd.Timestamp(r["harvest_to"]), color="#cc3333", alpha=0.15)
+    fig.suptitle(f"{fid}  ·  {ac:.3f} ac  ·  {px} pixels  ·  radar first, NDVI as support{rule}", x=0.01, ha="left",
+                 fontsize=12, weight="bold")
     fig.tight_layout()
     info = {"field_id": fid, "acres": ac, "pixels": px,
             "last_pass": {tr: str(g.loc[(g["track"] == tr), "date"].max().date()) for tr in tracks},
@@ -302,9 +316,200 @@ def s2_clear_dates(aoi: int, folder: str = "data/s2_dates_masks") -> pd.DataFram
     return out
 
 
+# ------------------------------------------------------------------------------------------------ the stage rule
+#: Age is counted up to this day (user, 19 Nov 2026).
+AGE_DAY = "2026-11-15"
+#: A direct-seeded pixel (no water dip before its rise) was sown this many days before the radar rise (user, 19 Nov).
+DIRECT_SEEDED_LEAD_DAYS = 15
+
+
+def wet_peak(days, vh, vv) -> float:
+    """Day of one track's brightest pass over the AOI: the highest AOI-median of (VH + VV) / 2 over all field pixels.
+
+    Why: before planting the monsoon wets the bare fields and the radar reaches its season high (mid-June here);
+    then the fields are flooded and it falls. A planting dip is searched only AFTER that high, so the dry-season lows
+    (bare dry soil) and single rain spikes (7 April on one track) cannot be taken for planting, with no calendar date.
+    The largest jump was tried first and picked that April rain spike."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        med = (np.nanmedian(vh, axis=1) + np.nanmedian(vv, axis=1)) / 2
+    return float(days[int(np.nanargmax(med))])
+
+
+def _own_position(x, ref):
+    """``x`` on the pixel's own scale: 0 at the lowest and 1 at the highest of ``ref`` (its values in the period)."""
+    lo, hi = np.nanmin(ref), np.nanmax(ref)
+    return (x - lo) / (hi - lo) if hi > lo else np.full_like(x, np.nan, dtype="float64")
+
+
+def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
+    """Stage of one pixel from its own curves; every test is relative to the pixel's own levels and noise (user, 19 Nov
+    2026: no fixed dB or NDVI numbers, only relative change, slopes and dips).
+
+    ``nd_days`` / ``nd_vals``: its clear NDVI views (day numbers, ascending). ``tracks``: per radar track
+    ``(days, vh, vv)``.
+
+    Optical decides standing / harvested (radar cannot: stubble and wet soil keep it bright, and VV already falls
+    while the crop ripens):
+
+    * the crop = the rise of NDVI from its lowest view (``empty``) to its season peak; the first green view is the
+      start of the last unbroken spell above the half-way level between the two that leads to the peak;
+    * harvested = one step between two neighbouring views after green-up that (a) carries at least half of the whole
+      loss from the level before it to the level after it (a slow fade is ripening, not a cut), (b) is never taken
+      back: every later view stays below the middle of the step, on at least two views, and (c) ends below every view
+      the pixel showed since it turned green (below its own canopy noise, haze dips included). The harvest lies
+      between those two views.
+
+    Radar dates the planting (optical is blind in the cloudy weeks):
+
+    * each track's VH and VV are put on the pixel's own scale of the time before the canopy (so ripening lows do not
+      count), both tracks merged in time order, ``w`` = mean of the two polarisations;
+    * the search runs from ``wet_from`` (the AOI's own wet-soil radar high before planting, :func:`wet_peak`: the
+      dry-season lows before it are dry soil, not planting; no calendar date) to green-up; the water spell = the
+      passes there that lie below the half-way level between the lowest ``w`` and the level at green-up; planting =
+      its LAST pass (the fields the user read: flooded through July, planted at the end);
+    * it is transplanting when the dip is deeper than twice the pixel's own pass-to-pass change within a track;
+      otherwise direct seeded: sown ``DIRECT_SEEDED_LEAD_DAYS`` before that pass (the start of its rise)."""
+    out = {"status": "no data", "method": "", "sowing_day": np.nan, "harvest_from": np.nan, "harvest_to": np.nan}
+    if len(nd_vals) < 6:
+        return out
+    ipk = int(np.nanargmax(nd_vals))
+    if ipk == 0:
+        return out
+    iem = int(np.nanargmin(nd_vals[:ipk]))
+    empty, peak = float(nd_vals[iem]), float(nd_vals[ipk])
+    half = empty + (peak - empty) / 2
+    # first green view = start of the LAST rise: back from the peak while the views stay above the half-way level (a
+    # single lower view inside is haze; two in a row end it). An earlier green spell (weeds / an earlier crop in May-June)
+    # is therefore not this crop's green-up.
+    ig = ipk
+    i = ipk - 1
+    while i >= 0 and (nd_vals[i] >= half or (i >= 1 and nd_vals[i - 1] >= half)):
+        if nd_vals[i] >= half:
+            ig = i
+        i -= 1
+    green_day = float(nd_days[ig])
+    out["status"] = "standing"
+    v = nd_vals[ig:]
+    best = None
+    for k in range(1, len(v) - 1):                         # step from view k-1 to k, at least two views from k on
+        step = v[k - 1] - v[k]
+        later = v[k:]
+        if step <= 0 or (later >= (v[k - 1] + v[k]) / 2).any():
+            continue
+        before = float(np.max(v[:k]))
+        if step >= (before - float(np.median(later))) / 2 and float(np.max(later)) < float(np.min(v[:k])):
+            if best is None or step > best[0]:
+                best = (step, k)
+    if best is not None:
+        k = best[1]
+        out.update(status="harvested", harvest_from=float(nd_days[ig + k - 1]), harvest_to=float(nd_days[ig + k]))
+    # ---- planting from the radar
+    d, w, noise = [], [], []
+    for days, vh, vv in tracks:
+        pre = days <= green_day
+        if pre.sum() < 4:
+            continue
+        pos = (_own_position(vh, vh[pre]) + _own_position(vv, vv[pre])) / 2
+        d.append(days[pre])
+        w.append(pos[pre])
+        noise.append(np.median(np.abs(np.diff(pos[pre]))))
+    if not d:
+        return out
+    d, w = np.concatenate(d), np.concatenate(w)
+    o = np.argsort(d)
+    d, w = d[o], w[o]
+    ok = np.isfinite(w)
+    d, w = d[ok], w[ok]
+    if len(w) < 5:
+        return out
+    first = int(np.searchsorted(d, wet_from, side="right"))
+    seg = w[first:]
+    if len(seg) < 3:
+        return out
+    end = float(w[-1])
+    lo = float(np.min(seg))
+    low = np.flatnonzero(seg <= (lo + end) / 2)
+    last = first + int(low[-1])
+    depth = min(float(np.max(seg[:int(np.argmin(seg)) + 1])), end) - lo
+    if depth > 2 * float(np.nanmean(noise)):
+        out.update(method="transplanted (water dip)", sowing_day=float(d[last]))
+    else:
+        out.update(method="direct seeded (rise)", sowing_day=float(d[last]) - DIRECT_SEEDED_LEAD_DAYS)
+    return out
+
+
+def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY) -> Path:
+    """:func:`pixel_stage` for every pixel of every QC'd field; writes ``pixel_stage.parquet`` (one row per pixel) and
+    ``field_stage.csv`` (per field: pixels, share harvested, median sowing date and its spread, harvest window)."""
+    from . import ndvi_5day as nd
+    from . import radar_water as rw
+    from .. import config as cm
+    from ..newest_imagery import season_config
+    from .mask_experiment import VARIANTS
+
+    d = out_dir(aoi)
+    inp = json.loads((d / "inputs.json").read_text())
+    qc_file, run = qc_file or inp["qc"], run or inp["run"]
+    cfg = season_config(aoi)
+    gd = json.loads((cm.grid_dir(cfg) / "grid_def.json").read_text())
+    pix, _ = field_pixels(qc_file, gd)
+    t0 = pd.Timestamp("2026-01-01")
+    series = []
+    for (dates, flat), tr in zip(rw.read_series(aoi, run_id=run), [t["track_id"] for t in cfg["s1"]["tracks"]]):
+        # every pass is kept: rain passes (12 Nov: +2.3 dB on all fields) cannot mislead the rule, because the harvest
+        # is read from the optical and the planting only from passes before green-up; dropping "passes with rain" would
+        # drop half the monsoon (19 Nov 2026: 13 of 23 passes of one track had rain in the 6 h before)
+        dd = pd.DatetimeIndex(dates).normalize()
+        series.append(((dd - t0).days.to_numpy().astype(float), flat["VH"], flat["VV"]))
+    allp = np.concatenate([p for p in pix.values() if len(p)])
+    wet_from = min(wet_peak(days, vh[:, allp], vv[:, allp]) for days, vh, vv in series)
+    dates, ndvi, _w, _l, ok, _s, _loc = nd.read_dates(aoi, **VARIANTS[VARIANT])
+    nday = (pd.DatetimeIndex(dates) - t0).days.to_numpy().astype(float)
+    n = ndvi.reshape(len(nday), -1)
+    o = ok.reshape(len(nday), -1).astype(bool)
+    age0 = (pd.Timestamp(age_day) - t0).days
+    rows = []
+    for fid, pp in pix.items():
+        for p in pp:
+            m = o[:, p] & np.isfinite(n[:, p])
+            tracks = []
+            for days, vh, vv in series:
+                g = np.isfinite(vh[:, p]) & np.isfinite(vv[:, p])
+                tracks.append((days[g], vh[g, p], vv[g, p]))
+            r = pixel_stage(nday[m], n[m, p], tracks, wet_from)
+            rows.append({"field_id": fid, "pixel": int(p), **r})
+    t = pd.DataFrame(rows)
+    day = lambda x: t0 + pd.to_timedelta(x, unit="D")  # noqa: E731
+    t["sowing_date"] = day(t["sowing_day"])
+    t["harvest_from"] = day(t["harvest_from"])
+    t["harvest_to"] = day(t["harvest_to"])
+    end = np.where(t["status"] == "harvested", (t["harvest_from"] + (t["harvest_to"] - t["harvest_from"]) / 2 - t0).dt.days,
+                   age0)
+    t["age_days"] = end - t["sowing_day"]
+    t.drop(columns="sowing_day").to_parquet(d / "pixel_stage.parquet", index=False)
+
+    def one(g):
+        s = g["sowing_date"].dropna()
+        h = g[g["status"] == "harvested"]
+        return pd.Series({
+            "pixels": len(g), "harvested_pct": round(100 * len(h) / len(g), 0),
+            "sowing_median": s.quantile(0.5, interpolation="nearest").date() if len(s) else None,
+            "sowing_q25": s.quantile(0.25, interpolation="nearest").date() if len(s) else None,
+            "sowing_q75": s.quantile(0.75, interpolation="nearest").date() if len(s) else None,
+            "transplanted_pct": round(100 * g["method"].str.startswith("transplanted").mean(), 0),
+            "age_median": g["age_days"].median(),
+            "harvest_from": h["harvest_from"].min().date() if len(h) else None,
+            "harvest_to": h["harvest_to"].max().date() if len(h) else None})
+
+    f = t.groupby("field_id").apply(one, include_groups=False).reset_index()
+    f.to_csv(d / "field_stage.csv", index=False)
+    return d / "field_stage.csv"
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["curves", "sheet"])
+    p.add_argument("step", choices=["curves", "sheet", "stage"])
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--qc", help="curves: the QC'd field layer")
     p.add_argument("--run", help="curves: the radar run to read")
@@ -313,7 +518,9 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--name", default="sheet_1")
     a = p.parse_args(argv)
-    if a.step == "curves":
+    if a.step == "stage":
+        print(stage(a.aoi, a.qc, a.run))
+    elif a.step == "curves":
         print(curves(a.aoi, a.qc, a.run))
     else:
         print(sheet(a.aoi, a.fields, a.n, a.seed, name=a.name))

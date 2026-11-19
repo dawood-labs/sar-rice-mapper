@@ -15,3 +15,18 @@ def test_field_pixels_groups_pieces_of_one_field(tmp_path):
     pix, table = cs.field_pixels(p, gd)
     assert len(pix["a"]) == 6 and len(pix["b"]) == 1
     assert table.set_index("field_id").loc["a", "pixels"] == 6
+
+
+def test_pixel_stage_reads_planting_from_the_dip_and_harvest_from_the_step():
+    import numpy as np
+
+    nd_days = np.array([100, 130, 160, 190, 206, 249, 256, 270, 284, 298, 306, 309, 311, 318, 319], dtype=float)
+    nd_vals = np.array([.15, .14, .16, .15, .2, .65, .7, .78, .8, .79, .7, .4, .41, .38, .39])
+    days = np.arange(105, 250, 12, dtype=float)            # 105 .. 249
+    vh = np.array([-21, -21, -20, -19, -17, -14, -15, -18, -20, -20.5, -17, -15, -14.5])
+    vv = np.array([-13, -13, -12, -11, -10, -6, -8, -10, -12, -12.5, -9, -8, -7])
+    r = cs.pixel_stage(nd_days, nd_vals, [(days, vh, vv)], wet_from=165.0)
+    assert r["status"] == "harvested" and (r["harvest_from"], r["harvest_to"]) == (306.0, 309.0)
+    assert r["method"].startswith("transplanted") and r["sowing_day"] == 213.0
+    standing = cs.pixel_stage(nd_days[:11], nd_vals[:11], [(days, vh, vv)], wet_from=165.0)
+    assert standing["status"] == "standing"
