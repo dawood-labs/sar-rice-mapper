@@ -120,3 +120,31 @@ def test_weak_area_figures_render_from_search_records(tmp_path):
     assert n["check"].tolist() == [[60.0, 70.0, 75.0], [80.0, 80.0, 80.0]]   # no new switch in aoi6: kept as it was
     assert of.weak_results_figure(n, tmp_path / "r.png").stat().st_size > 10_000
     assert of.weak_method_figure(n, tmp_path / "m.png").stat().st_size > 10_000
+
+
+def test_crop_stage_figures_render_from_stage_outputs(tmp_path):
+    import json
+
+    d = tmp_path / "aoi9"
+    d.mkdir()
+    ids = [f"x_p{i:06d}" for i in range(12)]
+    cut = [i < 6 for i in range(12)]
+    pd.DataFrame({"field_id": ids, "acres": 1.0}).to_csv(d / "fields.csv", index=False)
+    pd.DataFrame({"field_id": ids, "status": ["harvested" if c else "standing" for c in cut],
+                  "sowing_median": ["2026-07-03" if c else "2026-07-31" for c in cut],
+                  "harvest_from": ["2026-11-02" if c else None for c in cut],
+                  "harvest_to": ["2026-11-05" if c else None for c in cut],
+                  "interior_pixels": 9, "source": "rule"}).to_csv(d / "field_stage.csv", index=False)
+    rd = pd.to_datetime(["2026-06-21", "2026-07-03", "2026-07-15", "2026-08-08", "2026-10-07", "2026-11-12"])
+    gd = pd.to_datetime(["2026-06-05", "2026-07-25", "2026-09-06", "2026-10-16", "2026-11-02", "2026-11-05", "2026-11-15"])
+    rows = []
+    for f in ids:
+        rows += [(f, "VH", "T1", a, v) for a, v in zip(rd, [-15, -20, -17, -16, -14, -13])]
+        rows += [(f, "NDVI", "S2", a, v) for a, v in zip(gd, [0.1, 0.2, 0.6, 0.8, 0.75, 0.4, 0.38])]
+    pd.DataFrame(rows, columns=["field_id", "source", "track", "date", "value"]).to_parquet(d / "field_curves.parquet")
+    (d / "field_check.json").write_text(json.dumps({"fields_checked": 12, "status_wrong": 1, "sowing_slightly_off": 2}))
+    n = of.stage_numbers(9, str(tmp_path))
+    assert (n["fields"], n["standing"], n["harvested"], n["all_right"]) == (12, 6, 6, 9)
+    assert n["age_harvested"] == 125 and [w for w, _s, _h in n["sow_weeks"]] == ["Jul week 1", "Jul week 5"]
+    assert of.stage_results_figure(n, tmp_path / "r.png").stat().st_size > 10_000
+    assert of.stage_method_figure(n, tmp_path / "m.png").stat().st_size > 10_000

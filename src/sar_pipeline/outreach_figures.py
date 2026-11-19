@@ -803,6 +803,182 @@ def weak_method_figure(n: dict, path) -> Path:
     return path
 
 
+# ------------------------------------------------------------------------------------------ crop stage post (Nov 2026)
+STAGE = "processed/_batch/s2_2026/crop_stage"
+
+
+def stage_numbers(aoi: int, root: str = STAGE) -> dict:
+    """The true numbers of the crop-stage post, read from the stage outputs of one area: fields and acres by status,
+    ages, fields per sowing / harvest week, the ground check (``field_check.json``, written by hand from what the
+    field team reported; left out of the figures when the file is missing) and one example field's curves (the
+    harvested field with the most interior pixels; its id never reaches an image)."""
+    from .analysis import crop_stage as cs
+
+    d = Path(root) / f"aoi{aoi}"
+    f = pd.read_csv(d / "field_stage.csv").merge(pd.read_csv(d / "fields.csv")[["field_id", "acres"]], on="field_id")
+    sow, hto = pd.to_datetime(f["sowing_median"]), pd.to_datetime(f["harvest_to"])
+    cut = f["status"] == "harvested"
+    age = np.where(cut, (hto - sow).dt.days, (pd.Timestamp(cs.AGE_DAY) - sow).dt.days)
+    wk = lambda x: None if pd.isna(x) else cs.month_week(x, cs.WEEK_BACK_DAYS).split("(")[1].rstrip(")")  # noqa: E731
+    f = f.assign(sow_wk=sow.map(wk), harv_wk=hto.where(cut).map(wk), sow_key=sow, age=age)
+    order = f.sort_values("sow_key").drop_duplicates("sow_wk")["sow_wk"].tolist()
+    by_week = [(w, int(((f["sow_wk"] == w) & ~cut).sum()), int(((f["sow_wk"] == w) & cut).sum())) for w in order]
+    n = {"fields": len(f), "acres": float(f["acres"].sum()), "standing": int((~cut).sum()), "harvested": int(cut.sum()),
+         "standing_acres": float(f.loc[~cut, "acres"].sum()), "harvested_acres": float(f.loc[cut, "acres"].sum()),
+         "age_standing": float(np.median(age[~cut])), "age_harvested": float(np.median(age[cut])), "sow_weeks": by_week,
+         "harv_weeks": f.loc[cut, "harv_wk"].value_counts().to_dict()}
+    chk = d / "field_check.json"
+    if chk.exists():
+        c = json.loads(chk.read_text())
+        n["checked"] = int(c["fields_checked"])
+        n["status_wrong"], n["sowing_off"] = int(c["status_wrong"]), int(c["sowing_slightly_off"])
+        n["all_right"] = n["checked"] - n["status_wrong"] - n["sowing_off"]
+    # the example = the harvested field that shows BOTH events most clearly: the planting flood (depth of the radar dip
+    # at its planting pass against the passes before and after, on the track that holds that pass) and the harvest
+    # (the fall of greenness across its harvest window); score = the smaller of the two ranks, so neither is weak
+    t = pd.read_parquet(d / "field_curves.parquet")
+    cand = []
+    for r in f[cut & (f["source"] == "rule") & (f["interior_pixels"] >= 5)].itertuples():
+        g = t[t["field_id"] == r.field_id]
+        gn = g[g["source"] == "NDVI"].set_index("date")["value"]
+        hf, ht = pd.Timestamp(r.harvest_from), pd.Timestamp(r.harvest_to)
+        if hf not in gn.index or ht not in gn.index:
+            continue
+        for _tr, v in g[g["source"] == "VH"].groupby("track"):
+            v = v.sort_values("date").reset_index(drop=True)
+            k = v.index[v["date"] == pd.Timestamp(r.sowing_median)]
+            if len(k) and 1 <= k[0] < len(v) - 1:
+                depth = (v["value"][k[0] - 1] + v["value"][k[0] + 1]) / 2 - v["value"][k[0]]
+                cand.append((depth, float(gn[hf] - gn[ht]), r.field_id, v))
+    best = None
+    if cand:
+        c = pd.DataFrame(cand, columns=["depth", "step", "fid", "v"])
+        c["score"] = np.minimum(c["depth"].rank(), c["step"].rank())
+        w = c.sort_values("score", ascending=False).iloc[0]
+        best = (w["depth"], w["fid"], w["v"])
+    if best is None:                                   # no field with a pass on its planting day: the largest one
+        fid = f[cut].sort_values("interior_pixels", ascending=False).iloc[0]["field_id"]
+        vh = t[(t["field_id"] == fid) & (t["source"] == "VH")]
+        best = (0.0, fid, vh[vh["track"] == vh["track"].iloc[0]].sort_values("date"))
+    ex = f[f["field_id"] == best[1]].iloc[0]
+    vh = best[2]
+    nd = t[(t["field_id"] == best[1]) & (t["source"] == "NDVI")].sort_values("date")
+    n["example"] = {"radar_dates": vh["date"].to_numpy(), "radar": vh["value"].to_numpy(),
+                    "green_dates": nd["date"].to_numpy(), "green": nd["value"].to_numpy(),
+                    "sowing": pd.Timestamp(ex["sowing_median"]), "harvest_from": pd.Timestamp(ex["harvest_from"]),
+                    "harvest_to": pd.Timestamp(ex["harvest_to"])}
+    return n
+
+
+def stage_results_figure(n: dict, path) -> Path:
+    """Image 1: headline tiles, one real field read from planting to harvest (radar and greenness on two panels, never
+    two scales on one axis), and the fields per sowing week split by today's status."""
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(16, 12), dpi=100, facecolor=D_SURFACE)
+    fig.text(0.05, 0.955, "Not just where the rice is. When it is ready.", fontsize=30, weight="bold", color=D_INK)
+    fig.text(0.05, 0.92, "Every field read from space: planted when, how old, still standing or already harvested",
+             fontsize=15, color=D_INK2)
+    tiles = [(f"{n['fields']}", f"fields tracked, {n['acres']:,.0f} acres"),
+             (f"{n['standing']} / {n['harvested']}", "standing / already harvested"),
+             (f"{n['age_standing']:.0f} days", "median age of the standing crop"),
+             (f"{n['age_harvested']:.0f} days", "median planting-to-harvest")]
+    if "checked" in n:
+        tiles[2] = (f"{n['all_right']} of {n['checked']}", "fields right in the ground check")
+    for i, (big, small) in enumerate(tiles):
+        x = 0.05 + i * 0.235
+        fig.patches.append(plt.Rectangle((x, 0.73), 0.215, 0.15, transform=fig.transFigure, facecolor="white",
+                                         edgecolor=D_GRID, lw=1.2))
+        fig.text(x + 0.015, 0.80, big, fontsize=34, weight="bold", color=D_INK)
+        fig.text(x + 0.015, 0.755, small, fontsize=13, color=D_INK2)
+
+    e = n["example"]
+    x0, x1 = pd.Timestamp(e["sowing"]) - pd.Timedelta(days=45), pd.Timestamp(e["green_dates"].max()) + pd.Timedelta(days=6)
+    fig.text(0.05, 0.665, "One real field, planting to harvest", fontsize=15, color=D_INK)
+    ax1 = fig.add_axes([0.07, 0.40, 0.50, 0.23])
+    ax2 = fig.add_axes([0.07, 0.10, 0.50, 0.23])
+    for ax, d, v, c, lab in ((ax1, e["radar_dates"], e["radar"], D_BLUE, "Radar echo (dB): sees water and plant mass, through cloud"),
+                             (ax2, e["green_dates"], e["green"], D_GREEN, "Greenness (0-1): sees the canopy, when the sky is clear")):
+        _d_style(ax)
+        m = (d >= np.datetime64(x0)) & (d <= np.datetime64(x1))
+        ax.plot(d[m], v[m], color=c, lw=2, marker="o", ms=5, mec=D_SURFACE, mew=1.2)
+        ax.set_xlim(x0, x1)
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
+        ax.set_title(lab, loc="left", fontsize=12.5, color=D_INK2, pad=8)
+        ax.axvline(e["sowing"], color=D_INK2, lw=1.2, ls=(0, (4, 3)))
+        ax.axvspan(e["harvest_from"], e["harvest_to"], color=D_ORANGE, alpha=0.22, lw=0)
+    lo, hi = ax1.get_ylim()
+    ax1.set_ylim(lo, hi + (hi - lo) * 0.22)
+    ax1.text(e["sowing"], ax1.get_ylim()[1], " field flooded:\n planting", va="top", fontsize=12, color=D_INK)
+    lo, hi = ax2.get_ylim()
+    ax2.set_ylim(lo, hi + (hi - lo) * 0.22)
+    ax2.text(e["harvest_from"], ax2.get_ylim()[1], "harvest: sudden \ndrop in green ", va="top", ha="right", fontsize=12,
+             color=D_INK)
+    mid = e["sowing"] + (e["harvest_from"] - e["sowing"]) / 2
+    ax2.text(mid + pd.Timedelta(days=28), lo + (hi - lo) * 0.10, f"{(e['harvest_to'] - e['sowing']).days} days in the field",
+             ha="center", fontsize=12, color=D_INK2)
+
+    ax3 = fig.add_axes([0.66, 0.10, 0.29, 0.53])
+    _d_style(ax3)
+    labs = [w for w, _s, _h in n["sow_weeks"]]
+    st = np.array([s for _w, s, _h in n["sow_weeks"]])
+    hv = np.array([h for _w, _s, h in n["sow_weeks"]])
+    xs = np.arange(len(labs))
+    ax3.bar(xs, st, color=D_BLUE, width=0.62, edgecolor=D_SURFACE, lw=2, label="still standing")
+    ax3.bar(xs, hv, bottom=st, color=D_ORANGE, width=0.62, edgecolor=D_SURFACE, lw=2, label="already harvested")
+    for x, a, b in zip(xs, st, hv):
+        ax3.text(x, a + b + 1.5, str(a + b), ha="center", fontsize=12, color=D_INK, weight="bold")
+    ax3.set_xticks(xs, [w.replace(" week ", "\nweek ") for w in labs], fontsize=11.5, color=D_INK2)
+    ax3.set_ylim(0, (st + hv).max() * 1.22)
+    ax3.legend(frameon=False, fontsize=12, loc="upper left", labelcolor=D_INK2)
+    fig.text(0.66, 0.665, "Fields by planting week", fontsize=15, color=D_INK)
+    fig.text(0.66, 0.045, "Early plantings are the ones already cut.", fontsize=12.5, color=D_INK2)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, facecolor=D_SURFACE)
+    plt.close(fig)
+    return path
+
+
+def stage_method_figure(n: dict, path) -> Path:
+    """Image 2: the method as a flow of numbered steps with their real facts, and how it is checked."""
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure(figsize=(16, 9), dpi=100, facecolor=D_SURFACE)
+    fig.text(0.04, 0.92, "From two satellites to a harvest calendar per field", fontsize=28, weight="bold", color=D_INK)
+    steps = [("1  Inputs", ["Radar every 6-12 days", "Optical when clear", "Field boundaries", "Rice map of the season"]),
+             ("2  Field curves", ["Interior pixels only", "Edges left out", f"{n['fields']} fields", "Radar + greenness"]),
+             ("3  Planting", ["Radar dip = flooded field", "Before the green-up", "Area's common dates", "Week-level timing"]),
+             ("4  Standing or cut", ["Latest clear image", "vs the field's own canopy", "Sudden drop = harvest", "Slow fade = ripening"]),
+             ("5  Calendar", ["Planting week", "Crop age in days", "Harvest week", "One row per field"])]
+    w = 0.172
+    for i, (head, facts) in enumerate(steps):
+        x = 0.04 + i * (w + 0.018)
+        fig.patches.append(plt.Rectangle((x, 0.30), w, 0.52, transform=fig.transFigure, facecolor="white",
+                                         edgecolor=D_GRID, lw=1.2))
+        fig.patches.append(plt.Rectangle((x, 0.76), w, 0.06, transform=fig.transFigure, facecolor=D_BLUE, lw=0))
+        fig.text(x + 0.01, 0.778, head, fontsize=15, weight="bold", color="white")
+        for k, fct in enumerate(facts):
+            fig.text(x + 0.012, 0.69 - k * 0.09, fct, fontsize=13, color=D_INK)
+        if i < len(steps) - 1:
+            fig.text(x + w + 0.002, 0.55, "›", fontsize=26, color=D_INK2)
+    fig.patches.append(plt.Rectangle((0.04, 0.08), 0.92, 0.15, transform=fig.transFigure, facecolor="white",
+                                     edgecolor=D_GRID, lw=1.2))
+    fig.text(0.055, 0.185, "How it is checked", fontsize=15, weight="bold", color=D_GREEN)
+    line = "Every test is relative to the field's own curve, no fixed signal levels  ·  curves reviewed field by field, rules corrected"
+    fig.text(0.055, 0.135, line, fontsize=12.5, color=D_INK2)
+    if "checked" in n:
+        fig.text(0.055, 0.10, f"Ground check of all {n['checked']} fields: {n['all_right']} right, {n['status_wrong']} status "
+                 f"miss (cut around the map date), {n['sowing_off']} planting dates slightly off", fontsize=12.5, color=D_INK2)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, facecolor=D_SURFACE)
+    plt.close(fig)
+    return path
+
+
 def main(argv=None) -> int:
     import argparse
 
@@ -812,7 +988,8 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="python -m sar_pipeline.outreach_figures", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("figure", choices=["radar-story", "clouds", "infographic", "pipeline", "patterns", "patterns-flow",
-                                      "delivery-132", "weak-areas"])
+                                      "delivery-132", "weak-areas", "crop-stage"])
+    p.add_argument("--aoi", type=int, help="crop-stage: the area (internal id)")
     p.add_argument("--clusters", default="processed/_batch/s2_2026/rice_fresh/plot_clusters",
                    help="patterns: the plot_clusters output folder")
     p.add_argument("--dates-csv", default="processed/_batch/s2_2026/report/mask_share_year/dates.csv",
@@ -823,6 +1000,12 @@ def main(argv=None) -> int:
     p.add_argument("--track", type=int, default=0)
     p.add_argument("--out", help="the image (for delivery-132: a folder for its two images)")
     args = p.parse_args(argv)
+    if args.figure == "crop-stage":
+        n = stage_numbers(args.aoi)
+        d = Path(args.out or OUT)
+        print(stage_results_figure(n, d / "crop_stage_results.png"))
+        print(stage_method_figure(n, d / "crop_stage_method.png"))
+        return 0
     if args.figure == "weak-areas":
         n = weak_numbers()
         d = Path(args.out or OUT)
