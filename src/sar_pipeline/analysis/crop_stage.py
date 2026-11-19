@@ -421,9 +421,13 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
     # first green view = start of the LAST rise: back from the peak while the views stay above the half-way level (a
     # single lower view inside is haze; two in a row end it). An earlier green spell (weeds / an earlier crop in May-June)
     # is therefore not this crop's green-up.
+    # ... but a single view down near the empty level is the bare / flooded field itself, not haze, and ends the spell
+    # (19 Nov 2026, fields 505 / 515 / 524: green cover in May-June, one clear view on 25 July at 0.15-0.25, green again
+    # in September; taking that view for haze put the green-up in May and left the field without a planting date).
+    quarter = empty + (half - empty) / 2
     ig = ipk
     i = ipk - 1
-    while i >= 0 and (nd_vals[i] >= half or (i >= 1 and nd_vals[i - 1] >= half)):
+    while i >= 0 and (nd_vals[i] >= half or (nd_vals[i] >= quarter and i >= 1 and nd_vals[i - 1] >= half)):
         if nd_vals[i] >= half:
             ig = i
         i -= 1
@@ -545,6 +549,9 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
             "sowing_median": s.quantile(0.5, interpolation="nearest").date() if len(s) else None,
             "sowing_q25": s.quantile(0.25, interpolation="nearest").date() if len(s) else None,
             "sowing_q75": s.quantile(0.75, interpolation="nearest").date() if len(s) else None,
+            # no pixel with a planting date = no empty-then-green cycle after the wet peak: green all through (fields
+            # 517 / 518 / 521, which the user found not to be rice) -> flagged for review, not guessed
+            "note": "" if len(s) else "no planting signal: check, may not be rice",
             "transplanted_pct": round(100 * g["method"].str.startswith("transplanted").mean(), 0),
             "age_median": g["age_days"].median(),
             # the window most of its cut pixels share (one odd pixel no longer widens it)
