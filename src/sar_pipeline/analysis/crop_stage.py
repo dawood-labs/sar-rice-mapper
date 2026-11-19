@@ -100,6 +100,7 @@ def curves(aoi: int, qc_file, run: str) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     t.to_parquet(d / "field_curves.parquet", index=False)
     table.to_csv(d / "fields.csv", index=False)
+    (d / "inputs.json").write_text(json.dumps({"qc": str(Path(qc_file).resolve()), "run": run}, indent=1))
     return d / "field_curves.parquet"
 
 
@@ -185,7 +186,7 @@ def plot_field(aoi: int, field, start: str = "2026-04-01"):
     fields = pd.read_csv(d / "fields.csv").set_index("field_id")
     g = t[(t["field_id"] == fid) & (t["date"] >= pd.Timestamp(start))]
     t1 = pd.Timestamp.now().normalize() + pd.Timedelta(days=3)
-    fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True, gridspec_kw={"height_ratios": [1.3, 1.3, 0.9]})
+    fig, axes = plt.subplots(3, 1, figsize=(15, 12), sharex=True, gridspec_kw={"height_ratios": [1, 1, 1]})
     colours = ["#2a78d6", "#eb6834"]
     tracks = sorted(t.loc[t["source"] != "NDVI", "track"].unique())
     for ax, pol in zip(axes[:2], ("VH", "VV")):
@@ -209,6 +210,9 @@ def plot_field(aoi: int, field, start: str = "2026-04-01"):
     axes[2].xaxis.set_major_formatter(mdates.DateFormatter("%b"))
     for ax in axes:
         ax.grid(which="minor", axis="x", alpha=0.15)
+        ax.tick_params(axis="x", which="both", labelbottom=True)     # dates under every panel (user, 19 Nov)
+        ax.xaxis.set_minor_formatter(mdates.DateFormatter("%d"))
+        ax.tick_params(axis="x", which="minor", labelsize=7, colors="#666666")
     ac, px = float(fields.loc[fid, "acres"]), int(fields.loc[fid, "pixels"])
     fig.suptitle(f"{fid}  ·  {ac:.3f} ac  ·  {px} pixels  ·  radar first, NDVI as support", x=0.01, ha="left",
                  fontsize=13, weight="bold")
@@ -218,6 +222,54 @@ def plot_field(aoi: int, field, start: str = "2026-04-01"):
             "last_clear_ndvi": str(o["date"].max().date()) if len(o) else None}
     plt.close(fig)
     return fig, info
+
+
+def field_chips(aoi: int, field, pad_px: int = 12, cols: int = 8, folder: str = "data/s2_dates_masks"):
+    """Every Sentinel-2 date on which this field is clear (its NDVI points), as 5-3-2 chips around the field with its
+    outline (user, 19 Nov 2026: all clear chips, as notebook 08 showed). One fixed stretch for every chip, so the
+    colours compare across dates."""
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    import rasterio
+    from rasterio.windows import from_bounds
+
+    from .. import config as cm
+    from ..newest_imagery import season_config
+    from ..optical_export import band_index
+
+    fid = resolve_field(aoi, field)
+    d = out_dir(aoi)
+    qc = json.loads((d / "inputs.json").read_text())["qc"]
+    f = gpd.read_file(qc)
+    shape = f[f["field_id"].astype(str) == fid]
+    t = pd.read_parquet(d / "field_curves.parquet")
+    o = t[(t["field_id"] == fid) & (t["source"] == "NDVI")].sort_values("date")
+    key = season_config(aoi)["aoi"]["key"]
+    root = cm.repo_root() / folder / key
+    rows = int(np.ceil(len(o) / cols)) or 1
+    fig, axes = plt.subplots(rows, cols, figsize=(2.3 * cols, 2.5 * rows), squeeze=False)
+    for ax in axes.ravel():
+        ax.set_axis_off()
+    for ax, (date, ndvi) in zip(axes.ravel(), zip(o["date"], o["value"])):
+        ds_path = root / f"{key}_{date:%Y-%m}_S2_{date:%Y-%m-%d}.tif"
+        with rasterio.open(ds_path) as ds:
+            g = shape.to_crs(ds.crs)
+            x0, y0, x1, y1 = g.total_bounds
+            r = ds.res[0] * pad_px
+            win = from_bounds(x0 - r, y0 - r, x1 + r, y1 + r, ds.transform).round_offsets().round_lengths()
+            rgb = np.dstack([ds.read(band_index(ds, b), window=win, boundless=True, fill_value=0).astype("float32")
+                             for b in ("B5", "B3", "B2")])
+            wt = ds.window_transform(win)
+        rgb = np.clip(rgb / 3000.0, 0, 1) ** 0.8
+        ext = (wt.c, wt.c + wt.a * rgb.shape[1], wt.f + wt.e * rgb.shape[0], wt.f)
+        ax.imshow(rgb, extent=ext, interpolation="nearest")
+        g.boundary.plot(ax=ax, color="yellow", linewidth=1.2)
+        ax.set_xlim(ext[0], ext[1]), ax.set_ylim(ext[2], ext[3])
+        ax.set_title(f"{date:%d %b}  NDVI {ndvi:.2f}", fontsize=9)
+    fig.suptitle(f"{fid}: every clear Sentinel-2 view (5-3-2), field outline in yellow", x=0.01, ha="left", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 1 - 0.35 / (2.5 * rows)))
+    plt.close(fig)
+    return fig
 
 
 def s2_clear_dates(aoi: int, folder: str = "data/s2_dates_masks") -> pd.DataFrame:
