@@ -702,6 +702,12 @@ def shapefile(gpkg) -> Path:
     out = gpkg.parent / "shp" / f"{gpkg.stem}.shp"
     out.parent.mkdir(parents=True, exist_ok=True)
     g.to_file(out, driver="ESRI Shapefile")
+    # its parts in one zip beside the GeoPackage, the file people download (user, 19 Nov 2026)
+    import zipfile
+
+    with zipfile.ZipFile(gpkg.parent / f"{gpkg.stem}_shp.zip", "w", zipfile.ZIP_DEFLATED) as z:
+        for part in sorted(out.parent.glob(f"{out.stem}.*")):
+            z.write(part, part.name)
     return out
 
 
