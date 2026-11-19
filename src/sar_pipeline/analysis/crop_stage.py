@@ -345,6 +345,63 @@ def field_chips(aoi: int, field, pad_px: int = 12, cols: int = 8, folder: str = 
     return fig
 
 
+def date_map(aoi: int, date: str, bands=("B5", "B3", "B2"), tiles: int = 2, folder: str = "data/s2_dates_masks") -> list[Path]:
+    """One Sentinel-2 date over all fields, cut into ``tiles`` x ``tiles`` pictures, every field outlined in the
+    colour of its status (red = harvested, cyan = standing) and numbered. Why (user, 19 Nov 2026: "look at every
+    polygon yourself"): the status of each field is checked by eye on the latest clear image, as he does in QGIS."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import rasterio
+    from rasterio.windows import from_bounds
+
+    from .. import config as cm
+    from ..newest_imagery import season_config
+    from ..optical_export import band_index
+    from . import pixel_2026 as p26
+
+    d = out_dir(aoi)
+    f = load_fields(json.loads((d / "inputs.json").read_text())["qc"])
+    st = pd.read_csv(d / "field_stage.csv").set_index("field_id")["status"] if (d / "field_stage.csv").exists() else {}
+    key = season_config(aoi)["aoi"]["key"]
+    path = cm.repo_root() / folder / key / f"{key}_{date[:7]}_S2_{date}.tif"
+    outs = []
+    with rasterio.open(path) as ds:
+        g = f.to_crs(ds.crs)
+        x0, y0, x1, y1 = g.total_bounds
+        pad = 3 * ds.res[0]
+        win = from_bounds(x0 - pad, y0 - pad, x1 + pad, y1 + pad, ds.transform).round_offsets().round_lengths()
+        img = np.dstack([ds.read(band_index(ds, b), window=win, boundless=True, fill_value=0).astype("float32") for b in bands])
+        clear = ds.read(band_index(ds, "clear"), window=win, boundless=True, fill_value=0)
+        wt = ds.window_transform(win)
+    lim = p26.stretch_limits(np.moveaxis(img, 2, 0)[None], clear[None])
+    img = np.dstack([np.clip((img[..., k] - lim[k, 0]) / max(lim[k, 1] - lim[k, 0], 1), 0, 1) for k in range(3)]) ** p26.GAMMA
+    ext = (wt.c, wt.c + wt.a * img.shape[1], wt.f + wt.e * img.shape[0], wt.f)
+    xs, ys = np.linspace(ext[0], ext[1], tiles + 1), np.linspace(ext[3], ext[2], tiles + 1)
+    for r in range(tiles):
+        for c in range(tiles):
+            fig, ax = plt.subplots(figsize=(13, 13 * abs(ys[r + 1] - ys[r]) / (xs[c + 1] - xs[c])))
+            ax.imshow(img, extent=ext, interpolation="nearest")
+            for row in g.itertuples():
+                col = "#ff2020" if st.get(row.field_id) == "harvested" else "#00e5ff"
+                for part in getattr(row.geometry, "geoms", [row.geometry]):
+                    ax.plot(*np.asarray(part.exterior.coords).T, color=col, linewidth=1.1)
+                pt = row.geometry.representative_point()
+                if xs[c] <= pt.x <= xs[c + 1] and ys[r + 1] <= pt.y <= ys[r]:
+                    ax.text(pt.x, pt.y, row.field_id.split("_", 2)[-1].replace("p000", ""), color="white", fontsize=7,
+                            ha="center", va="center", weight="bold",
+                            bbox={"facecolor": "black", "alpha": 0.45, "pad": 0.6, "linewidth": 0})
+            ax.set_xlim(xs[c], xs[c + 1]), ax.set_ylim(ys[r + 1], ys[r])
+            ax.set_axis_off()
+            ax.set_title(f"{date}  {'-'.join(bands)}  tile {r + 1},{c + 1}  red = harvested, cyan = standing", fontsize=10)
+            out = d / "date_maps" / f"{date}_{''.join(b[1:] for b in bands)}_r{r + 1}c{c + 1}.png"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(out, dpi=110, bbox_inches="tight")
+            plt.close(fig)
+            outs.append(out)
+    return outs
+
+
 def s2_clear_dates(aoi: int, folder: str = "data/s2_dates_masks") -> pd.DataFrame:
     """Every local Sentinel-2 file of the AOI with the share of the AOI the delivered series' mask keeps (clear), to
     pick dates to open in QGIS (true colour = bands 3,2,1; 5-3-2 = 4,2,1; 8-3-2 = 5,2,1)."""
@@ -470,7 +527,14 @@ def field_status(nd_days, nd_vals) -> dict:
     rise = float(v[ipk]) - empty
     body = (days >= g[0]) & (np.arange(len(v)) < len(v) - LAST_VIEWS) & (v >= empty + rise / 2)
     canopy = float(np.median(v[body])) if body.any() else float(v[ipk])
+    # ... but the newest view counts by itself too: a field cut between the last two views (203: 0.65 on 14 Nov,
+    # 0.43 on 15 Nov, blue stubble on the 15 Nov image) is cut. The newest clear image is the reference the user
+    # checks the status on (19 Nov 2026: "15 Nov par dekho, wo saaf hai").
+    # Only an abrupt last step counts (it alone exceeds CUT_SHARE of the rise): a slow slide to the same level is
+    # ripening (458_b, the part the user called ripening, slid below the level without any step).
     now = float(np.median(v[-LAST_VIEWS:]))
+    if rise > 0 and (v[-2] - v[-1]) / rise > CUT_SHARE:
+        now = min(now, float(v[-1]))
     out["drop_share"] = (canopy - now) / rise if rise > 0 else np.nan
     cut = canopy - CUT_SHARE * rise
     if now >= cut:
@@ -529,7 +593,7 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
     return out
 
 
-def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool = False):
+def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool = False, latest: float = np.inf):
     """``(planting_day, method)`` from the radar before green-up (see :func:`pixel_stage`), or None. ``previous``:
     take the first dip instead of the last (for a field already harvested)."""
     d, w, noise = [], [], []
@@ -551,10 +615,15 @@ def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool
     if len(w) < 5:
         return None
     first = int(np.searchsorted(d, wet_from, side="right"))
+    end = float(w[-1])
+    # ``latest``: passes after this day are too close to green-up to be the planting (water among the young plants)
+    stop = int(np.searchsorted(d, latest, side="right"))
+    if stop - first >= 3:
+        d, w = d[:stop], np.append(w[:stop], end)
+        d = np.append(d, np.nan)
     seg = w[first:]
     if len(seg) < 3:
         return None
-    end = float(w[-1])
     lo = float(np.min(seg))
     # Low spells = runs of passes below the half-way level; ONE higher pass inside does not end a run (the two tracks
     # alternate and see the field at different angles), two in a row do. Planting = the last pass of the LAST spell
@@ -564,7 +633,7 @@ def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool
     mid = (lo + end) / 2
     lowi = np.flatnonzero(seg[:-1] <= mid)
     if not len(lowi):                                      # the lowest pass is the green-up pass itself
-        lowi = np.array([int(np.argmin(seg))])
+        lowi = np.array([int(np.argmin(seg[:-1]))])     # never the closing level itself
     spells, cur = [], [int(lowi[0])]
     for x in lowi[1:]:
         if x - cur[-1] <= 2:
@@ -677,8 +746,21 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
                 mvh, mvv = np.nanmedian(vh[:, inner], axis=1), np.nanmedian(vv[:, inner], axis=1)
                 ok_ = np.isfinite(mvh) & np.isfinite(mvv)
                 ftr.append((days[ok_], mvh[ok_], mvv[ok_]))
+            field_cut[fid]["tracks"], field_cut[fid]["green"] = ftr, gg[0] if gg else None
             field_cut[fid]["planting"] = (planting(ftr, gg[0], wet_from, previous=field_cut[fid]["status"] == "harvested")
                                           if gg else None)
+    # A dip too close to green-up is not the planting (user, 19 Nov 2026: 473, 541 and the fields dated 12 August or
+    # later belong on their July dip). "Too close" comes from the AOI itself: the lower quartile of its own fields'
+    # planting -> green-up gaps; a standing field below it is dated again without the passes inside that gap.
+    gaps = np.array([c["green"] - c["planting"][0] for c in field_cut.values()
+                     if c.get("planting") and c["status"] == "standing" and c["green"] - c["planting"][0] > 0])
+    if len(gaps) >= 8:
+        min_gap = float(np.quantile(gaps, 0.25))
+        for c in field_cut.values():
+            if c.get("planting") and c["green"] - c["planting"][0] < min_gap:
+                again = planting(c["tracks"], c["green"], wet_from, previous=c["status"] == "harvested",
+                                 latest=c["green"] - min_gap)
+                c["planting"] = again or c["planting"]
 
     def one(g):
         # the field's label comes from its interior pixels (user, 19 Nov 2026: edge pixels of these small fields mix
@@ -725,6 +807,8 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
                 f.loc[m, ["sowing_median", "sowing_q25", "sowing_q75"]] = pd.Timestamp(r.sowing_date).date()
             if r.status:
                 f.loc[m, "status"] = r.status
+                if r.status == "standing":
+                    f.loc[m, ["harvest_from", "harvest_to"]] = None
             end = age0
             if f.loc[m, "status"].iloc[0] == "harvested" and f.loc[m, "harvest_from"].isna().all():
                 # a field the user calls harvested without a date takes the window most rule-harvested fields
@@ -738,7 +822,8 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
                 end = (a_ + (b_ - a_) / 2 - t0).days
             if r.sowing_date:
                 f.loc[m, "age_median"] = end - (pd.Timestamp(r.sowing_date) - t0).days
-            f.loc[m, "source"] = "user decision"
+            # a reading of the curves and the image by the assistant is named as such, not as the user's decision
+            f.loc[m, "source"] = "assistant reading" if r.why.startswith("assistant") else "user decision"
             f.loc[m, "note"] = r.why
     f.to_csv(d / "field_stage.csv", index=False)
     return d / "field_stage.csv"
