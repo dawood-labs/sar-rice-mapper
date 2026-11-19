@@ -894,7 +894,13 @@ def score(aoi: int, readings_csv) -> pd.DataFrame:
 STAGE_COLUMNS = ("status", "sowing_date", "sow_week", "crop_age", "harvest_date", "harv_week")
 
 
-def month_week(day) -> str | None:
+#: The week columns count an event one day before the image that shows it (user, 20 Nov 2026): a field flooded on
+#: the pass of 15 July was planted in the days up to then, so it belongs to 8-14 July, not to the week starting on
+#: the 15th; a field first seen cut on 15 November was cut by the 14th. The date columns keep the image dates.
+WEEK_BACK_DAYS = 1
+
+
+def month_week(day, back_days: int = 0) -> str | None:
     """``"2026-07-29 to 07-31 (Jul week 5)"``: the week of the month a date falls in, written with its first and last
     day. Week 1 = days 1-7, 2 = 8-14, 3 = 15-21, 4 = 22-28, 5 = 29 to the month's end.
 
@@ -903,7 +909,7 @@ def month_week(day) -> str | None:
     weeks in their true order (a label starting with the month name put August before July)."""
     if day is None or pd.isna(day):
         return None
-    d = pd.Timestamp(day)
+    d = pd.Timestamp(day) - pd.Timedelta(days=back_days)
     k = (d.day - 1) // 7
     a = d.replace(day=7 * k + 1)
     b = d.replace(day=min(7 * k + 7, d.days_in_month))
@@ -918,7 +924,8 @@ def deliver(aoi: int, name: str | None = None) -> Path:
     * ``crop_age``: days from planting to :data:`AGE_DAY`, standing fields only;
     * ``harvest_date``: harvested fields only, the first clear image that shows the field cut (it was cut between the
       clear image before it and this one);
-    * ``sow_week`` / ``harv_week``: the same two dates as the week of the month (:func:`month_week`).
+    * ``sow_week`` / ``harv_week``: the week of the month the event falls in, counted :data:`WEEK_BACK_DAYS` before
+      the image date (:func:`month_week`).
 
     The QC file is copied and the columns are added inside the GeoPackage (SQLite ``ALTER TABLE`` / ``UPDATE``), so
     every geometry and every existing attribute stays byte for byte the same; rows are matched by their order in the
@@ -956,7 +963,8 @@ def deliver(aoi: int, name: str | None = None) -> Path:
             hd = None if standing or pd.isna(r["harvest_to"]) else str(r["harvest_to"])
             con.execute(f'UPDATE "{table}" SET status = ?, sowing_date = ?, sow_week = ?, crop_age = ?, harvest_date = ?, '
                         f'harv_week = ? WHERE "{pk}" = ?',
-                        (r["status"], str(r["sowing_median"]), month_week(r["sowing_median"]), age, hd, month_week(hd), rid))
+                        (r["status"], str(r["sowing_median"]), month_week(r["sowing_median"], WEEK_BACK_DAYS), age, hd,
+                         month_week(hd, WEEK_BACK_DAYS), rid))
         con.commit()
     finally:
         con.close()

@@ -74,6 +74,8 @@ def test_month_week():
     assert cs.month_week("2026-11-05") == "2026-11-01 to 11-07 (Nov week 1)"
     assert cs.month_week("2026-08-08") == "2026-08-08 to 08-14 (Aug week 2)"
     assert cs.month_week(None) is None
+    assert cs.month_week("2026-07-15", 1) == "2026-07-08 to 07-14 (Jul week 2)"     # the day before the pass
+    assert cs.month_week("2026-08-08", 1) == "2026-08-01 to 08-07 (Aug week 1)"
     days = ["2026-06-25", "2026-07-03", "2026-07-15", "2026-07-31", "2026-08-08", "2026-09-05", "2026-11-15"]
     labels = [cs.month_week(d) for d in days]
     assert labels == sorted(labels)                     # text order = time order
