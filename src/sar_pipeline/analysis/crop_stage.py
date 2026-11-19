@@ -580,12 +580,19 @@ def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool
     k = pick[int(np.argmin(seg[pick]))]
     if previous:
         # a field already cut was planted on the EARLIER dip (user, 19 Nov 2026: in harvested fields the late dip,
-        # mostly 31 July, is water over a young crop; their planting is the first dip, mostly 3 July, some 25 June -
-        # "no problem with this"): the first low spell, at its first low point = the first pass after which the level
-        # rises again. Not "the spell before the last": in 148 / 150 the two tracks alternate, one higher pass at a
-        # time, and both dips (3 and 31 July) merge into one long spell.
-        pick = spells[0]
-        k = next((x for x in pick if x + 1 < len(seg) and seg[x + 1] > seg[x]), pick[-1])
+        # mostly 31 July, is water over a young crop; their planting is the dip before it, the first week of July):
+        # * two or more low spells: the end of the spell before the last (a spell of 25 June - 3 July ends on 3 July;
+        #   its first low point, 25 June, was too early for the user);
+        # * one long spell (148 / 150: the two tracks alternate, one higher pass at a time, so the 3 and 31 July dips
+        #   merge): its first low point = the first pass after which the level rises again.
+        if len(spells) >= 2:
+            pick = spells[-2]
+            k = pick[-1]
+        else:
+            # (the spell's own first pass is the way down from the wet high, not the bottom of a dip: 106 / 116
+            # started their spell on 25 June, the user reads the first week of July)
+            pick = spells[0]
+            k = next((x for x in pick[1:] if x + 1 < len(seg) and seg[x + 1] > seg[x]), pick[-1])
     last = first + k
     lo_sp = float(np.min(seg[pick]))
     depth = min(float(np.max(seg[:pick[0] + 1])), end) - lo_sp
