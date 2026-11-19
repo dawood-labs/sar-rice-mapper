@@ -848,9 +848,64 @@ def shapefile(gpkg) -> Path:
     return out
 
 
+def prepare_fields(src, out=None, name: str | None = None) -> tuple[Path, dict]:
+    """A hand-edited field layer made ready for the stage work: no overlaps, a 0.2 m gap where neighbours meet, and
+    one unique id per polygon.
+
+    Why (user, 19 Nov 2026): he split the polygons that held two or more fields, so several polygons share one
+    ``field_id``, and the layer has polygons lying on top of each other. The cleaning is the project's QC rule
+    (``qc_post.clean``): the larger delineated polygon keeps its shape, the other loses the shared part; a polygon
+    with no neighbour and no overlap keeps its geometry object untouched; small cut pieces get ``review``.
+
+    Ids: ``field_id`` becomes unique (the first polygon of an id keeps it, the next ones get ``_b``, ``_c`` ...; a
+    polygon without an id becomes ``<name>_qc001`` ...), the id it came from stays in ``source_id``, and ``fid_no`` is
+    a plain running number 1..n."""
+    import geopandas as gpd
+
+    from .qc_post import ACRE_M2, clean
+
+    src = Path(src)
+    g = gpd.read_file(src)
+    ids = g["field_id"].astype("object")
+    drawn = ids.isna() | ids.astype(str).isin(["", "None", "nan"])
+    stem = name or (str(ids[~drawn].iloc[0]).rsplit("_", 1)[0] if (~drawn).any() else src.stem)
+    ids[drawn] = [f"{stem}_qc{i + 1:03d}" for i in range(int(drawn.sum()))]
+    g["field_id"] = ids.astype(str)
+    g["drawn"] = drawn.to_numpy()
+    g["origin"] = g["origin"].fillna("drawn in QC")
+    # each input polygon gets its unique id BEFORE the cleaning, so a piece cut from it can be traced
+    # the largest polygon of an id keeps the id (274: its first row was a sliver left by the splitting)
+    g = g.assign(a_=g.area).sort_values("a_", ascending=False, kind="stable")
+    k = g.groupby("field_id").cumcount()
+    g = g.assign(k_=k).sort_index().drop(columns="a_")
+    k = g.pop("k_")
+    g["source_id"] = g["field_id"]
+    g["field_id"] = [f if n == 0 else f"{f}_{chr(ord('a') + n)}" for f, n in zip(g["field_id"], k)]
+    src_of = dict(zip(g["field_id"], g["source_id"]))
+    f = clean(g)
+    f["source_id"] = f["field_id"].map(src_of)
+    f["field_id"] = [i if p == 1 else f"{i}_p{p}" for i, p in zip(f["field_id"], f["part"])]
+    f = f.drop(columns=["part", "predicted"]).reset_index(drop=True)
+    f.insert(0, "fid_no", range(1, len(f) + 1))
+    out = Path(out) if out else src.with_name(f"{src.stem}_clean.gpkg")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    f.to_file(out, driver="GPKG", layer=out.stem)
+    sj = gpd.sjoin(f, f, predicate="intersects")
+    sj = sj[sj.index < sj.index_right]
+    over = sum(f.geometry[a].intersection(f.geometry[b]).area > 0 for a, b in zip(sj.index, sj.index_right))
+    rep = {"polygons_in": len(g), "polygons_out": len(f), "acres_in": round(float(g.area.sum()) / ACRE_M2, 3),
+           "acres_in_no_double": round(float(g.union_all().area) / ACRE_M2, 3),
+           "acres_out": round(float(f.area.sum()) / ACRE_M2, 3), "unique_ids": int(f["field_id"].nunique()),
+           "overlapping_pairs": int(over), "touching_pairs": int(len(sj)) - int(over),
+           "invalid": int((~f.is_valid).sum()), "small_clipped": int((f["review"] == "small_clipped").sum())}
+    return out, rep
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["curves", "sheet", "stage", "score", "deliver"])
+    p.add_argument("step", choices=["curves", "sheet", "stage", "score", "deliver", "prepare"])
+    p.add_argument("--src", help="prepare: the hand-edited field layer")
+    p.add_argument("--out", help="prepare: the cleaned layer to write")
     p.add_argument("--readings", help="score: csv with field, read_date")
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--qc", help="curves: the QC'd field layer")
@@ -860,7 +915,11 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--name", default="sheet_1")
     a = p.parse_args(argv)
-    if a.step == "deliver":
+    if a.step == "prepare":
+        out, rep = prepare_fields(a.src, a.out)
+        print(out)
+        print(json.dumps(rep, indent=1))
+    elif a.step == "deliver":
         print(deliver(a.aoi))
     elif a.step == "score":
         t = score(a.aoi, a.readings)
