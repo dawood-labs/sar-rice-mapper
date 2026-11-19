@@ -514,7 +514,7 @@ def field_status(nd_days, nd_vals) -> dict:
       latest views left out), so haze dips and the rising crop do not set it;
     * now = median of the last :data:`LAST_VIEWS` views;
     * harvested when ``canopy - now`` exceeds :data:`CUT_SHARE` of the field's rise (``peak - empty``); the harvest
-      lies between the last view above that cut level and the first of the final run of views below it.
+      lies on the largest single step between the last view above that cut level and the newest view.
 
     Returns status, harvest_from / harvest_to (day numbers or NaN) and ``drop_share`` = (canopy - now) / rise."""
     out = {"status": "no data", "harvest_from": np.nan, "harvest_to": np.nan, "drop_share": np.nan}
@@ -543,7 +543,13 @@ def field_status(nd_days, nd_vals) -> dict:
     i = len(v) - 1
     while i > 0 and v[i - 1] < cut:
         i -= 1
-    out.update(status="harvested", harvest_from=float(days[max(i - 1, 0)]), harvest_to=float(days[i]))
+    # the cut itself = the largest single step from the last view above the cut level to the end, not the view that
+    # first slid below it (20 Nov 2026, field 174: ripening took it under the level on 7 November, the real fall,
+    # 0.57 -> 0.44, came between 14 and 15 November like its neighbours; the user agreed)
+    i0 = max(i - 1, 0)
+    steps = v[i0:-1] - v[i0 + 1:]
+    k = i0 + int(np.argmax(steps)) + 1 if len(steps) else i
+    out.update(status="harvested", harvest_from=float(days[k - 1]), harvest_to=float(days[k]))
     return out
 
 
