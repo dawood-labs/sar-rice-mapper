@@ -531,7 +531,7 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
 
 def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool = False):
     """``(planting_day, method)`` from the radar before green-up (see :func:`pixel_stage`), or None. ``previous``:
-    take the low spell before the last one (for a field already harvested)."""
+    take the first dip instead of the last (for a field already harvested)."""
     d, w, noise = [], [], []
     for days, vh, vv in tracks:
         pre = days <= green_day
@@ -575,11 +575,20 @@ def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool
     spells.append(cur)
     real = [sp for sp in spells if len(sp) >= 2] or spells
     pick = real[-1]
-    if previous and len(spells) >= 2:
-        # a field already cut was planted on the dip BEFORE the last one (user, 19 Nov 2026: in harvested fields the
-        # late dip, mostly 31 July, is water over a young crop; their planting is the earlier dip, mostly 3 July)
-        pick = spells[-2]
-    last = first + pick[-1]
+    k = pick[-1]
+    if previous:
+        # a field already cut was planted on the EARLIER dip (user, 19 Nov 2026: in harvested fields the late dip,
+        # mostly 31 July, is water over a young crop; their planting is the dip before it, mostly 3 July):
+        # * two or more low spells: the end of the spell before the last;
+        # * one long spell (148 / 150: the two tracks alternate, one higher pass at a time, so the 3 and 31 July dips
+        #   merge): its first low point = the first pass after which the level rises again.
+        if len(spells) >= 2:
+            pick = spells[-2]
+            k = pick[-1]
+        else:
+            pick = spells[0]
+            k = next((x for x in pick if x + 1 < len(seg) and seg[x + 1] > seg[x]), pick[-1])
+    last = first + k
     lo_sp = float(np.min(seg[pick]))
     depth = min(float(np.max(seg[:pick[0] + 1])), end) - lo_sp
     if depth > 2 * float(np.nanmean(noise)):
