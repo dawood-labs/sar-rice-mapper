@@ -251,10 +251,14 @@ def field_chips(aoi: int, field, pad_px: int = 12, cols: int = 8, folder: str = 
     fig, axes = plt.subplots(rows, cols, figsize=(2.3 * cols, 2.5 * rows), squeeze=False)
     for ax in axes.ravel():
         ax.set_axis_off()
+    g, rings = None, []
     for ax, (date, ndvi) in zip(axes.ravel(), zip(o["date"], o["value"])):
         ds_path = root / f"{key}_{date:%Y-%m}_S2_{date:%Y-%m-%d}.tif"
         with rasterio.open(ds_path) as ds:
-            g = shape.to_crs(ds.crs)
+            if g is None:
+                g = shape.to_crs(ds.crs)
+                rings = [np.asarray(r.coords).T for poly in g.geometry for part in getattr(poly, "geoms", [poly])
+                         for r in [part.exterior, *part.interiors]]
             x0, y0, x1, y1 = g.total_bounds
             r = ds.res[0] * pad_px
             win = from_bounds(x0 - r, y0 - r, x1 + r, y1 + r, ds.transform).round_offsets().round_lengths()
@@ -269,11 +273,12 @@ def field_chips(aoi: int, field, pad_px: int = 12, cols: int = 8, folder: str = 
         rgb = rgb ** p26.GAMMA
         ext = (wt.c, wt.c + wt.a * rgb.shape[1], wt.f + wt.e * rgb.shape[0], wt.f)
         ax.imshow(rgb, extent=ext, interpolation="nearest")
-        g.boundary.plot(ax=ax, color="yellow", linewidth=1.2)
+        for ring in rings:                            # plain lines: geopandas' plot redraws the whole figure each call
+            ax.plot(*ring, color="yellow", linewidth=1.2)
         ax.set_xlim(ext[0], ext[1]), ax.set_ylim(ext[2], ext[3])
         ax.set_title(f"{date:%d %b}  NDVI {ndvi:.2f}", fontsize=9)
     fig.suptitle(f"{fid}: every clear Sentinel-2 view (5-3-2), field outline in yellow", x=0.01, ha="left", fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 1 - 0.35 / (2.5 * rows)))
+    fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=1 - 0.9 / (2.5 * rows), wspace=0.05, hspace=0.25)
     plt.close(fig)
     return fig
 
