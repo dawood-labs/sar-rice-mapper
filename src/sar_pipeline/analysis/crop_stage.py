@@ -472,11 +472,28 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
         return out
     end = float(w[-1])
     lo = float(np.min(seg))
-    k = int(np.argmin(seg))
-    while k + 1 < len(seg) - 1 and seg[k + 1] <= (lo + end) / 2:       # the unbroken low spell that holds the minimum
-        k += 1
+    # Low spells = runs of passes below the half-way level; ONE higher pass inside does not end a run (the two tracks
+    # alternate and see the field at different angles), two in a row do. Planting = the last pass of the LAST spell
+    # with at least two low passes (a single low pass is one rainy / odd pass, e.g. 5 September in field 458). Why the
+    # last and not the deepest (19 Nov 2026, fields 144 / 145 / 475): their dips are weak, the deepest was 3 July, but
+    # the optical still shows the bare field on 25 July; the user reads end of July, the later spell.
+    mid = (lo + end) / 2
+    lowi = np.flatnonzero(seg[:-1] <= mid)
+    if not len(lowi):                                      # the lowest pass is the green-up pass itself
+        lowi = np.array([int(np.argmin(seg))])
+    spells, cur = [], [int(lowi[0])]
+    for x in lowi[1:]:
+        if x - cur[-1] <= 2:
+            cur.append(int(x))
+        else:
+            spells.append(cur)
+            cur = [int(x)]
+    spells.append(cur)
+    real = [sp for sp in spells if len(sp) >= 2] or spells
+    k = real[-1][-1]
     last = first + k
-    depth = min(float(np.max(seg[:int(np.argmin(seg)) + 1])), end) - lo
+    lo_sp = float(np.min(seg[real[-1]]))
+    depth = min(float(np.max(seg[:real[-1][0] + 1])), end) - lo_sp
     if depth > 2 * float(np.nanmean(noise)):
         out.update(method="transplanted (water dip)", sowing_day=float(d[last]))
     else:
@@ -563,9 +580,22 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
     return d / "field_stage.csv"
 
 
+def score(aoi: int, readings_csv) -> pd.DataFrame:
+    """The rule's field planting dates beside the user's own reading of the curves (``field``, ``read_date``: the
+    middle of what he said, e.g. "end of July" = 28 July) with the difference in days. Why: his readings are the only
+    reference for planting, so every rule change is checked against all of them at once."""
+    r = pd.read_csv(readings_csv, dtype={"field": str})
+    f = pd.read_csv(out_dir(aoi) / "field_stage.csv")
+    f["field"] = f["field_id"].str[-3:]
+    t = r.merge(f[["field", "sowing_median", "transplanted_pct", "interior_pixels", "status"]], on="field", how="left")
+    t["diff_days"] = (pd.to_datetime(t["sowing_median"]) - pd.to_datetime(t["read_date"])).dt.days
+    return t
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["curves", "sheet", "stage"])
+    p.add_argument("step", choices=["curves", "sheet", "stage", "score"])
+    p.add_argument("--readings", help="score: csv with field, read_date")
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--qc", help="curves: the QC'd field layer")
     p.add_argument("--run", help="curves: the radar run to read")
@@ -574,7 +604,13 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--name", default="sheet_1")
     a = p.parse_args(argv)
-    if a.step == "stage":
+    if a.step == "score":
+        t = score(a.aoi, a.readings)
+        print(t.to_string(index=False))
+        d = t["diff_days"].dropna().abs()
+        print(f"{len(d)} fields with a date: within 10 days {int((d <= 10).sum())}, within 16 days {int((d <= 16).sum())}, "
+              f"median |diff| {d.median():.0f} d; no date {int(t['diff_days'].isna().sum())}")
+    elif a.step == "stage":
         print(stage(a.aoi, a.qc, a.run))
     elif a.step == "curves":
         print(curves(a.aoi, a.qc, a.run))
