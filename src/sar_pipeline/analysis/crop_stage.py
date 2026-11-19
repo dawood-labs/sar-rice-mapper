@@ -682,6 +682,26 @@ def deliver(aoi: int, name: str | None = None) -> Path:
         con.commit()
     finally:
         con.close()
+    shapefile(out)
+    return out
+
+
+def shapefile(gpkg) -> Path:
+    """The delivery layer once more as a shapefile in EPSG:4326 (``shp/<same name>.shp`` beside the GeoPackage), for
+    readers who want that format (user, 19 Nov 2026). Shapefile column names stop at 10 letters, so ``sowing_date``
+    and ``harvest_date`` are written as ``sowing_dt`` and ``harvest_dt``; the GeoPackage stays the exact-geometry
+    copy, this one is reprojected."""
+    import geopandas as gpd
+
+    gpkg = Path(gpkg)
+    g = gpd.read_file(gpkg).to_crs(4326).rename(columns={"sowing_date": "sowing_dt", "harvest_date": "harvest_dt",
+                                                         "major_class": "major_cls", "label_share": "label_shr"})
+    for c in ("sowing_dt", "harvest_dt"):
+        g[c] = pd.to_datetime(g[c]).dt.strftime("%Y-%m-%d")
+    g["crop_age"] = g["crop_age"].astype("Int64")
+    out = gpkg.parent / "shp" / f"{gpkg.stem}.shp"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    g.to_file(out, driver="ESRI Shapefile")
     return out
 
 
