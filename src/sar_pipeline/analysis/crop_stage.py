@@ -593,7 +593,8 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
     return out
 
 
-def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool = False, latest: float = np.inf):
+def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool = False, latest: float = np.inf,
+             only=None):
     """``(planting_day, method)`` from the radar before green-up (see :func:`pixel_stage`), or None. ``previous``:
     take the first dip instead of the last (for a field already harvested)."""
     d, w, noise = [], [], []
@@ -617,6 +618,12 @@ def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool
     first = int(np.searchsorted(d, wet_from, side="right"))
     end = float(w[-1])
     # ``latest``: passes after this day are too close to green-up to be the planting (water among the young plants)
+    if only is not None:
+        # only the area's common flooding passes may be the planting: the lowest of them on this field's curve
+        cand = np.flatnonzero(np.isin(d, list(only)) & (d > wet_from) & (d <= latest))
+        if not len(cand):
+            return None
+        return float(d[cand[int(np.argmin(w[cand]))]]), "common flooding pass"
     stop = int(np.searchsorted(d, latest, side="right"))
     if stop - first >= 3:
         d, w = d[:stop], np.append(w[:stop], end)
@@ -756,11 +763,48 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
                      if c.get("planting") and c["status"] == "standing" and c["green"] - c["planting"][0] > 0])
     if len(gaps) >= 8:
         min_gap = float(np.quantile(gaps, 0.25))
+        print(f"planting -> green-up gap of standing fields: quartiles {np.quantile(gaps, [0.1, 0.25, 0.5, 0.75]).round(0)}, "
+              f"minimum used {min_gap:.0f} d", flush=True)
         for c in field_cut.values():
             if c.get("planting") and c["green"] - c["planting"][0] < min_gap:
                 again = planting(c["tracks"], c["green"], wet_from, previous=c["status"] == "harvested",
                                  latest=c["green"] - min_gap)
                 c["planting"] = again or c["planting"]
+    # A field alone on a rare date is dated on one of the area's COMMON flooding passes (user, 20 Nov 2026: a
+    # corrected field stands for its group; 284 was on 12 August with one other field, he reads 31 July, the pass
+    # most fields flood on). Common = chosen by at least as many standing fields as the average chosen pass.
+    days = pd.Series([c["planting"][0] for c in field_cut.values() if c.get("planting") and c["status"] == "standing"])
+    if len(days) >= 8:
+        cnt = days.value_counts()
+        common = set(cnt[cnt >= cnt.mean()].index)
+        print("common planting passes:", sorted((t0 + pd.Timedelta(days=x)).strftime("%d %b") for x in common),
+              "| rare:", {(t0 + pd.Timedelta(days=x)).strftime("%d %b"): int(n) for x, n in cnt.items() if x not in common},
+              flush=True)
+        for c in field_cut.values():
+            if c.get("planting") and c["status"] == "standing" and c["planting"][0] not in common:
+                again = planting(c["tracks"], c["green"], wet_from, only=common)
+                if again and again[0] in common:
+                    c["planting"] = again
+    # A harvested field cannot have grown much shorter than the other harvested fields (user, 20 Nov 2026: 447 and 452,
+    # cut on 5 November with a 31 July dip = 97 days, were sown in the first week of July like the rest, ~125 days).
+    # Shorter than the lower decile of the harvested fields' own durations -> dated again on the harvested fields'
+    # common passes that leave at least that duration.
+    cutf = [c for c in field_cut.values() if c.get("planting") and c["status"] == "harvested"]
+    if len(cutf) >= 8:
+        dur = np.array([c["harvest_to"] - c["planting"][0] for c in cutf])
+        # the lower DECILE: with the quartile the fields cut a week later (14 November, 106 days from their 31 July
+        # dip) were pulled to 3 July as well, a 134-day crop nobody read
+        need = float(np.quantile(dur, 0.10))
+        cnt = pd.Series([c["planting"][0] for c in cutf]).value_counts()
+        common_h = set(cnt[cnt >= cnt.mean()].index)
+        print(f"harvested fields: duration quartiles {np.quantile(dur, [0.1, 0.25, 0.5, 0.75]).round(0)}, common passes "
+              f"{sorted((t0 + pd.Timedelta(days=x)).strftime('%d %b') for x in common_h)}", flush=True)
+        for c in cutf:
+            if c["harvest_to"] - c["planting"][0] < need:
+                ok_days = {x for x in common_h if c["harvest_to"] - x >= need}
+                again = planting(c["tracks"], c["green"], wet_from, only=ok_days) if ok_days else None
+                if again and again[0] in ok_days:
+                    c["planting"] = again
 
     def one(g):
         # the field's label comes from its interior pixels (user, 19 Nov 2026: edge pixels of these small fields mix
