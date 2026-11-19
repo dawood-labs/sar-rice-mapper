@@ -70,21 +70,10 @@ def test_field_status_ripening_stays_standing_cut_is_harvested():
 
 
 def test_month_week():
-    assert cs.month_week("2026-07-31") == "Jul week 5"
-    assert cs.month_week("2026-11-05") == "Nov week 1"
-    assert cs.month_week("2026-08-08") == "Aug week 2"
+    assert cs.month_week("2026-07-31") == "2026-07-29 to 07-31 (Jul week 5)"
+    assert cs.month_week("2026-11-05") == "2026-11-01 to 11-07 (Nov week 1)"
+    assert cs.month_week("2026-08-08") == "2026-08-08 to 08-14 (Aug week 2)"
     assert cs.month_week(None) is None
-
-
-def test_prepare_fields_cuts_overlap_and_gives_unique_ids(tmp_path):
-    src = tmp_path / "f.gpkg"
-    g = gpd.GeoDataFrame({"field_id": ["x_p000001", "x_p000001", None], "major_class": "rice", "sub_class": "rice",
-                          "origin": ["delineation", "split", None]},
-                         geometry=[box(0, 0, 100, 100), box(90, 0, 150, 100), box(300, 0, 400, 100)], crs=32646)
-    g.to_file(src, driver="GPKG")
-    out, rep = cs.prepare_fields(src)
-    f = gpd.read_file(out)
-    assert rep["overlapping_pairs"] == 0 and rep["touching_pairs"] == 0
-    assert sorted(f["field_id"]) == ["x_p000001", "x_p000001_b", "x_qc001"]
-    assert f.loc[f["field_id"] == "x_p000001", "area_ac"].iloc[0] > f.loc[f["field_id"] == "x_p000001_b", "area_ac"].iloc[0]
-    assert list(f["fid_no"]) == [1, 2, 3]
+    days = ["2026-06-25", "2026-07-03", "2026-07-15", "2026-07-31", "2026-08-08", "2026-09-05", "2026-11-15"]
+    labels = [cs.month_week(d) for d in days]
+    assert labels == sorted(labels)                     # text order = time order

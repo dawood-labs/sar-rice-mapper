@@ -895,13 +895,19 @@ STAGE_COLUMNS = ("status", "sowing_date", "sow_week", "crop_age", "harvest_date"
 
 
 def month_week(day) -> str | None:
-    """``"Jul week 5"``: the week of the month a date falls in, week 1 = days 1-7, 2 = 8-14, 3 = 15-21, 4 = 22-28,
-    5 = 29-31. Why (user, 19 Nov 2026): the dates come from passes 5-12 days apart, so a week is the honest precision
-    and is easier to read than a date."""
+    """``"2026-07-29 to 07-31 (Jul week 5)"``: the week of the month a date falls in, written with its first and last
+    day. Week 1 = days 1-7, 2 = 8-14, 3 = 15-21, 4 = 22-28, 5 = 29 to the month's end.
+
+    Why (user, 19-20 Nov 2026): the dates come from passes 5-12 days apart, so a week is the honest precision; the
+    label starts with the ISO date so that QGIS, which sorts the classes of a categorised style as text, lists the
+    weeks in their true order (a label starting with the month name put August before July)."""
     if day is None or pd.isna(day):
         return None
     d = pd.Timestamp(day)
-    return f"{d:%b} week {(d.day - 1) // 7 + 1}"
+    k = (d.day - 1) // 7
+    a = d.replace(day=7 * k + 1)
+    b = d.replace(day=min(7 * k + 7, d.days_in_month))
+    return f"{a:%Y-%m-%d} to {b:%m-%d} ({d:%b} week {k + 1})"
 
 
 def deliver(aoi: int, name: str | None = None) -> Path:
