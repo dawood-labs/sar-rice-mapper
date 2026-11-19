@@ -226,8 +226,8 @@ def plot_field(aoi: int, field, start: str = "2026-04-01"):
 
 def field_chips(aoi: int, field, pad_px: int = 12, cols: int = 8, folder: str = "data/s2_dates_masks"):
     """Every Sentinel-2 date on which this field is clear (its NDVI points), as 5-3-2 chips around the field with its
-    outline (user, 19 Nov 2026: all clear chips, as notebook 08 showed). One fixed stretch for every chip, so the
-    colours compare across dates."""
+    outline (user, 19 Nov 2026: all clear chips, as notebook 08 showed), each chip stretched on its own clear pixels
+    like notebook 08's chips."""
     import geopandas as gpd
     import matplotlib.pyplot as plt
     import rasterio
@@ -236,6 +236,7 @@ def field_chips(aoi: int, field, pad_px: int = 12, cols: int = 8, folder: str = 
     from .. import config as cm
     from ..newest_imagery import season_config
     from ..optical_export import band_index
+    from . import pixel_2026 as p26
 
     fid = resolve_field(aoi, field)
     d = out_dir(aoi)
@@ -259,8 +260,13 @@ def field_chips(aoi: int, field, pad_px: int = 12, cols: int = 8, folder: str = 
             win = from_bounds(x0 - r, y0 - r, x1 + r, y1 + r, ds.transform).round_offsets().round_lengths()
             rgb = np.dstack([ds.read(band_index(ds, b), window=win, boundless=True, fill_value=0).astype("float32")
                              for b in ("B5", "B3", "B2")])
+            clear = ds.read(band_index(ds, "clear"), window=win, boundless=True, fill_value=0)
             wt = ds.window_transform(win)
-        rgb = np.clip(rgb / 3000.0, 0, 1) ** 0.8
+        # per chip, per band 2-98 % of its clear pixels + gamma, as notebook 08's chips (user, 19 Nov: the fixed
+        # 0-3000 stretch gave flat brown chips)
+        lim = p26.stretch_limits(np.moveaxis(rgb, 2, 0)[None], clear[None])
+        rgb = np.dstack([np.clip((rgb[..., k] - lim[k, 0]) / max(lim[k, 1] - lim[k, 0], 1), 0, 1) for k in range(3)])
+        rgb = rgb ** p26.GAMMA
         ext = (wt.c, wt.c + wt.a * rgb.shape[1], wt.f + wt.e * rgb.shape[0], wt.f)
         ax.imshow(rgb, extent=ext, interpolation="nearest")
         g.boundary.plot(ax=ax, color="yellow", linewidth=1.2)
