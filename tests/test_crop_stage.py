@@ -30,3 +30,27 @@ def test_pixel_stage_reads_planting_from_the_dip_and_harvest_from_the_step():
     assert r["method"].startswith("transplanted") and r["sowing_day"] == 213.0
     standing = cs.pixel_stage(nd_days[:11], nd_vals[:11], [(days, vh, vv)], wet_from=165.0)
     assert standing["status"] == "standing"
+
+
+def test_deliver_adds_columns_and_keeps_geometry(tmp_path, monkeypatch):
+    import json
+
+    import pandas as pd
+
+    qc = tmp_path / "AOI_9.gpkg"
+    g = gpd.GeoDataFrame({"field_id": ["x_p000001", None], "acres": [1.0, 2.0]},
+                         geometry=[box(0, 0, 10.123456789, 10), box(20, 0, 30, 10)], crs=32646)
+    g.to_file(qc, driver="GPKG")
+    d = tmp_path / "out"
+    d.mkdir()
+    (d / "inputs.json").write_text(json.dumps({"qc": str(qc), "run": "r"}))
+    pd.DataFrame({"field_id": ["x_p000001", "x_qc001"], "status": ["standing", "harvested"],
+                  "sowing_median": ["2026-07-31", "2026-07-16"], "age_median": [107.0, 110.0],
+                  "harvest_from": [None, "2026-11-02"], "harvest_to": [None, "2026-11-05"]}).to_csv(d / "field_stage.csv", index=False)
+    monkeypatch.setattr(cs, "out_dir", lambda aoi: d)
+    out = cs.deliver(9)
+    r = gpd.read_file(out)
+    assert r.geometry.to_wkb().tolist() == gpd.read_file(qc).geometry.to_wkb().tolist()
+    assert list(r["status"]) == ["standing", "harvested"]
+    assert r["crop_age"].iloc[0] == 107 and pd.isna(r["crop_age"].iloc[1])
+    assert str(r["harvest_date"].iloc[1])[:10] == "2026-11-05" and pd.isna(r["field_id"].iloc[1])

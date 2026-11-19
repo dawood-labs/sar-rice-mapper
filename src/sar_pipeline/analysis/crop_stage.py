@@ -631,9 +631,63 @@ def score(aoi: int, readings_csv) -> pd.DataFrame:
     return t
 
 
+STAGE_COLUMNS = ("status", "sowing_date", "crop_age", "harvest_date")
+
+
+def deliver(aoi: int, name: str | None = None) -> Path:
+    """The QC'd field layer with the stage columns added, everything else exactly as it was (user, 19 Nov 2026).
+
+    * ``status``: ``standing`` or ``harvested``;
+    * ``sowing_date``: planting date (every field);
+    * ``crop_age``: days from planting to :data:`AGE_DAY`, standing fields only;
+    * ``harvest_date``: harvested fields only, the first clear image that shows the field cut (it was cut between the
+      clear image before it and this one).
+
+    The QC file is copied and the columns are added inside the GeoPackage (SQLite ``ALTER TABLE`` / ``UPDATE``), so
+    every geometry and every existing attribute stays byte for byte the same; rows are matched by their order in the
+    file (a drawn polygon has no ``field_id`` of its own)."""
+    import shutil
+    import sqlite3
+
+    d = out_dir(aoi)
+    qc = Path(json.loads((d / "inputs.json").read_text())["qc"])
+    fs = pd.read_csv(d / "field_stage.csv").set_index("field_id")
+    ids = load_fields(qc)["field_id"].tolist()
+    out = d / "delivery" / (name or f"{qc.stem}_crop_stage_{AGE_DAY}.gpkg")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(qc, out)
+    con = sqlite3.connect(out)
+
+    def _never(*_):
+        raise RuntimeError("a geometry trigger ran: the delivery must not touch geometries")
+
+    # the GeoPackage's spatial-index triggers name these functions; SQLite needs them to exist to compile an UPDATE,
+    # but they only run when a geometry changes, which must never happen here (they raise if it does)
+    for fn in ("ST_IsEmpty", "ST_MinX", "ST_MaxX", "ST_MinY", "ST_MaxY"):
+        con.create_function(fn, 1, _never)
+    try:
+        table = con.execute("SELECT table_name FROM gpkg_contents WHERE data_type = 'features'").fetchone()[0]
+        pk = next(r[1] for r in con.execute(f'PRAGMA table_info("{table}")') if r[5])
+        rowids = [r[0] for r in con.execute(f'SELECT "{pk}" FROM "{table}" ORDER BY "{pk}"')]
+        for c, typ in zip(STAGE_COLUMNS, ("TEXT", "DATE", "INTEGER", "DATE")):
+            con.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" {typ}')
+        for rid, fid in zip(rowids, ids):
+            r = fs.loc[fid]
+            standing = r["status"] == "standing"
+            # from the delivered date itself, so date and age always agree (the pixel-age median can differ by a pass)
+            age = (pd.Timestamp(AGE_DAY) - pd.Timestamp(r["sowing_median"])).days if standing else None
+            hd = None if standing or pd.isna(r["harvest_to"]) else str(r["harvest_to"])
+            con.execute(f'UPDATE "{table}" SET status = ?, sowing_date = ?, crop_age = ?, harvest_date = ? '
+                        f'WHERE "{pk}" = ?', (r["status"], str(r["sowing_median"]), age, hd, rid))
+        con.commit()
+    finally:
+        con.close()
+    return out
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("step", choices=["curves", "sheet", "stage", "score"])
+    p.add_argument("step", choices=["curves", "sheet", "stage", "score", "deliver"])
     p.add_argument("--readings", help="score: csv with field, read_date")
     p.add_argument("--aoi", type=int, required=True)
     p.add_argument("--qc", help="curves: the QC'd field layer")
@@ -643,7 +697,9 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--name", default="sheet_1")
     a = p.parse_args(argv)
-    if a.step == "score":
+    if a.step == "deliver":
+        print(deliver(a.aoi))
+    elif a.step == "score":
         t = score(a.aoi, a.readings)
         print(t.to_string(index=False))
         d = t["diff_days"].dropna().abs()
