@@ -159,6 +159,86 @@ def sheet(aoi: int, field_ids=None, n: int = 9, seed: int = 0, start: str = "202
     return p
 
 
+def resolve_field(aoi: int, field) -> str:
+    """The full field id from what the user types: ``b3_aoi246_p000111``, ``p000111``, ``000111`` or ``111``."""
+    ids = pd.read_csv(out_dir(aoi) / "fields.csv")["field_id"].astype(str)
+    f = str(field).strip()
+    if f in set(ids):
+        return f
+    hits = [i for i in ids if i.endswith(f) or i.endswith(f"p{int(f):06d}" if f.isdigit() else f)]
+    if len(hits) != 1:
+        raise KeyError(f"field {field!r}: {len(hits)} matches in aoi{aoi}")
+    return hits[0]
+
+
+def plot_field(aoi: int, field, start: str = "2026-04-01"):
+    """One field, radar first (user, 19 Nov 2026: SAR leads, NDVI supports, as in the harvest work): VH and VV per
+    track on their own panels (each pass a dot, dates readable), clear NDVI below. Returns (figure, info dict)."""
+    import matplotlib
+
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+
+    fid = resolve_field(aoi, field)
+    d = out_dir(aoi)
+    t = pd.read_parquet(d / "field_curves.parquet")
+    fields = pd.read_csv(d / "fields.csv").set_index("field_id")
+    g = t[(t["field_id"] == fid) & (t["date"] >= pd.Timestamp(start))]
+    t1 = pd.Timestamp.now().normalize() + pd.Timedelta(days=3)
+    fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True, gridspec_kw={"height_ratios": [1.3, 1.3, 0.9]})
+    colours = ["#2a78d6", "#eb6834"]
+    tracks = sorted(t.loc[t["source"] != "NDVI", "track"].unique())
+    for ax, pol in zip(axes[:2], ("VH", "VV")):
+        for j, tr in enumerate(tracks):
+            s = g[(g["source"] == pol) & (g["track"] == tr)].sort_values("date")
+            ax.plot(s["date"], s["value"], "o-", color=colours[j % 2], lw=1.6, ms=6, label=tr)
+            for x, y in zip(s["date"], s["value"]):
+                ax.annotate(x.strftime("%d %b"), (x, y), textcoords="offset points", xytext=(0, 7), ha="center",
+                            fontsize=6.5, color=colours[j % 2])
+        ax.set_ylabel(f"{pol} (dB)")
+        ax.grid(alpha=0.3)
+        ax.legend(loc="upper left", fontsize=9)
+    o = g[g["source"] == "NDVI"].sort_values("date")
+    axes[2].plot(o["date"], o["value"], "o-", color="#1baf7a", lw=1, ms=4)
+    axes[2].set_ylim(-0.1, 1.0)
+    axes[2].set_ylabel("NDVI (clear)")
+    axes[2].grid(alpha=0.3)
+    axes[2].set_xlim(pd.Timestamp(start), t1)
+    axes[2].xaxis.set_major_locator(mdates.MonthLocator())
+    axes[2].xaxis.set_minor_locator(mdates.DayLocator(bymonthday=15))
+    axes[2].xaxis.set_major_formatter(mdates.DateFormatter("%b"))
+    for ax in axes:
+        ax.grid(which="minor", axis="x", alpha=0.15)
+    ac, px = float(fields.loc[fid, "acres"]), int(fields.loc[fid, "pixels"])
+    fig.suptitle(f"{fid}  ·  {ac:.3f} ac  ·  {px} pixels  ·  radar first, NDVI as support", x=0.01, ha="left",
+                 fontsize=13, weight="bold")
+    fig.tight_layout()
+    info = {"field_id": fid, "acres": ac, "pixels": px,
+            "last_pass": {tr: str(g.loc[(g["track"] == tr), "date"].max().date()) for tr in tracks},
+            "last_clear_ndvi": str(o["date"].max().date()) if len(o) else None}
+    plt.close(fig)
+    return fig, info
+
+
+def s2_clear_dates(aoi: int, folder: str = "data/s2_dates_masks") -> pd.DataFrame:
+    """Every local Sentinel-2 file of the AOI with the share of the AOI the delivered series' mask keeps (clear), to
+    pick dates to open in QGIS (true colour = bands 3,2,1; 5-3-2 = 4,2,1; 8-3-2 = 5,2,1)."""
+    from . import ndvi_5day as nd
+    from .. import config as cm
+    from ..newest_imagery import season_config
+    from .mask_experiment import VARIANTS
+
+    dates, _n, _w, _l, ok, _s, loc = nd.read_dates(aoi, **VARIANTS[VARIANT])
+    inside = nd.inside_from_loc(loc)
+    o = ok.reshape(len(dates), -1)[:, inside].astype(bool)
+    key = season_config(aoi)["aoi"]["key"]
+    root = cm.repo_root() / folder / key
+    out = pd.DataFrame({"date": pd.DatetimeIndex(dates).strftime("%Y-%m-%d"), "clear_pct": (100 * o.mean(axis=1)).round(1)})
+    out["file"] = [str(root / f"{key}_{x[:7]}_S2_{x}.tif") for x in out["date"]]
+    out.to_csv(out_dir(aoi) / "s2_clear_dates.csv", index=False)
+    return out
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("step", choices=["curves", "sheet"])
