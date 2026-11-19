@@ -575,7 +575,9 @@ def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool
     spells.append(cur)
     real = [sp for sp in spells if len(sp) >= 2] or spells
     pick = real[-1]
-    k = pick[-1]
+    # its DEEPEST pass, not its end (user, 19 Nov 2026, field 473 and the fields dated 12 August or later: the water
+    # is deepest on 31 July; the low passes after it, 8-20 August, are water standing among the young plants)
+    k = pick[int(np.argmin(seg[pick]))]
     if previous:
         # a field already cut was planted on the EARLIER dip (user, 19 Nov 2026: in harvested fields the late dip,
         # mostly 31 July, is water over a young crop; their planting is the first dip, mostly 3 July, some 25 June -
@@ -659,14 +661,17 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
         vals = np.array([np.nanmedian(np.where(o[i, inner], n[i, inner], np.nan)) for i in keep])
         good = np.isfinite(vals)
         field_cut[fid] = field_status(nday[keep][good], vals[good])
-        if field_cut[fid]["status"] == "harvested":
+        if field_cut[fid]["status"] in ("harvested", "standing"):
+            # planting from the FIELD's own radar curve too (user, 19 Nov 2026: field level, not pixels; field 473:
+            # its pixels spread over 8-20 August, the field curve is deepest on 31 July)
             gg = ndvi_harvest(nday[keep][good], vals[good])
             ftr = []
             for days, vh, vv in series:
                 mvh, mvv = np.nanmedian(vh[:, inner], axis=1), np.nanmedian(vv[:, inner], axis=1)
                 ok_ = np.isfinite(mvh) & np.isfinite(mvv)
                 ftr.append((days[ok_], mvh[ok_], mvv[ok_]))
-            field_cut[fid]["planting"] = planting(ftr, gg[0], wet_from, previous=True) if gg else None
+            field_cut[fid]["planting"] = (planting(ftr, gg[0], wet_from, previous=field_cut[fid]["status"] == "harvested")
+                                          if gg else None)
 
     def one(g):
         # the field's label comes from its interior pixels (user, 19 Nov 2026: edge pixels of these small fields mix
@@ -681,8 +686,7 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
         hf = (t0 + pd.Timedelta(days=fc["harvest_from"])).date() if cut else None
         ht = (t0 + pd.Timedelta(days=fc["harvest_to"])).date() if cut else None
         sow = s.quantile(0.5, interpolation="nearest") if len(s) else None
-        if cut and fc.get("planting"):
-            # harvested: planting from the field's own radar curve, the dip before the last (user, 19 Nov 2026)
+        if fc.get("planting"):
             sow = t0 + pd.Timedelta(days=fc["planting"][0])
         end = (pd.Timestamp(hf) + (pd.Timestamp(ht) - pd.Timestamp(hf)) / 2) if cut else pd.Timestamp(age_day)
         return pd.Series({
@@ -745,7 +749,17 @@ def score(aoi: int, readings_csv) -> pd.DataFrame:
     return t
 
 
-STAGE_COLUMNS = ("status", "sowing_date", "crop_age", "harvest_date")
+STAGE_COLUMNS = ("status", "sowing_date", "sow_week", "crop_age", "harvest_date", "harv_week")
+
+
+def month_week(day) -> str | None:
+    """``"Jul week 5"``: the week of the month a date falls in, week 1 = days 1-7, 2 = 8-14, 3 = 15-21, 4 = 22-28,
+    5 = 29-31. Why (user, 19 Nov 2026): the dates come from passes 5-12 days apart, so a week is the honest precision
+    and is easier to read than a date."""
+    if day is None or pd.isna(day):
+        return None
+    d = pd.Timestamp(day)
+    return f"{d:%b} week {(d.day - 1) // 7 + 1}"
 
 
 def deliver(aoi: int, name: str | None = None) -> Path:
@@ -755,7 +769,8 @@ def deliver(aoi: int, name: str | None = None) -> Path:
     * ``sowing_date``: planting date (every field);
     * ``crop_age``: days from planting to :data:`AGE_DAY`, standing fields only;
     * ``harvest_date``: harvested fields only, the first clear image that shows the field cut (it was cut between the
-      clear image before it and this one).
+      clear image before it and this one);
+    * ``sow_week`` / ``harv_week``: the same two dates as the week of the month (:func:`month_week`).
 
     The QC file is copied and the columns are added inside the GeoPackage (SQLite ``ALTER TABLE`` / ``UPDATE``), so
     every geometry and every existing attribute stays byte for byte the same; rows are matched by their order in the
@@ -783,7 +798,7 @@ def deliver(aoi: int, name: str | None = None) -> Path:
         table = con.execute("SELECT table_name FROM gpkg_contents WHERE data_type = 'features'").fetchone()[0]
         pk = next(r[1] for r in con.execute(f'PRAGMA table_info("{table}")') if r[5])
         rowids = [r[0] for r in con.execute(f'SELECT "{pk}" FROM "{table}" ORDER BY "{pk}"')]
-        for c, typ in zip(STAGE_COLUMNS, ("TEXT", "DATE", "INTEGER", "DATE")):
+        for c, typ in zip(STAGE_COLUMNS, ("TEXT", "DATE", "TEXT", "INTEGER", "DATE", "TEXT")):
             con.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" {typ}')
         for rid, fid in zip(rowids, ids):
             r = fs.loc[fid]
@@ -791,8 +806,9 @@ def deliver(aoi: int, name: str | None = None) -> Path:
             # from the delivered date itself, so date and age always agree (the pixel-age median can differ by a pass)
             age = (pd.Timestamp(AGE_DAY) - pd.Timestamp(r["sowing_median"])).days if standing else None
             hd = None if standing or pd.isna(r["harvest_to"]) else str(r["harvest_to"])
-            con.execute(f'UPDATE "{table}" SET status = ?, sowing_date = ?, crop_age = ?, harvest_date = ? '
-                        f'WHERE "{pk}" = ?', (r["status"], str(r["sowing_median"]), age, hd, rid))
+            con.execute(f'UPDATE "{table}" SET status = ?, sowing_date = ?, sow_week = ?, crop_age = ?, harvest_date = ?, '
+                        f'harv_week = ? WHERE "{pk}" = ?',
+                        (r["status"], str(r["sowing_median"]), month_week(r["sowing_median"]), age, hd, month_week(hd), rid))
         con.commit()
     finally:
         con.close()

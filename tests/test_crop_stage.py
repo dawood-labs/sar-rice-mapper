@@ -67,3 +67,10 @@ def test_field_status_ripening_stays_standing_cut_is_harvested():
     assert cs.field_status(days, standing)["status"] == "standing"
     r = cs.field_status(days, cut)
     assert r["status"] == "harvested" and r["harvest_to"] == 185
+
+
+def test_month_week():
+    assert cs.month_week("2026-07-31") == "Jul week 5"
+    assert cs.month_week("2026-11-05") == "Nov week 1"
+    assert cs.month_week("2026-08-08") == "Aug week 2"
+    assert cs.month_week(None) is None
