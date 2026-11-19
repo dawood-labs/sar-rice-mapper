@@ -523,6 +523,15 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
     if np.isfinite(hf):
         out.update(status="harvested", harvest_from=hf, harvest_to=ht)
     # ---- planting from the radar
+    p = planting(tracks, green_day, wet_from)
+    if p is not None:
+        out.update(sowing_day=p[0], method=p[1])
+    return out
+
+
+def planting(tracks, green_day: float, wet_from: float = -np.inf, previous: bool = False):
+    """``(planting_day, method)`` from the radar before green-up (see :func:`pixel_stage`), or None. ``previous``:
+    take the low spell before the last one (for a field already harvested)."""
     d, w, noise = [], [], []
     for days, vh, vv in tracks:
         pre = days <= green_day
@@ -533,18 +542,18 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
         w.append(pos[pre])
         noise.append(np.median(np.abs(np.diff(pos[pre]))))
     if not d:
-        return out
+        return None
     d, w = np.concatenate(d), np.concatenate(w)
     o = np.argsort(d)
     d, w = d[o], w[o]
     ok = np.isfinite(w)
     d, w = d[ok], w[ok]
     if len(w) < 5:
-        return out
+        return None
     first = int(np.searchsorted(d, wet_from, side="right"))
     seg = w[first:]
     if len(seg) < 3:
-        return out
+        return None
     end = float(w[-1])
     lo = float(np.min(seg))
     # Low spells = runs of passes below the half-way level; ONE higher pass inside does not end a run (the two tracks
@@ -565,15 +574,19 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
             cur = [int(x)]
     spells.append(cur)
     real = [sp for sp in spells if len(sp) >= 2] or spells
-    k = real[-1][-1]
-    last = first + k
-    lo_sp = float(np.min(seg[real[-1]]))
-    depth = min(float(np.max(seg[:real[-1][0] + 1])), end) - lo_sp
+    pick = real[-1]
+    if previous and len(spells) >= 2:
+        # a field already cut was planted on the dip BEFORE the last one (user, 19 Nov 2026: in harvested fields the
+        # late dip, mostly 31 July, is water over a young crop; their planting is the earlier dip, mostly 3 July)
+        pick = spells[-2]
+    last = first + pick[-1]
+    lo_sp = float(np.min(seg[pick]))
+    depth = min(float(np.max(seg[:pick[0] + 1])), end) - lo_sp
     if depth > 2 * float(np.nanmean(noise)):
-        out.update(method="transplanted (water dip)", sowing_day=float(d[last]))
-    else:
-        out.update(method="direct seeded (rise)", sowing_day=float(d[last]) - DIRECT_SEEDED_LEAD_DAYS)
-    return out
+        return float(d[last]), "transplanted (water dip)"
+    return float(d[last]) - DIRECT_SEEDED_LEAD_DAYS, "direct seeded (rise)"
+
+
 
 
 def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY) -> Path:
@@ -641,6 +654,14 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
         vals = np.array([np.nanmedian(np.where(o[i, inner], n[i, inner], np.nan)) for i in keep])
         good = np.isfinite(vals)
         field_cut[fid] = field_status(nday[keep][good], vals[good])
+        if field_cut[fid]["status"] == "harvested":
+            gg = ndvi_harvest(nday[keep][good], vals[good])
+            ftr = []
+            for days, vh, vv in series:
+                mvh, mvv = np.nanmedian(vh[:, inner], axis=1), np.nanmedian(vv[:, inner], axis=1)
+                ok_ = np.isfinite(mvh) & np.isfinite(mvv)
+                ftr.append((days[ok_], mvh[ok_], mvv[ok_]))
+            field_cut[fid]["planting"] = planting(ftr, gg[0], wet_from, previous=True) if gg else None
 
     def one(g):
         # the field's label comes from its interior pixels (user, 19 Nov 2026: edge pixels of these small fields mix
@@ -655,6 +676,9 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
         hf = (t0 + pd.Timedelta(days=fc["harvest_from"])).date() if cut else None
         ht = (t0 + pd.Timedelta(days=fc["harvest_to"])).date() if cut else None
         sow = s.quantile(0.5, interpolation="nearest") if len(s) else None
+        if cut and fc.get("planting"):
+            # harvested: planting from the field's own radar curve, the dip before the last (user, 19 Nov 2026)
+            sow = t0 + pd.Timedelta(days=fc["planting"][0])
         end = (pd.Timestamp(hf) + (pd.Timestamp(ht) - pd.Timestamp(hf)) / 2) if cut else pd.Timestamp(age_day)
         return pd.Series({
             "pixels": n_all, "interior_pixels": int(g["interior"].sum()),
@@ -662,7 +686,7 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
             "harvested_pct": round(100 * len(h) / len(g), 0),
             # how far below its canopy the field is now, as a share of its rise; near CUT_SHARE = check by eye
             "drop_share": round(float(fc["drop_share"]), 3),
-            "sowing_median": s.quantile(0.5, interpolation="nearest").date() if len(s) else None,
+            "sowing_median": sow.date() if sow is not None else None,
             "sowing_q25": s.quantile(0.25, interpolation="nearest").date() if len(s) else None,
             "sowing_q75": s.quantile(0.75, interpolation="nearest").date() if len(s) else None,
             # no pixel with a planting date = no empty-then-green cycle after the wet peak: green all through (fields
