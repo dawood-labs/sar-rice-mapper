@@ -54,3 +54,16 @@ def test_deliver_adds_columns_and_keeps_geometry(tmp_path, monkeypatch):
     assert list(r["status"]) == ["standing", "harvested"]
     assert r["crop_age"].iloc[0] == 107 and pd.isna(r["crop_age"].iloc[1])
     assert str(r["harvest_date"].iloc[1])[:10] == "2026-11-05" and pd.isna(r["field_id"].iloc[1])
+
+
+def test_field_status_ripening_stays_standing_cut_is_harvested():
+    import numpy as np
+
+    days = np.arange(0, 200, 5, dtype=float)
+    rise = np.clip((days - 40) / 40, 0, 1)
+    standing = 0.1 + 0.7 * rise - np.where(days > 150, (days - 150) * 0.001, 0)    # slow ripening fade
+    cut = standing.copy()
+    cut[days >= 185] = 0.35                                                          # cut on day 185
+    assert cs.field_status(days, standing)["status"] == "standing"
+    r = cs.field_status(days, cut)
+    assert r["status"] == "harvested" and r["harvest_to"] == 185

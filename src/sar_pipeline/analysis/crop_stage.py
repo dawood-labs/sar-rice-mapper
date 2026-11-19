@@ -394,10 +394,8 @@ def _own_position(x, ref):
 
 def ndvi_harvest(nd_days, nd_vals):
     """``(green_day, harvest_from, harvest_to)`` of one NDVI curve (a pixel's or a field's), harvest = NaN while the
-    crop stands; None when the curve has too few views or no rise. The tests are described in :func:`pixel_stage`;
-    test (c) is judged against the CANOPY, the views from the season peak to the step (haze dips included), not the
-    young rising crop (19 Nov 2026, field 107: green from 1 Sep at 0.48, cut on 5 Nov to 0.49, and it stayed
-    "standing"; the user: standing was over-predicted)."""
+    crop stands; None when the curve has too few views or no rise. The tests are described in :func:`pixel_stage`.
+    Per pixel this is kept for information (``harvested_pct``); the field's status comes from :func:`field_status`."""
     nd_days, nd_vals = np.asarray(nd_days, float), np.asarray(nd_vals, float)
     if len(nd_vals) < 6:
         return None
@@ -429,17 +427,60 @@ def ndvi_harvest(nd_days, nd_vals):
         if step <= 0 or (later >= (v[k - 1] + v[k]) / 2).any():
             continue
         before = float(np.max(v[:k]))
-        # (c) is judged against the CANOPY: the views from the season peak to the step (haze dips included), not the
-        # young rising crop of early September (19 Nov 2026, field 107: green from 1 Sep at 0.48, cut on 5 Nov to 0.49,
-        # three of its six interior pixels stayed "standing" and the field with them; the user: standing over-predicted)
-        canopy = v[ipk - ig:k] if ipk - ig < k else v[:k]
-        if step >= (before - float(np.median(later))) / 2 and float(np.max(later)) < float(np.min(canopy)):
+        if step >= (before - float(np.median(later))) / 2 and float(np.max(later)) < float(np.min(v[:k])):
             if best is None or step > best[0]:
                 best = (step, k)
     if best is not None:
         k = best[1]
         return green_day, float(nd_days[ig + k - 1]), float(nd_days[ig + k])
     return green_day, np.nan, np.nan
+
+
+#: A field is harvested when its latest level lies more than this share of its own season rise (empty -> peak) below
+#: its green canopy. Set between the user's 17 checked fields on the 15 Nov image (19 Nov 2026): standing ones fall
+#: at most 0.10 of their rise (459, ripening), cut ones at least 0.18 (qc001 0.18, 130 0.19, 174 0.22, others 0.27+).
+CUT_SHARE = 0.15
+#: The latest level = median of the last views, so one hazy view (449 on 7 Nov) cannot cut a field.
+LAST_VIEWS = 3
+
+
+def field_status(nd_days, nd_vals) -> dict:
+    """Standing or harvested from a FIELD's NDVI curve (median of its interior pixels on clear dates) as of its last
+    view (user, 19 Nov 2026: decide on the field, not by a vote of pixels).
+
+    Why not the step test of :func:`ndvi_harvest`: a field that ripens first (NDVI sliding 0.78 -> 0.63 through
+    October) and is cut later fails "one step carries half the loss" (108, 113, 129, 106, 435 stayed standing), and a
+    field that peaks on its next-to-last views shows tiny dips that look like a cut (458, 449, 450). The user's reading
+    is simpler: is the field, now, clearly below its own green canopy?
+
+    * canopy = median of the views from green-up that are above the half-way level between empty and peak (the
+      latest views left out), so haze dips and the rising crop do not set it;
+    * now = median of the last :data:`LAST_VIEWS` views;
+    * harvested when ``canopy - now`` exceeds :data:`CUT_SHARE` of the field's rise (``peak - empty``); the harvest
+      lies between the last view above that cut level and the first of the final run of views below it.
+
+    Returns status, harvest_from / harvest_to (day numbers or NaN) and ``drop_share`` = (canopy - now) / rise."""
+    out = {"status": "no data", "harvest_from": np.nan, "harvest_to": np.nan, "drop_share": np.nan}
+    days, v = np.asarray(nd_days, float), np.asarray(nd_vals, float)
+    g = ndvi_harvest(days, v)
+    if g is None or len(v) <= LAST_VIEWS:
+        return out
+    ipk = int(np.argmax(v))
+    empty = float(np.min(v[:ipk])) if ipk else float(np.min(v))
+    rise = float(v[ipk]) - empty
+    body = (days >= g[0]) & (np.arange(len(v)) < len(v) - LAST_VIEWS) & (v >= empty + rise / 2)
+    canopy = float(np.median(v[body])) if body.any() else float(v[ipk])
+    now = float(np.median(v[-LAST_VIEWS:]))
+    out["drop_share"] = (canopy - now) / rise if rise > 0 else np.nan
+    cut = canopy - CUT_SHARE * rise
+    if now >= cut:
+        out["status"] = "standing"
+        return out
+    i = len(v) - 1
+    while i > 0 and v[i - 1] < cut:
+        i -= 1
+    out.update(status="harvested", harvest_from=float(days[max(i - 1, 0)]), harvest_to=float(days[i]))
+    return out
 
 
 def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
@@ -599,7 +640,7 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
         keep = np.flatnonzero(share >= MIN_CLEAR_SHARE)
         vals = np.array([np.nanmedian(np.where(o[i, inner], n[i, inner], np.nan)) for i in keep])
         good = np.isfinite(vals)
-        field_cut[fid] = ndvi_harvest(nday[keep][good], vals[good])
+        field_cut[fid] = field_status(nday[keep][good], vals[good])
 
     def one(g):
         # the field's label comes from its interior pixels (user, 19 Nov 2026: edge pixels of these small fields mix
@@ -609,22 +650,25 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
         g = g[g["interior"]] if g["interior"].any() else g
         s = g["sowing_date"].dropna()
         h = g[g["status"] == "harvested"]
-        fc = field_cut.get(fid)
-        cut = fc is not None and np.isfinite(fc[1])
-        hf = (t0 + pd.Timedelta(days=fc[1])).date() if cut else None
-        ht = (t0 + pd.Timedelta(days=fc[2])).date() if cut else None
+        fc = field_cut.get(fid) or {"status": "no data", "drop_share": np.nan}
+        cut = fc["status"] == "harvested"
+        hf = (t0 + pd.Timedelta(days=fc["harvest_from"])).date() if cut else None
+        ht = (t0 + pd.Timedelta(days=fc["harvest_to"])).date() if cut else None
         sow = s.quantile(0.5, interpolation="nearest") if len(s) else None
         end = (pd.Timestamp(hf) + (pd.Timestamp(ht) - pd.Timestamp(hf)) / 2) if cut else pd.Timestamp(age_day)
         return pd.Series({
             "pixels": n_all, "interior_pixels": int(g["interior"].sum()),
             "status": "harvested" if cut else "standing",
             "harvested_pct": round(100 * len(h) / len(g), 0),
+            # how far below its canopy the field is now, as a share of its rise; near CUT_SHARE = check by eye
+            "drop_share": round(float(fc["drop_share"]), 3),
             "sowing_median": s.quantile(0.5, interpolation="nearest").date() if len(s) else None,
             "sowing_q25": s.quantile(0.25, interpolation="nearest").date() if len(s) else None,
             "sowing_q75": s.quantile(0.75, interpolation="nearest").date() if len(s) else None,
             # no pixel with a planting date = no empty-then-green cycle after the wet peak: green all through (fields
             # 517 / 518 / 521, which the user found not to be rice) -> flagged for review, not guessed
-            "note": "" if len(s) else "no planting signal: check, may not be rice",
+            "note": ("" if len(s) else "no planting signal: check, may not be rice")
+            or ("review: close to the cut level" if abs(fc["drop_share"] - CUT_SHARE) <= CUT_SHARE * 0.4 else ""),
             "transplanted_pct": round(100 * g["method"].str.startswith("transplanted").mean(), 0),
             "age_median": float((end - sow).days) if sow is not None else np.nan,
             "harvest_from": hf, "harvest_to": ht})
