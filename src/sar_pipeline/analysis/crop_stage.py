@@ -38,6 +38,10 @@ def out_dir(aoi: int) -> Path:
     return OUT / f"aoi{aoi}"
 
 
+#: Pixel ids of the last :func:`field_pixels` call that are interior to their field (no neighbour outside it).
+_INTERIOR: set = set()
+
+
 def field_pixels(qc_file, gd: dict) -> tuple[dict, pd.DataFrame]:
     """{field_id: flat pixel ids} of pixels whose centre is inside the field (all its pieces), and a table with
     each field's acres (EPSG:32646) and pixel count."""
@@ -56,6 +60,16 @@ def field_pixels(qc_file, gd: dict) -> tuple[dict, pd.DataFrame]:
                     transform=from_origin(float(gd["x0"]), float(gd["y0"]), float(gd["res"]), float(gd["res"])),
                     fill=0, dtype="int32").ravel()
     pix = {k: np.flatnonzero(lab == code[k]) for k in ids}
+    global _INTERIOR
+    g2 = lab.reshape(h, w)
+    same = np.ones((h, w), dtype=bool)                     # interior = the four neighbours belong to the same field
+    same[1:, :] &= g2[1:, :] == g2[:-1, :]
+    same[:-1, :] &= g2[:-1, :] == g2[1:, :]
+    same[:, 1:] &= g2[:, 1:] == g2[:, :-1]
+    same[:, :-1] &= g2[:, :-1] == g2[:, 1:]
+    same[[0, -1], :] = False
+    same[:, [0, -1]] = False
+    _INTERIOR = set(np.flatnonzero(same.ravel() & (lab > 0)).tolist())
     ac = f.to_crs(32646).assign(a=lambda x: x.area / ACRE).groupby("field_id")["a"].sum()
     table = pd.DataFrame({"field_id": ids, "acres": [round(float(ac[k]), 3) for k in ids],
                           "pixels": [len(pix[k]) for k in ids]})
@@ -160,6 +174,20 @@ def sheet(aoi: int, field_ids=None, n: int = 9, seed: int = 0, start: str = "202
     return p
 
 
+def _rain(aoi: int, track: str) -> pd.Series:
+    """Rain (mm in the 6 h before the pass, from the run's pass table) of one track's passes that had any, by date.
+    Why (user, 19 Nov 2026): a wet surface lifts the radar (12 Nov: +2.3 dB on every field), so rainy passes are
+    marked on the plot instead of being dropped."""
+    from .. import config as cm
+    from ..newest_imagery import season_config
+
+    run = json.loads((out_dir(aoi) / "inputs.json").read_text())["run"]
+    f = Path(cm.analysis_run_dir(season_config(aoi))).parent / run / "stack" / f"track_{track}" / "dates.csv"
+    t = pd.read_csv(f)
+    t = t[t["rain_6h_mm"] >= 0.5]
+    return pd.Series(t["rain_6h_mm"].to_numpy(), index=pd.to_datetime(t["date_utc"]).dt.normalize())
+
+
 def resolve_field(aoi: int, field) -> str:
     """The full field id from what the user types: ``b3_aoi246_p000111``, ``p000111``, ``000111`` or ``111``."""
     ids = pd.read_csv(out_dir(aoi) / "fields.csv")["field_id"].astype(str)
@@ -196,9 +224,18 @@ def plot_field(aoi: int, field, start: str = "2026-04-01"):
             for x, y in zip(s["date"], s["value"]):
                 ax.annotate(x.strftime("%d %b"), (x, y), textcoords="offset points", xytext=(0, 7), ha="center",
                             fontsize=6.5, color=colours[j % 2])
+            rain = _rain(aoi, tr)
+            wet = s[s["date"].isin(rain.index)]
+            if len(wet):                                  # rain in the 6 h before the pass: ring grows with the amount
+                mm = rain.reindex(wet["date"]).to_numpy()
+                ax.scatter(wet["date"], wet["value"], s=60 + 25 * mm, facecolors="none", edgecolors="#1565c0",
+                           linewidths=1.6, zorder=4)
+                for x, y, r_ in zip(wet["date"], wet["value"], mm):
+                    ax.annotate(f"{r_:.0f} mm", (x, y), textcoords="offset points", xytext=(0, -13), ha="center",
+                                fontsize=6.5, color="#1565c0")
         ax.set_ylabel(f"{pol} (dB)")
         ax.grid(alpha=0.3)
-        ax.legend(loc="upper left", fontsize=9)
+        ax.legend(loc="upper left", fontsize=9, title="blue ring = rain before the pass (mm in 6 h)", title_fontsize=8)
     o = g[g["source"] == "NDVI"].sort_values("date")
     axes[2].plot(o["date"], o["value"], "o-", color="#1baf7a", lw=1, ms=4)
     axes[2].set_ylim(-0.1, 1.0)
@@ -220,7 +257,8 @@ def plot_field(aoi: int, field, start: str = "2026-04-01"):
         if fid in fs.index:
             r = fs.loc[fid]
             rule = (f"\nrule: planting {r['sowing_median']} (pixels {r['sowing_q25']} .. {r['sowing_q75']}), "
-                    f"transplanted {r['transplanted_pct']:.0f} %, harvested {r['harvested_pct']:.0f} % of pixels"
+                    f"transplanted {r['transplanted_pct']:.0f} %\n{str(r.get('status', '')).upper()}: "
+                    f"harvested {r['harvested_pct']:.0f} % of interior pixels"
                     + (f" between {r['harvest_from']} and {r['harvest_to']}" if r["harvested_pct"] > 0 else "")
                     + f", age {r['age_median']:.0f} d")
             for ax in axes:
@@ -444,7 +482,8 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
 
 def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY) -> Path:
     """:func:`pixel_stage` for every pixel of every QC'd field; writes ``pixel_stage.parquet`` (one row per pixel) and
-    ``field_stage.csv`` (per field: pixels, share harvested, median sowing date and its spread, harvest window)."""
+    ``field_stage.csv`` (per field, from its interior pixels: status by majority, share harvested, median sowing date
+    and its spread, harvest window)."""
     from . import ndvi_5day as nd
     from . import radar_water as rw
     from .. import config as cm
@@ -481,7 +520,7 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
                 g = np.isfinite(vh[:, p]) & np.isfinite(vv[:, p])
                 tracks.append((days[g], vh[g, p], vv[g, p]))
             r = pixel_stage(nday[m], n[m, p], tracks, wet_from)
-            rows.append({"field_id": fid, "pixel": int(p), **r})
+            rows.append({"field_id": fid, "pixel": int(p), "interior": int(p) in _INTERIOR, **r})
     t = pd.DataFrame(rows)
     day = lambda x: t0 + pd.to_timedelta(x, unit="D")  # noqa: E731
     t["sowing_date"] = day(t["sowing_day"])
@@ -493,17 +532,24 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
     t.drop(columns="sowing_day").to_parquet(d / "pixel_stage.parquet", index=False)
 
     def one(g):
+        # the field's label comes from its interior pixels (user, 19 Nov 2026: edge pixels of these small fields mix
+        # with the neighbour, so they are not counted); a field too small to have any uses all its pixels
+        n_all = len(g)
+        g = g[g["interior"]] if g["interior"].any() else g
         s = g["sowing_date"].dropna()
         h = g[g["status"] == "harvested"]
         return pd.Series({
-            "pixels": len(g), "harvested_pct": round(100 * len(h) / len(g), 0),
+            "pixels": n_all, "interior_pixels": int(g["interior"].sum()),
+            "status": "harvested" if len(h) > len(g) / 2 else "standing",
+            "harvested_pct": round(100 * len(h) / len(g), 0),
             "sowing_median": s.quantile(0.5, interpolation="nearest").date() if len(s) else None,
             "sowing_q25": s.quantile(0.25, interpolation="nearest").date() if len(s) else None,
             "sowing_q75": s.quantile(0.75, interpolation="nearest").date() if len(s) else None,
             "transplanted_pct": round(100 * g["method"].str.startswith("transplanted").mean(), 0),
             "age_median": g["age_days"].median(),
-            "harvest_from": h["harvest_from"].min().date() if len(h) else None,
-            "harvest_to": h["harvest_to"].max().date() if len(h) else None})
+            # the window most of its cut pixels share (one odd pixel no longer widens it)
+            "harvest_from": h["harvest_from"].mode().iloc[0].date() if len(h) else None,
+            "harvest_to": h["harvest_to"].mode().iloc[0].date() if len(h) else None})
 
     f = t.groupby("field_id").apply(one, include_groups=False).reset_index()
     f.to_csv(d / "field_stage.csv", index=False)
