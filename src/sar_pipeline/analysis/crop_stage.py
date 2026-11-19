@@ -38,6 +38,21 @@ def out_dir(aoi: int) -> Path:
     return OUT / f"aoi{aoi}"
 
 
+def load_fields(qc_file):
+    """The QC'd field layer with an id on every polygon: a polygon the reviewer drew has none, so it gets
+    ``<aoi name>_qc001``, ``_qc002`` ... in file order (as ``qc_post`` names them), the AOI name taken from the ids
+    of the other fields. Why (user, 19 Nov 2026): the drawn fields are rice too and belong in the table."""
+    import geopandas as gpd
+
+    f = gpd.read_file(qc_file)
+    ids = f["field_id"].astype("object")
+    missing = ids.isna() | ids.astype(str).isin(["", "None", "nan"])
+    stem = str(ids[~missing].iloc[0]).rsplit("_", 1)[0] if (~missing).any() else Path(qc_file).stem
+    ids[missing] = [f"{stem}_qc{i + 1:03d}" for i in range(int(missing.sum()))]
+    f["field_id"] = ids.astype(str)
+    return f
+
+
 #: Pixel ids of the last :func:`field_pixels` call that are interior to their field (no neighbour outside it).
 _INTERIOR: set = set()
 
@@ -45,14 +60,10 @@ _INTERIOR: set = set()
 def field_pixels(qc_file, gd: dict) -> tuple[dict, pd.DataFrame]:
     """{field_id: flat pixel ids} of pixels whose centre is inside the field (all its pieces), and a table with
     each field's acres (EPSG:32646) and pixel count."""
-    import geopandas as gpd
     from rasterio.features import rasterize
     from rasterio.transform import from_origin
 
-    f = gpd.read_file(qc_file)
-    f = f[f["field_id"].notna()].copy() if "field_id" in f else f
-    f["field_id"] = f["field_id"].astype(str)
-    f = f.to_crs(gd["crs"])
+    f = load_fields(qc_file).to_crs(gd["crs"])
     ids = sorted(f["field_id"].unique())
     code = {k: i + 1 for i, k in enumerate(ids)}
     w, h = int(gd["width"]), int(gd["height"])
@@ -293,8 +304,8 @@ def field_chips(aoi: int, field, pad_px: int = 12, cols: int = 8, folder: str = 
     fid = resolve_field(aoi, field)
     d = out_dir(aoi)
     qc = json.loads((d / "inputs.json").read_text())["qc"]
-    f = gpd.read_file(qc)
-    shape = f[f["field_id"].astype(str) == fid]
+    f = load_fields(qc)
+    shape = f[f["field_id"] == fid]
     t = pd.read_parquet(d / "field_curves.parquet")
     o = t[(t["field_id"] == fid) & (t["source"] == "NDVI")].sort_values("date")
     key = season_config(aoi)["aoi"]["key"]
@@ -589,7 +600,17 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
                 f.loc[m, ["sowing_median", "sowing_q25", "sowing_q75"]] = pd.Timestamp(r.sowing_date).date()
             if r.status:
                 f.loc[m, "status"] = r.status
-            end = age0 if f.loc[m, "status"].iloc[0] == "standing" else np.nan      # a cut field needs its harvest date
+            end = age0
+            if f.loc[m, "status"].iloc[0] == "harvested" and f.loc[m, "harvest_from"].isna().all():
+                # a field the user calls harvested without a date takes the window most rule-harvested fields
+                # share (user, 19 Nov 2026: "jo median harvest date hai wo laga do")
+                h = f[(f["source"] == "rule") & (f["status"] == "harvested")]
+                if len(h):
+                    f.loc[m, "harvest_from"] = h["harvest_from"].mode().iloc[0]
+                    f.loc[m, "harvest_to"] = h["harvest_to"].mode().iloc[0]
+            if f.loc[m, "status"].iloc[0] == "harvested" and f.loc[m, "harvest_from"].notna().all():
+                a_, b_ = pd.Timestamp(f.loc[m, "harvest_from"].iloc[0]), pd.Timestamp(f.loc[m, "harvest_to"].iloc[0])
+                end = (a_ + (b_ - a_) / 2 - t0).days
             if r.sowing_date:
                 f.loc[m, "age_median"] = end - (pd.Timestamp(r.sowing_date) - t0).days
             f.loc[m, "source"] = "user decision"
