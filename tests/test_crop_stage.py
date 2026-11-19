@@ -52,7 +52,8 @@ def test_deliver_adds_columns_and_keeps_geometry(tmp_path, monkeypatch):
     r = gpd.read_file(out)
     assert r.geometry.to_wkb().tolist() == gpd.read_file(qc).geometry.to_wkb().tolist()
     assert list(r["status"]) == ["standing", "harvested"]
-    assert r["crop_age"].iloc[0] == 107 and pd.isna(r["crop_age"].iloc[1])
+    assert r["crop_age"].iloc[0] == 107                     # standing: up to the reference day
+    assert r["crop_age"].iloc[1] == 112                     # harvested: 16 July up to its harvest date, 5 November
     assert str(r["harvest_date"].iloc[1])[:10] == "2026-11-05" and pd.isna(r["field_id"].iloc[1])
 
 

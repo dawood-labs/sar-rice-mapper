@@ -916,12 +916,17 @@ def month_week(day, back_days: int = 0) -> str | None:
     return f"{a:%Y-%m-%d} to {b:%m-%d} ({d:%b} week {k + 1})"
 
 
-def deliver(aoi: int, name: str | None = None) -> Path:
+#: Columns of the QC layer the delivery leaves out (user, 20 Nov 2026).
+DROP_COLUMNS = ("sub_class", "origin", "review")
+
+
+def deliver(aoi: int, name: str | None = None, drop=DROP_COLUMNS) -> Path:
     """The QC'd field layer with the stage columns added, everything else exactly as it was (user, 19 Nov 2026).
 
     * ``status``: ``standing`` or ``harvested``;
     * ``sowing_date``: planting date (every field);
-    * ``crop_age``: days from planting to :data:`AGE_DAY`, standing fields only;
+    * ``crop_age``: days from planting to :data:`AGE_DAY` for a standing field, to its harvest date for a harvested
+      one (user, 20 Nov 2026);
     * ``harvest_date``: harvested fields only, the first clear image that shows the field cut (it was cut between the
       clear image before it and this one);
     * ``sow_week`` / ``harv_week``: the week of the month the event falls in, counted :data:`WEEK_BACK_DAYS` before
@@ -959,12 +964,17 @@ def deliver(aoi: int, name: str | None = None) -> Path:
             r = fs.loc[fid]
             standing = r["status"] == "standing"
             # from the delivered date itself, so date and age always agree (the pixel-age median can differ by a pass)
-            age = (pd.Timestamp(AGE_DAY) - pd.Timestamp(r["sowing_median"])).days if standing else None
             hd = None if standing or pd.isna(r["harvest_to"]) else str(r["harvest_to"])
+            age = (pd.Timestamp(AGE_DAY if standing else hd) - pd.Timestamp(r["sowing_median"])).days \
+                if standing or hd else None
             con.execute(f'UPDATE "{table}" SET status = ?, sowing_date = ?, sow_week = ?, crop_age = ?, harvest_date = ?, '
                         f'harv_week = ? WHERE "{pk}" = ?',
                         (r["status"], str(r["sowing_median"]), month_week(r["sowing_median"], WEEK_BACK_DAYS), age, hd,
                          month_week(hd, WEEK_BACK_DAYS), rid))
+        have = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")')}
+        for c in drop:
+            if c in have:
+                con.execute(f'ALTER TABLE "{table}" DROP COLUMN "{c}"')
         con.commit()
     finally:
         con.close()
