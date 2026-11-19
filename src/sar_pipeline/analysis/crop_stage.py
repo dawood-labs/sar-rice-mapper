@@ -367,7 +367,8 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
     * the search runs from ``wet_from`` (the AOI's own wet-soil radar high before planting, :func:`wet_peak`: the
       dry-season lows before it are dry soil, not planting; no calendar date) to green-up; the water spell = the
       passes there that lie below the half-way level between the lowest ``w`` and the level at green-up; planting =
-      its LAST pass (the fields the user read: flooded through July, planted at the end);
+      the LAST pass of the unbroken low spell that holds the minimum (the fields the user read: flooded through
+      July, planted at the end; a single later dip, e.g. one rainy pass in September, is not part of it);
     * it is transplanting when the dip is deeper than twice the pixel's own pass-to-pass change within a track;
       otherwise direct seeded: sown ``DIRECT_SEEDED_LEAD_DAYS`` before that pass (the start of its rise)."""
     out = {"status": "no data", "method": "", "sowing_day": np.nan, "harvest_from": np.nan, "harvest_to": np.nan}
@@ -429,8 +430,10 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
         return out
     end = float(w[-1])
     lo = float(np.min(seg))
-    low = np.flatnonzero(seg <= (lo + end) / 2)
-    last = first + int(low[-1])
+    k = int(np.argmin(seg))
+    while k + 1 < len(seg) - 1 and seg[k + 1] <= (lo + end) / 2:       # the unbroken low spell that holds the minimum
+        k += 1
+    last = first + k
     depth = min(float(np.max(seg[:int(np.argmin(seg)) + 1])), end) - lo
     if depth > 2 * float(np.nanmean(noise)):
         out.update(method="transplanted (water dip)", sowing_day=float(d[last]))
