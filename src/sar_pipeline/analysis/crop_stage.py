@@ -357,8 +357,10 @@ def s2_clear_dates(aoi: int, folder: str = "data/s2_dates_masks") -> pd.DataFram
 # ------------------------------------------------------------------------------------------------ the stage rule
 #: Age is counted up to this day (user, 19 Nov 2026).
 AGE_DAY = "2026-11-15"
-#: A direct-seeded pixel (no water dip before its rise) was sown this many days before the radar rise (user, 19 Nov).
-DIRECT_SEEDED_LEAD_DAYS = 15
+#: Days a direct-seeded pixel (no clear water dip) is dated before its radar low. 0 since 19 Nov 2026: the user first
+#: gave 15, but he reads the low itself as the planting in those fields too, and without the lead the rule is closer
+#: to his readings (14 of 21 fields within 10 days against 10; "ghatao nahi").
+DIRECT_SEEDED_LEAD_DAYS = 0
 
 
 def wet_peak(days, vh, vv) -> float:
@@ -408,7 +410,7 @@ def pixel_stage(nd_days, nd_vals, tracks, wet_from: float = -np.inf) -> dict:
       the LAST pass of the unbroken low spell that holds the minimum (the fields the user read: flooded through
       July, planted at the end; a single later dip, e.g. one rainy pass in September, is not part of it);
     * it is transplanting when the dip is deeper than twice the pixel's own pass-to-pass change within a track;
-      otherwise direct seeded: sown ``DIRECT_SEEDED_LEAD_DAYS`` before that pass (the start of its rise)."""
+      otherwise direct seeded, dated ``DIRECT_SEEDED_LEAD_DAYS`` before that pass."""
     out = {"status": "no data", "method": "", "sowing_day": np.nan, "harvest_from": np.nan, "harvest_to": np.nan}
     if len(nd_vals) < 6:
         return out
@@ -576,6 +578,22 @@ def stage(aoi: int, qc_file=None, run: str | None = None, age_day: str = AGE_DAY
             "harvest_to": h["harvest_to"].mode().iloc[0].date() if len(h) else None})
 
     f = t.groupby("field_id").apply(one, include_groups=False).reset_index()
+    f["source"] = "rule"
+    ov = d / "overrides.csv"
+    if ov.exists():
+        # the user's own decisions for single fields (``field`` = last digits of the id, ``sowing_date``, ``status``,
+        # ``why``); they win over the rule and are marked, so nobody takes them for a measurement
+        for r in pd.read_csv(ov, dtype=str).fillna("").itertuples():
+            m = f["field_id"].str.endswith(r.field)
+            if r.sowing_date:
+                f.loc[m, ["sowing_median", "sowing_q25", "sowing_q75"]] = pd.Timestamp(r.sowing_date).date()
+            if r.status:
+                f.loc[m, "status"] = r.status
+            end = age0 if f.loc[m, "status"].iloc[0] == "standing" else np.nan      # a cut field needs its harvest date
+            if r.sowing_date:
+                f.loc[m, "age_median"] = end - (pd.Timestamp(r.sowing_date) - t0).days
+            f.loc[m, "source"] = "user decision"
+            f.loc[m, "note"] = r.why
     f.to_csv(d / "field_stage.csv", index=False)
     return d / "field_stage.csv"
 
