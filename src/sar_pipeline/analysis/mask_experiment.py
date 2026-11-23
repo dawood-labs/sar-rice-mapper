@@ -72,6 +72,11 @@ SERIES_END = {"hyb40m1late": "2026-09-29", "relm1late": "2026-09-29"}      # inc
 #: record (``ndvi_5day.series_dates``), so the old series stays exactly as it was until an AOI is switched on purpose.
 VARIANTS["hyb40m1late_20261001"] = dict(VARIANTS["hyb40m1late"])
 SERIES_END["hyb40m1late_20261001"] = "2026-10-02"
+#: The re-scan of 23 Nov 2026 (client: areas that showed no rice in October under cloud, scanned again on everything
+#: available now): the same mask and settings, the series run on to the 20-22 Nov images. A new variant for the same
+#: reason as above: every other AOI keeps reading its own series.
+VARIANTS["hyb40m1late_20261122"] = dict(VARIANTS["hyb40m1late"])
+SERIES_END["hyb40m1late_20261122"] = "2026-11-23"
 OUT = f"{BASE}/report/mask_experiment"
 
 

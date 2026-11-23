@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import multiprocessing as mp
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -45,7 +46,10 @@ STATE = Path("processed/_batch/s2_2026/aoi_batch")
 #: The inputs of this delivery round (the same for every AOI, so all maps share one map date).
 SEASON_END = "2026-10-05"
 S2_NEW = ("2026-10-01", "2026-10-02")
-SERIES_VARIANT = "hyb40m1late_20261001"
+#: The optical series the AOIs are prepared on. ``SAR_SERIES_VARIANT`` in the environment names another one for a
+#: single call (the re-scan of 23 Nov 2026 runs a few AOIs on a series that ends in November); the worker processes
+#: inherit it. The default never changes, so a plain call still builds the delivered sets' series.
+SERIES_VARIANT = os.environ.get("SAR_SERIES_VARIANT", "hyb40m1late_20261001")
 #: Rule sets compared on every new AOI: every AOI with its own reviewed set, the defaults (160), the junior's aoi63 set
 #: and the junior's universal new-AOI switches (``curve_rules.NAMED_SETS``; user, 6 Oct).
 CANDIDATE_SETS = (160, 28, 20, 33, 72, 116, 39, 118, 83, 13, 125, 63, "universal")

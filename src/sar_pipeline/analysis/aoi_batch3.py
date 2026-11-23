@@ -296,6 +296,28 @@ def extend_direct(aois, end: str | None = None) -> list[dict]:
     return out
 
 
+def rescan_inputs(aois) -> list[str]:
+    """Points each AOI at its newest stacked radar run and prepares its inputs again (pin, series, steps), for a
+    re-scan on newer imagery. The optical series comes from ``SAR_SERIES_VARIANT`` (see ``aoi_batch.SERIES_VARIANT``);
+    the earlier marks ``inputs`` and ``choose`` are dropped so that every step runs again on the new data. Copy the
+    AOI's earlier outputs away first: the maps of the earlier date are written over."""
+    from .. import config as cm
+    from . import aoi_batch as ab
+
+    for a in aois:
+        cfg = cm.load_config(f"config/aoi{a}_{SEASON}.yaml")
+        runs = [r for r in sorted(Path(cm.analysis_run_dir(cfg)).parent.glob("v*")) if (r / "stack").exists()]
+        st = ab.status(a)
+        st["rescan"] = {"from": (st.get("imagery") or {}).get("result", {}).get("run"), "run": runs[-1].name,
+                        "series": ab.SERIES_VARIANT, "at": str(pd.Timestamp.now().floor("s"))}
+        for k in ("inputs", "choose"):
+            st.pop(k, None)
+        st["run"] = runs[-1].name
+        st["imagery"] = {"done": True, "result": {"run": runs[-1].name}, "at": st["rescan"]["at"]}
+        ab._status_path(a).write_text(json.dumps(st, indent=1, default=str))
+    return inputs(aois)
+
+
 def s2(aois=None) -> None:
     from . import aoi_batch2 as b2
 
@@ -457,7 +479,7 @@ def main(argv=None) -> int:
     p.add_argument("--aois", type=int, nargs="*", help="only these internal AOI ids (e.g. 1246)")
     p.add_argument("--end", help="radar-to-map-date: season end (exclusive), e.g. tomorrow for every pass to today")
     p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs", "map",
-                                      "delineation", "radar-to-map-date", "fields", "deliver", "boundaries", "extend-direct"])
+                                      "delineation", "radar-to-map-date", "fields", "deliver", "boundaries", "extend-direct", "rescan-inputs"])
     a = p.parse_args(argv)
     if a.step == "prepare":
         print(prepare().to_string(index=False))
@@ -471,6 +493,8 @@ def main(argv=None) -> int:
         print(json.dumps(radar(), indent=1))
     elif a.step == "s2":
         s2()
+    elif a.step == "rescan-inputs":
+        print("\n".join(rescan_inputs(a.aois)))
     elif a.step == "extend-direct":
         extend_direct(a.aois, a.end)
     elif a.step == "radar-to-map-date":
@@ -480,15 +504,15 @@ def main(argv=None) -> int:
     elif a.step == "deliver":
         print(json.dumps(deliver(), indent=1, default=str))
     elif a.step == "fields":
-        for r in fields():
+        for r in fields(a.aois):
             print(json.dumps(r, default=str))
     elif a.step == "delineation":
         print(delineation())
     elif a.step == "map":
-        for r in pixel_map():
+        for r in pixel_map(a.aois):
             print(json.dumps(r, default=str))
     else:
-        print("\n".join(inputs()))
+        print("\n".join(inputs(a.aois)))
     return 0
 
 
