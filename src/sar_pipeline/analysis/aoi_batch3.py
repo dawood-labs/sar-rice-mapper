@@ -255,6 +255,47 @@ def radar_to_map_date(aois=None, end: str = MAP_SEASON_END) -> dict:
     return radar(aois)
 
 
+def extend_direct(aois, end: str | None = None) -> list[dict]:
+    """Imagery of some AOIs brought up to ``end`` (exclusive; default tomorrow) straight from Earth Engine to the pod
+    (``direct_fetch``), without touching the pinned run, the AOI's status or any delivered map.
+
+    Why (client, 23 Nov 2026): areas that showed no rice in October because of cloud are scanned again on everything
+    available today. Per AOI: the season end moves in its config, the pass audit is redone (the export plan takes its
+    passes from the latest audit), a NEW immutable radar run is planned and fetched (all passes again: the
+    multi-temporal speckle filter mixes each pass with its neighbours, so old chunks cannot be extended), stacked, and
+    the Sentinel-2 dates missing on the pod are fetched (a date already there is kept, never fetched twice).
+    The old run stays pinned until the processing step decides to switch."""
+    import re as _re
+
+    from .. import config as cm
+    from .. import direct_fetch as df
+
+    end = end or season_end()
+    out = []
+    for a in aois:
+        p = Path(f"config/aoi{a}_{SEASON}.yaml")
+        log = LOGS / f"aoi{a}_extend.log"
+        p.write_text(_re.sub(r"(season: \{[^}]*end: ')[0-9-]+(')", rf"\g<1>{end}\g<2>", p.read_text(), count=1))
+        _sh(PY + ["sar_pipeline", "--config", str(p), "audit"], log)
+        cfg = cm.load_config(str(p))
+        runs = sorted((Path(cm.analysis_run_dir(cfg)).parent).glob("v*"))
+        # an unfinished run of an earlier call (no stack yet) is completed, not doubled
+        run = runs[-1].name if runs and not (runs[-1] / "stack").exists() else cm.new_run(cfg).name
+        # the plan (no --yes) ends with exit code 2 by design: "nothing was started"
+        with open(log, "a") as fh:
+            rc = subprocess.run(PY + ["sar_pipeline", "--config", str(p), "export", "--run", run, "--all"], stdout=fh,
+                                stderr=subprocess.STDOUT).returncode
+        if rc not in (0, 2):
+            raise RuntimeError(f"aoi{a}: planning the run failed (exit {rc}); see {log}")
+        r1 = df.s1_run(str(p), run)
+        _sh(PY + ["sar_pipeline", "--config", str(p), "stack", "--run", run], log)
+        r2 = df.s2_dates(str(p), S2_START, end)
+        states = pd.Series([x["state"] for x in r2]).value_counts()
+        out.append({"aoi": a, "run": run, "end": end, "radar_chunks": len(r1["chunks"]), "s2": states.to_dict()})
+        print(json.dumps(out[-1], default=str), flush=True)
+    return out
+
+
 def s2(aois=None) -> None:
     from . import aoi_batch2 as b2
 
@@ -416,7 +457,7 @@ def main(argv=None) -> int:
     p.add_argument("--aois", type=int, nargs="*", help="only these internal AOI ids (e.g. 1246)")
     p.add_argument("--end", help="radar-to-map-date: season end (exclusive), e.g. tomorrow for every pass to today")
     p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs", "map",
-                                      "delineation", "radar-to-map-date", "fields", "deliver", "boundaries"])
+                                      "delineation", "radar-to-map-date", "fields", "deliver", "boundaries", "extend-direct"])
     a = p.parse_args(argv)
     if a.step == "prepare":
         print(prepare().to_string(index=False))
@@ -430,6 +471,8 @@ def main(argv=None) -> int:
         print(json.dumps(radar(), indent=1))
     elif a.step == "s2":
         s2()
+    elif a.step == "extend-direct":
+        extend_direct(a.aois, a.end)
     elif a.step == "radar-to-map-date":
         print(json.dumps(radar_to_map_date(a.aois, a.end or MAP_SEASON_END), indent=1))
     elif a.step == "boundaries":
