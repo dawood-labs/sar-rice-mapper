@@ -31,6 +31,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -39,7 +40,9 @@ import pandas as pd
 
 FRESH = "processed/_batch/s2_2026/rice_fresh"
 #: Delivery name (folder locally and in the bucket): the map date of this round.
-DELIVERY = "rice_map_2026-10-05"
+#: The delivery folder (local and in the bucket). ``SAR_DELIVERY_NAME`` in the environment names another one for a
+#: single call: a re-scan on newer imagery (23 Nov 2026) is packaged beside the October delivery, never over it.
+DELIVERY = os.environ.get("SAR_DELIVERY_NAME", "rice_map_2026-10-05")
 OUT_ROOT = "processed/_batch/s2_2026"
 SLIVER_ACRES = 0.15
 #: Map classes counted as rice (user, 5 Oct: agreed; harvested is non-rice): standing direct seeded,
@@ -366,6 +369,12 @@ def step_upload(aoi: int, key: str | None = None, workers: int = 16, **kw) -> di
         if name in have:
             return 0
         src = bucket.blob(f"{base}/s2_dates_masks/aoi{aoi}/{n}")
+        local_s2 = Path("data/s2_dates_masks") / f"aoi{aoi}" / n
+        if not src.exists() and local_s2.exists():
+            # a date fetched straight to the pod (direct fetch, from 18 Nov 2026) is not in the bucket's image
+            # folder: it goes into this delivery's own s2/ from the pod
+            bucket.blob(name).upload_from_filename(str(local_s2), timeout=600)
+            return 1
         bucket.copy_blob(src, bucket, name)
         return 1
 

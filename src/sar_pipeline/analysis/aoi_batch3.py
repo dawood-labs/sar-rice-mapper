@@ -318,6 +318,37 @@ def rescan_inputs(aois) -> list[str]:
     return inputs(aois)
 
 
+def _rescan_deliver_one(aoi: int) -> tuple[int, dict | str]:
+    from . import curve_rules as cr
+    from . import rice_map_delivery as rd
+
+    try:
+        cr.lock(aoi, rd.SLIVER_ACRES)                  # the new map replaces the frozen copy (the old one is backed up)
+        st = rd.run_one(aoi)
+        return aoi, {k: (v.get("done"), str(v.get("result"))[:300]) for k, v in st.items()}
+    except Exception as e:                            # one AOI's failure does not stop the others
+        return aoi, f"FAILED {type(e).__name__}: {e}"
+
+
+def rescan_deliver(aois, backup: str) -> dict:
+    """The QC package of a re-scan: the AOI's new map is frozen (``curve_rules.lock``) and packaged like the first
+    delivery (package, too-young, trees cut, upload) into the folder named by ``SAR_DELIVERY_NAME``, so the earlier
+    delivery's folder stays as it is. ``backup``: the folder that holds a copy of each AOI's earlier frozen map; the
+    step refuses to run for an AOI without one, because locking writes over the frozen copy."""
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing as mp
+
+    from . import rice_map_delivery as rd
+
+    if rd.DELIVERY == "rice_map_2026-10-05":
+        raise RuntimeError("set SAR_DELIVERY_NAME: a re-scan must not be packaged into the first delivery's folder")
+    missing = [a for a in aois if not (Path(backup) / f"aoi{a}" / "MANIFEST.json").exists()]
+    if missing:
+        raise RuntimeError(f"no backup of the earlier frozen map for {missing} under {backup}")
+    with ProcessPoolExecutor(min(len(aois), 8), mp_context=mp.get_context("spawn")) as ex:
+        return dict(ex.map(_rescan_deliver_one, aois))
+
+
 def s2(aois=None) -> None:
     from . import aoi_batch2 as b2
 
@@ -479,7 +510,8 @@ def main(argv=None) -> int:
     p.add_argument("--aois", type=int, nargs="*", help="only these internal AOI ids (e.g. 1246)")
     p.add_argument("--end", help="radar-to-map-date: season end (exclusive), e.g. tomorrow for every pass to today")
     p.add_argument("step", choices=["prepare", "upload", "split", "setup", "radar", "s2", "inputs", "map",
-                                      "delineation", "radar-to-map-date", "fields", "deliver", "boundaries", "extend-direct", "rescan-inputs"])
+                                      "delineation", "radar-to-map-date", "fields", "deliver", "boundaries", "extend-direct", "rescan-inputs", "rescan-deliver"])
+    p.add_argument("--backup", help="rescan-deliver: folder with the copies of the earlier frozen maps")
     a = p.parse_args(argv)
     if a.step == "prepare":
         print(prepare().to_string(index=False))
@@ -493,6 +525,8 @@ def main(argv=None) -> int:
         print(json.dumps(radar(), indent=1))
     elif a.step == "s2":
         s2()
+    elif a.step == "rescan-deliver":
+        print(json.dumps(rescan_deliver(a.aois, a.backup), indent=1, default=str))
     elif a.step == "rescan-inputs":
         print("\n".join(rescan_inputs(a.aois)))
     elif a.step == "extend-direct":
