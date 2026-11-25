@@ -273,13 +273,153 @@ def scale(country: str, out: Path = OUT) -> Path:
     plt.close(fig)
     return p
 
+STAGE = Path("processed/_batch/s2_2026/crop_stage")
+STAGE_DAY = "2026-11-15"
+
+
+def _stage_layer(aoi: int) -> Path:
+    """The newest delivered crop-stage field layer of the area (highest version)."""
+    def ver(f: Path) -> int:
+        tail = f.stem.rsplit("_v", 1)
+        return int(tail[1]) if len(tail) == 2 and tail[1].isdigit() else 1
+
+    return max((STAGE / f"aoi{aoi}" / "delivery").glob("*_crop_stage_*.gpkg"), key=ver)
+
+
+def stage_map(aoi: int, country: str, out: Path = OUT, day: str = STAGE_DAY, layer: Path | None = None,
+              image: Path | None = None) -> Path:
+    """Every field outlined and tinted by its status on the reference day (standing / harvested), over that day's clear
+    Sentinel-2 image (true colour, dimmed). Why: shows the crop-stage result at a glance. No coordinates are drawn."""
+    import geopandas as gpd
+    import rasterio
+    from matplotlib.patches import Patch
+
+    from .optical_export import band_index
+
+    plt = _style()
+    layer = layer or _stage_layer(aoi)
+    image = image or next(Path("data/s2_dates_masks").glob(f"aoi{aoi}/*S2_{day}.tif"))
+    with rasterio.open(image) as ds:
+        rgb = np.dstack([ds.read(band_index(ds, b)).astype("float32") for b in ("B4", "B3", "B2")])
+        bounds, crs = ds.bounds, ds.crs
+    lo, hi = np.nanpercentile(rgb[rgb > 0], (2, 98))
+    rgb = np.clip((rgb - lo) / (hi - lo), 0, 1) ** 0.85 * 0.7          # dimmed so the outlines read
+    fields = gpd.read_file(layer).to_crs(crs)
+    xa, ya, xb, yb = fields.total_bounds
+    m = 0.06 * max(xb - xa, yb - ya)
+    xa, ya, xb, yb = xa - m, ya - m, xb + m, yb + m
+    x0, y0 = xa, ya                                                    # AOI-relative metres, no coordinates
+    ext = (bounds.left - x0, bounds.right - x0, bounds.bottom - y0, bounds.top - y0)
+    w, h = xb - xa, yb - ya
+    fw, mh, hd = 10.0, 10.0 * h / w, 1.1
+    fig = plt.figure(figsize=(fw, mh + hd))
+    ax = fig.add_axes([0, 0, 1, mh / (mh + hd)])
+    ax.imshow(rgb, extent=ext, interpolation="bilinear")
+    col = {"standing": GREEN, "harvested": ORANGE}
+    for st, c in col.items():
+        fields[fields["status"] == st].translate(-x0, -y0).plot(ax=ax, facecolor=c + "55", edgecolor=c, linewidth=0.9)
+    ax.set_xlim(0, w), ax.set_ylim(0, h)
+    ax.set_axis_off()
+    ac = fields.assign(a=fields["area_ac"]).groupby("status")["a"].agg(["size", "sum"])
+    hand = [Patch(facecolor=col[k] + "55", edgecolor=col[k],
+                  label=f"{k}: {int(ac.loc[k, 'size']):,} fields, {ac.loc[k, 'sum']:,.0f} acres")
+            for k in col if k in ac.index]
+    ax.legend(handles=hand, loc="lower right", frameon=True, facecolor=BG, edgecolor=GRID, labelcolor=FG, fontsize=11)
+    km = max(0.2, round(w / 5000 * 10) / 10)
+    scale_bar(ax, km * 1000, f"{km:g} km")
+    north_arrow(ax, y=0.84)
+    fig.text(0.03, 1 - 0.38 / (mh + hd), "Standing or harvested, field by field", fontsize=22, weight="bold",
+             va="center", color=FG)
+    fig.text(0.03, 1 - 0.82 / (mh + hd), f"Pilot area, {country}  ·  reference day mid-November 2026", fontsize=13,
+             va="center", color=MUTED)
+    p = save_jpg(fig, out / "crop_stage_map.jpg")
+    plt.close(fig)
+    return p
+
+
+def stage_calendar(aoi: int, out: Path = OUT, numbers: dict | None = None) -> Path:
+    """One field from planting to harvest (radar and greenness on two stacked panels, never two scales on one axis) and
+    the fields per planting week split by status. ``numbers`` = :func:`outreach_figures.stage_numbers` output."""
+    import matplotlib.dates as mdates
+
+    if numbers is None:
+        from . import outreach_figures as of
+
+        numbers = of.stage_numbers(aoi)
+    n = numbers
+    plt = _style()
+    e = n["example"]
+    fig = plt.figure(figsize=(16, 8.6))
+    fig.text(0.04, 0.94, "From planting to harvest, read from space", fontsize=26, weight="bold", va="center")
+    heads = [f"{n['fields']} fields"]
+    if "checked" in n:
+        heads.append(f"{n['all_right']} of {n['checked']} right in the ground check")
+    heads.append(f"{n['age_harvested']:.0f} days median planting to harvest")
+    fig.text(0.04, 0.875, "   ·   ".join(heads), fontsize=15, color=GREEN, weight="bold", va="center")
+    x0 = pd.Timestamp(e["sowing"]) - pd.Timedelta(days=45)
+    x1 = pd.Timestamp(e["green_dates"].max()) + pd.Timedelta(days=4)
+    fig.text(0.04, 0.80, "One real field", fontsize=15, color=MUTED)
+    ax1 = fig.add_axes([0.06, 0.45, 0.50, 0.30])
+    ax2 = fig.add_axes([0.06, 0.09, 0.50, 0.30], sharex=ax1)
+    for ax, d, v, c, lab in ((ax1, e["radar_dates"], e["radar"], BLUE, "Radar echo (dB), sees water and plants through cloud"),
+                             (ax2, e["green_dates"], e["green"], GREEN, "Greenness (0-1), sees the canopy on clear days")):
+        msk = (d >= np.datetime64(x0)) & (d <= np.datetime64(x1))
+        ax.plot(d[msk], v[msk], color=c, lw=2.2, marker="o", ms=5, mec=BG)
+        ax.grid(axis="y", color=GRID, lw=0.8)
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+        ax.axvline(e["sowing"], color=FG, lw=1.2, ls=(0, (4, 3)))
+        ax.axvspan(e["harvest_from"], e["harvest_to"], color=ORANGE, alpha=0.28, lw=0)
+        ax.set_title(lab, loc="left", fontsize=12, color=FG, pad=6)
+    ax1.set_xlim(x0, x1)
+    ax1.xaxis.set_major_locator(mdates.MonthLocator())
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
+    ax1.tick_params(labelbottom=False)
+    ax2.tick_params(labelsize=11)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
+    lo, hi = ax1.get_ylim()
+    ax1.set_ylim(lo, hi + (hi - lo) * 0.25)
+    ax1.text(e["sowing"], ax1.get_ylim()[1], " field flooded:\n planting", va="top", fontsize=11.5)
+    lo, hi = ax2.get_ylim()
+    ax2.set_ylim(lo, hi + (hi - lo) * 0.25)
+    ax2.text(e["harvest_from"], ax2.get_ylim()[1], "harvest ", va="top", ha="right", fontsize=11.5, color=ORANGE,
+             weight="bold")
+    ax3 = fig.add_axes([0.66, 0.09, 0.31, 0.66])
+    labs = [w for w, _s, _h in n["sow_weeks"]]
+    st = np.array([s for _w, s, _h in n["sow_weeks"]])
+    hv = np.array([h for _w, _s, h in n["sow_weeks"]])
+    xs = np.arange(len(labs))
+    ax3.bar(xs, st, color=GREEN, width=0.62, label="standing")
+    ax3.bar(xs, hv, bottom=st, color=ORANGE, width=0.62, label="harvested")
+    for x, a, b in zip(xs, st, hv):
+        ax3.text(x, a + b + (st + hv).max() * 0.015, str(a + b), ha="center", fontsize=12, weight="bold")
+    ax3.set_xticks(xs, [w.replace(" week ", "\nweek ") for w in labs], fontsize=10)
+    ax3.set_ylim(0, (st + hv).max() * 1.2)
+    ax3.grid(axis="y", color=GRID, lw=0.8)
+    ax3.set_axisbelow(True)
+    for s in ("top", "right"):
+        ax3.spines[s].set_visible(False)
+    ax3.legend(frameon=False, fontsize=12, loc="upper left", labelcolor=FG)
+    fig.text(0.66, 0.80, "Fields by planting week", fontsize=15, color=MUTED)
+    p = save_jpg(fig, out / "crop_stage_calendar.jpg")
+    plt.close(fig)
+    return p
+
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--aoi", type=int, default=160)
+    p.add_argument("--only", nargs="+", choices=["stage_map", "stage_calendar"],
+                   help="make only these crop-stage figures (default: the four original figures)")
+    p.add_argument("--stage-aoi", type=int, default=1246, help="area of the crop-stage figures")
     p.add_argument("--country", required=True, help="the country name shown on the images (and its outline)")
     a = p.parse_args(argv)
-    for f in (hero_map(a.aoi, a.country), curves(a.country), accuracy(), scale(a.country)):
+    if a.only:
+        figs = {"stage_map": lambda: stage_map(a.stage_aoi, a.country), "stage_calendar": lambda: stage_calendar(a.stage_aoi)}
+        made = [figs[k]() for k in a.only]
+    else:
+        made = [hero_map(a.aoi, a.country), curves(a.country), accuracy(), scale(a.country)]
+    for f in made:
         print(f, f"{f.stat().st_size / 1024:.0f} KB")
     return 0
 
